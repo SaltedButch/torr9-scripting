@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torr9 Chat - filtre users + stats box réglable live
 // @namespace    http://tampermonkey.net/
-// @version      2.15
+// @version      2.16
 // @description  Cache ou met en avant des utilisateurs sur Torr9 avec compteur, debug, couleurs, mentions et reglages live
 // @match        https://torr9.net/*
 // @grant        none
@@ -19,6 +19,7 @@
     const STORAGE_KEY_HOME_COLLAPSED = 'tm_torr9_home_chat_collapsed';
     const STORAGE_KEY_HIGHLIGHTED_USERS = 'tm_highlighted_shout_users_torr9';
     const STORAGE_KEY_MENTION_SETTINGS = 'tm_torr9_mention_highlight_settings';
+    const STORAGE_KEY_CHAT_FONT_SCALE = 'tm_torr9_chat_font_scale';
     const PANEL_ID = 'tm-torr9-chat-stats';
     const MODAL_ID = 'tm-torr9-chat-modal';
     const OVERLAY_ID = 'tm-torr9-chat-overlay';
@@ -28,6 +29,9 @@
     const DEFAULT_MENTION_COLOR = '#22c55e';
     const DEFAULT_MENTION_BLINK_SECONDS = 6;
     const DEFAULT_MENTION_KEEP_HIGHLIGHT = true;
+    const DEFAULT_CHAT_FONT_SCALE = 1;
+    const MIN_CHAT_FONT_SCALE = 0.85;
+    const MAX_CHAT_FONT_SCALE = 1.7;
     const MENTION_STYLE_ID = 'tm-torr9-mention-style';
 
     const DEFAULT_POSITION = {
@@ -46,6 +50,7 @@
     let statsUpdateFrame = null;
     let toastHideTimer = null;
     let mentionSettings = loadMentionSettings();
+    let chatFontScale = loadChatFontScale();
 
     const hiddenUsers = loadHiddenUsers();
     const highlightedUsers = loadHighlightedUsers();
@@ -194,6 +199,43 @@
         localStorage.setItem(STORAGE_KEY_MENTION_SETTINGS, JSON.stringify(mentionSettings));
     }
 
+    function clampChatFontScale(value) {
+        return clamp(value, MIN_CHAT_FONT_SCALE, MAX_CHAT_FONT_SCALE);
+    }
+
+    function loadChatFontScale() {
+        try {
+            const rawValue = localStorage.getItem(STORAGE_KEY_CHAT_FONT_SCALE);
+            if (!rawValue) return DEFAULT_CHAT_FONT_SCALE;
+
+            const parsed = Number(String(rawValue).trim().replace(',', '.'));
+            if (Number.isNaN(parsed)) return DEFAULT_CHAT_FONT_SCALE;
+            return clampChatFontScale(parsed);
+        } catch (e) {
+            return DEFAULT_CHAT_FONT_SCALE;
+        }
+    }
+
+    function saveChatFontScale(value) {
+        chatFontScale = clampChatFontScale(value);
+        localStorage.setItem(STORAGE_KEY_CHAT_FONT_SCALE, String(chatFontScale));
+    }
+
+    function formatChatFontScalePercent(value = chatFontScale) {
+        return String(Math.round(clampChatFontScale(value) * 100));
+    }
+
+    function parseChatFontScalePercentInput(value, fallback = DEFAULT_CHAT_FONT_SCALE) {
+        const num = Number(String(value).trim().replace(',', '.'));
+        if (Number.isNaN(num)) return clampChatFontScale(fallback);
+        return clampChatFontScale(num / 100);
+    }
+
+    function scalePixels(basePx, scale = chatFontScale) {
+        const scaled = Math.round(basePx * clampChatFontScale(scale) * 10) / 10;
+        return `${scaled}px`;
+    }
+
     function loadPosition() {
         try {
             const saved = JSON.parse(localStorage.getItem(getPositionStorageKey()) || 'null');
@@ -314,6 +356,71 @@
         const chatContainer = container || getHomepageChatContainer();
         if (!(chatContainer instanceof HTMLElement)) return null;
         return chatContainer.querySelector('.custom-scrollbar');
+    }
+
+    function applyMessageTypography(messageEl, scale = chatFontScale) {
+        if (!(messageEl instanceof HTMLElement)) return;
+
+        const safeScale = clampChatFontScale(scale);
+
+        if (isChatPage()) {
+            const userButton = messageEl.querySelector(':scope > .flex-1.min-w-0 > .flex.items-baseline button[type="button"]');
+            const textBlock = messageEl.querySelector(':scope > .flex-1.min-w-0 > .text-sm.text-gray-200.break-words');
+            const metaSpans = messageEl.querySelectorAll(':scope > .flex-1.min-w-0 > .flex.items-baseline span');
+
+            if (userButton instanceof HTMLElement) {
+                userButton.style.fontSize = scalePixels(14, safeScale);
+                userButton.style.lineHeight = '1.35';
+            }
+
+            metaSpans.forEach((span) => {
+                if (span instanceof HTMLElement) {
+                    span.style.fontSize = scalePixels(12, safeScale);
+                    span.style.lineHeight = '1.35';
+                }
+            });
+
+            if (textBlock instanceof HTMLElement) {
+                textBlock.style.fontSize = scalePixels(14, safeScale);
+                textBlock.style.lineHeight = safeScale >= 1.2 ? '1.6' : '1.5';
+            }
+
+            return;
+        }
+
+        if (isHomePage()) {
+            const userSpan = messageEl.querySelector('span.text-xs.font-bold');
+            const textBlock = messageEl.querySelector(':scope > .flex-1.min-w-0 > p.break-words.leading-snug');
+            const metaSpans = messageEl.querySelectorAll(':scope > .flex-1.min-w-0 > .flex.items-center span:not(.text-xs.font-bold)');
+
+            if (userSpan instanceof HTMLElement) {
+                userSpan.style.fontSize = scalePixels(12, safeScale);
+                userSpan.style.lineHeight = '1.35';
+            }
+
+            metaSpans.forEach((span) => {
+                if (span instanceof HTMLElement) {
+                    span.style.fontSize = scalePixels(11, safeScale);
+                    span.style.lineHeight = '1.35';
+                }
+            });
+
+            if (textBlock instanceof HTMLElement) {
+                textBlock.style.fontSize = scalePixels(13, safeScale);
+                textBlock.style.lineHeight = safeScale >= 1.2 ? '1.6' : '1.5';
+            }
+        }
+    }
+
+    function applyChatFontScale(scale = chatFontScale) {
+        const root = getActiveChatRoot();
+        if (!root) return;
+
+        root.querySelectorAll('div').forEach((el) => {
+            if (isChatMessage(el)) {
+                applyMessageTypography(el, scale);
+            }
+        });
     }
 
     function getUsernameFromMessage(messageEl) {
@@ -873,6 +980,8 @@
     }
 
     function hideOrShowMessage(messageEl) {
+        applyMessageTypography(messageEl);
+
         const username = getLogicalUsername(messageEl);
 
         if (!username) {
@@ -1026,6 +1135,7 @@
         if (modal) modal.remove();
         if (overlay) overlay.remove();
         modalOpen = false;
+        applyChatFontScale(loadChatFontScale());
         applyHomepageChatCollapsedState();
         applyBoxPosition(loadPosition());
         updateStatsBox();
@@ -1341,6 +1451,82 @@
                 background:rgba(255,255,255,0.03);
                 border:1px solid rgba(255,255,255,0.06);
             ">
+                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Accessibilité</div>
+
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+                    <div style="font-size:12px;color:#c4c4c8;">
+                        Taille de police shoutbox
+                    </div>
+                    <div id="tm-font-size-value" style="
+                        min-width:52px;
+                        text-align:right;
+                        font-size:12px;
+                        color:#f4f4f5;
+                        font-weight:700;
+                    ">${formatChatFontScalePercent()}%</div>
+                </div>
+
+                <input id="tm-font-size-range" type="range" min="${MIN_CHAT_FONT_SCALE * 100}" max="${MAX_CHAT_FONT_SCALE * 100}" step="5" value="${formatChatFontScalePercent()}"
+                    style="
+                        width:100%;
+                        margin-top:12px;
+                        accent-color:#38bdf8;
+                        cursor:pointer;
+                    ">
+
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
+                    <button id="tm-font-size-decrease" style="
+                        border:none;
+                        background:#3f3f46;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">A-</button>
+
+                    <button id="tm-font-size-increase" style="
+                        border:none;
+                        background:#0f766e;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">A+</button>
+
+                    <button id="tm-font-size-save" style="
+                        border:none;
+                        background:#2563eb;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">Enregistrer</button>
+
+                    <button id="tm-font-size-reset" style="
+                        border:none;
+                        background:#3f3f46;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">Reset police</button>
+                </div>
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                    Agrandit ou réduit les pseudos et les messages dans la shoutbox. L’aperçu est immédiat sur la vue courante.
+                </div>
+            </div>
+
+            <div style="
+                padding:12px;
+                border-radius:14px;
+                background:rgba(255,255,255,0.03);
+                border:1px solid rgba(255,255,255,0.06);
+            ">
                 <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Position de la stats box (${currentPageLabel})</div>
 
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
@@ -1449,6 +1635,12 @@
         const mentionBlinkInput = modal.querySelector('#tm-mention-blink-input');
         const mentionKeepHighlightToggle = modal.querySelector('#tm-mention-keep-highlight-toggle');
         const mentionSaveBtn = modal.querySelector('#tm-mention-save');
+        const fontSizeRange = modal.querySelector('#tm-font-size-range');
+        const fontSizeValue = modal.querySelector('#tm-font-size-value');
+        const fontSizeDecreaseBtn = modal.querySelector('#tm-font-size-decrease');
+        const fontSizeIncreaseBtn = modal.querySelector('#tm-font-size-increase');
+        const fontSizeSaveBtn = modal.querySelector('#tm-font-size-save');
+        const fontSizeResetBtn = modal.querySelector('#tm-font-size-reset');
         const rightInput = modal.querySelector('#tm-right-input');
         const bottomInput = modal.querySelector('#tm-bottom-input');
         const savePositionBtn = modal.querySelector('#tm-save-position');
@@ -1548,6 +1740,19 @@
             applyBoxPosition(preview);
         }
 
+        function syncFontSizeValueLabel() {
+            if (fontSizeValue && fontSizeRange) {
+                fontSizeValue.textContent = `${fontSizeRange.value}%`;
+            }
+        }
+
+        function setPreviewFontScale(scale) {
+            if (!fontSizeRange) return;
+            fontSizeRange.value = formatChatFontScalePercent(scale);
+            syncFontSizeValueLabel();
+            applyChatFontScale(scale);
+        }
+
         closeBtn.addEventListener('click', closeSettingsModal);
         overlay.addEventListener('click', closeSettingsModal);
 
@@ -1620,6 +1825,36 @@
             }
         });
 
+        fontSizeRange?.addEventListener('input', () => {
+            syncFontSizeValueLabel();
+            applyChatFontScale(parseChatFontScalePercentInput(fontSizeRange.value, chatFontScale));
+        });
+
+        fontSizeDecreaseBtn?.addEventListener('click', () => {
+            const nextScale = parseChatFontScalePercentInput((Number(fontSizeRange?.value || formatChatFontScalePercent()) - 5), chatFontScale);
+            setPreviewFontScale(nextScale);
+        });
+
+        fontSizeIncreaseBtn?.addEventListener('click', () => {
+            const nextScale = parseChatFontScalePercentInput((Number(fontSizeRange?.value || formatChatFontScalePercent()) + 5), chatFontScale);
+            setPreviewFontScale(nextScale);
+        });
+
+        fontSizeSaveBtn?.addEventListener('click', () => {
+            const nextScale = parseChatFontScalePercentInput(fontSizeRange?.value || formatChatFontScalePercent(), chatFontScale);
+            saveChatFontScale(nextScale);
+            applyChatFontScale();
+            setPreviewFontScale(chatFontScale);
+            setFeedback(`Taille de police enregistrée : ${formatChatFontScalePercent()}%.`);
+        });
+
+        fontSizeResetBtn?.addEventListener('click', () => {
+            saveChatFontScale(DEFAULT_CHAT_FONT_SCALE);
+            applyChatFontScale();
+            setPreviewFontScale(chatFontScale);
+            setFeedback('Taille de police réinitialisée.');
+        });
+
         rightInput.addEventListener('input', previewPosition);
         bottomInput.addEventListener('input', previewPosition);
 
@@ -1670,6 +1905,7 @@
         refreshHiddenUsersList();
         refreshHighlightedUsersList();
         userInput.focus();
+        syncFontSizeValueLabel();
         previewPosition();
     }
 
