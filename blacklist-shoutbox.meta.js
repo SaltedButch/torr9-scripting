@@ -1,8 +1,9 @@
 // ==UserScript==
-// @name         Torr9 Chat - filtre users + stats box réglable live
+// @name         Torr9 Chat - Shoutbox 2.0
 // @namespace    https://github.com/SaltedButch/torr9-scripting
-// @version      2.15
-// @description  Cache ou met en avant des utilisateurs sur Torr9 avec compteur, debug, couleurs, mentions et reglages live
+// @version      2.17
+// @description  Blacklist, mise en avant, mentions, stats et réglages live pour la shoutbox Torr9
+// @author       Butchered
 // @match        https://torr9.net/*
 // @grant        none
 // @homepageURL  https://github.com/SaltedButch/torr9-scripting/blob/main/src/userscripts/blacklist-shoutbox.user.js

@@ -5,8 +5,8 @@
   "scripts": [
     {
       "id": "blacklist-shoutbox",
-      "name": "Torr9 Chat - filtre users + stats box réglable live",
-      "version": "2.15",
+      "name": "Torr9 Chat - Shoutbox 2.0",
+      "version": "2.17",
       "source": "src/userscripts/blacklist-shoutbox.user.js",
       "download_url": "https://raw.githubusercontent.com/SaltedButch/torr9-scripting/userscripts/blacklist-shoutbox.user.js",
       "update_url": "https://raw.githubusercontent.com/SaltedButch/torr9-scripting/userscripts/blacklist-shoutbox.meta.js"
