@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torr9 Chat - Shoutbox 2.0
 // @namespace    https://github.com/SaltedButch/torr9-scripting
-// @version      2.18
+// @version      2.19
 // @description  Blacklist, mise en avant, mentions, stats et réglages live pour la shoutbox Torr9
 // @author       Butchered
 // @match        https://torr9.net/*
@@ -36,6 +36,10 @@
     const DEFAULT_MENTION_COLOR = '#22c55e';
     const DEFAULT_MENTION_BLINK_SECONDS = 6;
     const DEFAULT_MENTION_KEEP_HIGHLIGHT = true;
+    const DEFAULT_MENTION_SOUND_ENABLED = false;
+    const DEFAULT_MENTION_SOUND_STYLE = 'ping';
+    const DEFAULT_MENTION_SOUND_CUSTOM_URL = '';
+    const DEFAULT_MENTION_SOUND_COOLDOWN_SECONDS = 8;
     const DEFAULT_CHAT_FONT_SCALE = 1;
     const MIN_CHAT_FONT_SCALE = 0.85;
     const MAX_CHAT_FONT_SCALE = 1.7;
@@ -62,12 +66,16 @@
     let toastHideTimer = null;
     let mentionSettings = loadMentionSettings();
     let chatFontScale = loadChatFontScale();
+    let mentionSoundContext = null;
+    let mentionSoundElement = null;
+    let lastMentionSoundAt = 0;
 
     const hiddenUsers = loadHiddenUsers();
     const highlightedUsers = loadHighlightedUsers();
     const sessionBlockedCounts = {};
     const alreadyCountedMessages = new WeakSet();
     const mentionBlinkStates = new WeakMap();
+    const mentionSoundNotifiedMessages = new WeakSet();
 
     function isChatPage() {
         return location.pathname.startsWith('/chat');
@@ -196,7 +204,11 @@
                     username: '',
                     color: DEFAULT_MENTION_COLOR,
                     blinkSeconds: DEFAULT_MENTION_BLINK_SECONDS,
-                    keepHighlightAfterBlink: DEFAULT_MENTION_KEEP_HIGHLIGHT
+                    keepHighlightAfterBlink: DEFAULT_MENTION_KEEP_HIGHLIGHT,
+                    soundEnabled: DEFAULT_MENTION_SOUND_ENABLED,
+                    soundStyle: DEFAULT_MENTION_SOUND_STYLE,
+                    soundCustomUrl: DEFAULT_MENTION_SOUND_CUSTOM_URL,
+                    soundCooldownSeconds: DEFAULT_MENTION_SOUND_COOLDOWN_SECONDS
                 };
             }
 
@@ -204,14 +216,22 @@
                 username: normalizeName(parsed.username || ''),
                 color: normalizeHexColor(parsed.color, DEFAULT_MENTION_COLOR),
                 blinkSeconds: clamp(Number(parsed.blinkSeconds) || 0, 0, 30),
-                keepHighlightAfterBlink: parsed.keepHighlightAfterBlink !== false
+                keepHighlightAfterBlink: parsed.keepHighlightAfterBlink !== false,
+                soundEnabled: parsed.soundEnabled === true,
+                soundStyle: normalizeMentionSoundStyle(parsed.soundStyle),
+                soundCustomUrl: normalizeMentionSoundCustomUrl(parsed.soundCustomUrl),
+                soundCooldownSeconds: clamp(Number(parsed.soundCooldownSeconds) || 0, 0, 300)
             };
         } catch (e) {
             return {
                 username: '',
                 color: DEFAULT_MENTION_COLOR,
                 blinkSeconds: DEFAULT_MENTION_BLINK_SECONDS,
-                keepHighlightAfterBlink: DEFAULT_MENTION_KEEP_HIGHLIGHT
+                keepHighlightAfterBlink: DEFAULT_MENTION_KEEP_HIGHLIGHT,
+                soundEnabled: DEFAULT_MENTION_SOUND_ENABLED,
+                soundStyle: DEFAULT_MENTION_SOUND_STYLE,
+                soundCustomUrl: DEFAULT_MENTION_SOUND_CUSTOM_URL,
+                soundCooldownSeconds: DEFAULT_MENTION_SOUND_COOLDOWN_SECONDS
             };
         }
     }
@@ -221,7 +241,11 @@
             username: normalizeName(nextSettings?.username || ''),
             color: normalizeHexColor(nextSettings?.color, DEFAULT_MENTION_COLOR),
             blinkSeconds: clamp(Number(nextSettings?.blinkSeconds) || 0, 0, 30),
-            keepHighlightAfterBlink: nextSettings?.keepHighlightAfterBlink !== false
+            keepHighlightAfterBlink: nextSettings?.keepHighlightAfterBlink !== false,
+            soundEnabled: nextSettings?.soundEnabled === true,
+            soundStyle: normalizeMentionSoundStyle(nextSettings?.soundStyle),
+            soundCustomUrl: normalizeMentionSoundCustomUrl(nextSettings?.soundCustomUrl),
+            soundCooldownSeconds: clamp(Number(nextSettings?.soundCooldownSeconds) || 0, 0, 300)
         };
 
         localStorage.setItem(STORAGE_KEY_MENTION_SETTINGS, JSON.stringify(mentionSettings));
@@ -342,6 +366,26 @@
         const num = Number(String(value).trim().replace(',', '.'));
         if (Number.isNaN(num)) return clamp(fallback, 0, 30);
         return clamp(num, 0, 30);
+    }
+
+    function parseMentionSoundCooldownInput(value, fallback = DEFAULT_MENTION_SOUND_COOLDOWN_SECONDS) {
+        const num = Number(String(value).trim().replace(',', '.'));
+        if (Number.isNaN(num)) return clamp(fallback, 0, 300);
+        return clamp(num, 0, 300);
+    }
+
+    function normalizeMentionSoundStyle(value) {
+        const raw = String(value || '').trim().toLowerCase();
+        if (raw === 'bell' || raw === 'soft' || raw === 'double' || raw === 'custom') return raw;
+        return DEFAULT_MENTION_SOUND_STYLE;
+    }
+
+    function normalizeMentionSoundCustomUrl(value) {
+        const raw = String(value || '').trim();
+        if (!raw) return DEFAULT_MENTION_SOUND_CUSTOM_URL;
+        if (/^https?:\/\//i.test(raw)) return raw;
+        if (/^data:audio\//i.test(raw)) return raw;
+        return DEFAULT_MENTION_SOUND_CUSTOM_URL;
     }
 
     function escapeHtml(str) {
@@ -1014,7 +1058,176 @@
         mentionBlinkStates.set(messageEl, { signature, timeoutId });
     }
 
-    function hideOrShowMessage(messageEl) {
+    async function playMentionNotificationSound(
+        soundStyle = mentionSettings.soundStyle,
+        customSoundUrl = mentionSettings.soundCustomUrl
+    ) {
+        const normalizedStyle = normalizeMentionSoundStyle(soundStyle);
+        const normalizedCustomUrl = normalizeMentionSoundCustomUrl(customSoundUrl);
+
+        if (normalizedStyle === 'custom') {
+            if (!normalizedCustomUrl) return false;
+
+            try {
+                if (!mentionSoundElement) {
+                    mentionSoundElement = new Audio();
+                    mentionSoundElement.preload = 'auto';
+                }
+
+                mentionSoundElement.pause();
+                mentionSoundElement.currentTime = 0;
+                mentionSoundElement.src = normalizedCustomUrl;
+                mentionSoundElement.volume = 1;
+                await mentionSoundElement.play();
+                return true;
+            } catch (e) {
+                return false;
+            }
+        }
+
+        const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextCtor) return false;
+
+        if (!mentionSoundContext) {
+            mentionSoundContext = new AudioContextCtor();
+        }
+
+        if (mentionSoundContext.state === 'suspended') {
+            try {
+                await mentionSoundContext.resume();
+            } catch (e) {
+                return false;
+            }
+        }
+
+        const now = mentionSoundContext.currentTime;
+
+        function scheduleTone({
+            type = 'sine',
+            startOffset = 0,
+            duration = 0.24,
+            fromFrequency = 880,
+            toFrequency = 1320,
+            peakGain = 0.1,
+            attack = 0.015,
+            releaseOffset = null
+        }) {
+            const startTime = now + Math.max(0, startOffset);
+            const stopTime = startTime + Math.max(0.05, duration);
+            const oscillator = mentionSoundContext.createOscillator();
+            const gainNode = mentionSoundContext.createGain();
+
+            oscillator.type = type;
+            oscillator.frequency.setValueAtTime(fromFrequency, startTime);
+            oscillator.frequency.exponentialRampToValueAtTime(
+                Math.max(40, toFrequency),
+                stopTime
+            );
+
+            gainNode.gain.setValueAtTime(0.0001, startTime);
+            gainNode.gain.exponentialRampToValueAtTime(
+                Math.max(0.0002, peakGain),
+                startTime + Math.min(attack, duration / 2)
+            );
+            gainNode.gain.exponentialRampToValueAtTime(
+                0.0001,
+                releaseOffset === null ? stopTime : startTime + Math.min(duration, releaseOffset)
+            );
+
+            oscillator.connect(gainNode);
+            gainNode.connect(mentionSoundContext.destination);
+            oscillator.start(startTime);
+            oscillator.stop(stopTime);
+        }
+
+        if (normalizedStyle === 'soft') {
+            scheduleTone({
+                type: 'triangle',
+                duration: 0.34,
+                fromFrequency: 440,
+                toFrequency: 700,
+                peakGain: 0.075,
+                attack: 0.018,
+                releaseOffset: 0.3
+            });
+        } else if (normalizedStyle === 'bell') {
+            scheduleTone({
+                type: 'triangle',
+                duration: 0.48,
+                fromFrequency: 1040,
+                toFrequency: 1680,
+                peakGain: 0.095,
+                attack: 0.01,
+                releaseOffset: 0.4
+            });
+            scheduleTone({
+                type: 'sine',
+                startOffset: 0.025,
+                duration: 0.42,
+                fromFrequency: 1560,
+                toFrequency: 2280,
+                peakGain: 0.048,
+                attack: 0.008,
+                releaseOffset: 0.32
+            });
+        } else if (normalizedStyle === 'double') {
+            scheduleTone({
+                type: 'square',
+                duration: 0.16,
+                fromFrequency: 620,
+                toFrequency: 980,
+                peakGain: 0.07,
+                attack: 0.01,
+                releaseOffset: 0.12
+            });
+            scheduleTone({
+                type: 'square',
+                startOffset: 0.2,
+                duration: 0.17,
+                fromFrequency: 760,
+                toFrequency: 1180,
+                peakGain: 0.082,
+                attack: 0.01,
+                releaseOffset: 0.12
+            });
+        } else {
+            scheduleTone({
+                type: 'sine',
+                duration: 0.26,
+                fromFrequency: 920,
+                toFrequency: 1560,
+                peakGain: 0.09,
+                attack: 0.012,
+                releaseOffset: 0.22
+            });
+        }
+
+        return true;
+    }
+
+    function maybeNotifyMention(messageEl) {
+        if (!(messageEl instanceof HTMLElement)) return;
+        if (!mentionSettings.soundEnabled) return;
+        if (mentionSoundNotifiedMessages.has(messageEl)) return;
+
+        mentionSoundNotifiedMessages.add(messageEl);
+
+        const cooldownSeconds = parseMentionSoundCooldownInput(
+            mentionSettings.soundCooldownSeconds,
+            DEFAULT_MENTION_SOUND_COOLDOWN_SECONDS
+        );
+        const now = Date.now();
+
+        if (cooldownSeconds > 0 && now - lastMentionSoundAt < cooldownSeconds * 1000) {
+            return;
+        }
+
+        lastMentionSoundAt = now;
+        void playMentionNotificationSound(mentionSettings.soundStyle, mentionSettings.soundCustomUrl);
+    }
+
+    function hideOrShowMessage(messageEl, options = {}) {
+        const allowMentionSound = options.allowMentionSound === true;
         applyMessageTypography(messageEl);
 
         const username = getLogicalUsername(messageEl);
@@ -1045,6 +1258,9 @@
         } else if (mentionsWatchedUser) {
             clearDebugStyle(messageEl);
             applyMentionHighlightStyle(messageEl);
+            if (allowMentionSound) {
+                maybeNotifyMention(messageEl);
+            }
         } else if (highlightColor) {
             clearDebugStyle(messageEl);
             applyHighlightStyle(messageEl, normalized, highlightColor);
@@ -1063,7 +1279,7 @@
         const allDivs = root.querySelectorAll('div');
         allDivs.forEach(el => {
             if (isChatMessage(el)) {
-                hideOrShowMessage(el);
+                hideOrShowMessage(el, { allowMentionSound: false });
             }
         });
 
@@ -1080,12 +1296,12 @@
         if (node.closest(`#${PANEL_ID}, #${MODAL_ID}, #${OVERLAY_ID}, #${TOAST_ID}`)) return;
 
         if (isChatMessage(node)) {
-            hideOrShowMessage(node);
+            hideOrShowMessage(node, { allowMentionSound: true });
         }
 
         node.querySelectorAll?.('div').forEach(el => {
             if (isChatMessage(el)) {
-                hideOrShowMessage(el);
+                hideOrShowMessage(el, { allowMentionSound: true });
             }
         });
 
@@ -1144,13 +1360,38 @@
         return { ok: true, message: `Mise en avant retiree : ${usernameRaw}` };
     }
 
-    function updateMentionSettings(usernameRaw, colorRaw, blinkSecondsRaw, keepHighlightAfterBlinkRaw) {
+    function updateMentionSettings(
+        usernameRaw,
+        colorRaw,
+        blinkSecondsRaw,
+        keepHighlightAfterBlinkRaw,
+        soundEnabledRaw,
+        soundStyleRaw,
+        soundCustomUrlRaw,
+        soundCooldownSecondsRaw
+    ) {
         const username = normalizeName(usernameRaw);
         const color = normalizeHexColor(colorRaw, DEFAULT_MENTION_COLOR);
         const blinkSeconds = parseBlinkSecondsInput(blinkSecondsRaw, DEFAULT_MENTION_BLINK_SECONDS);
         const keepHighlightAfterBlink = !!keepHighlightAfterBlinkRaw;
+        const soundEnabled = !!soundEnabledRaw;
+        const soundStyle = normalizeMentionSoundStyle(soundStyleRaw);
+        const soundCustomUrl = normalizeMentionSoundCustomUrl(soundCustomUrlRaw);
+        const soundCooldownSeconds = parseMentionSoundCooldownInput(
+            soundCooldownSecondsRaw,
+            DEFAULT_MENTION_SOUND_COOLDOWN_SECONDS
+        );
 
-        saveMentionSettings({ username, color, blinkSeconds, keepHighlightAfterBlink });
+        saveMentionSettings({
+            username,
+            color,
+            blinkSeconds,
+            keepHighlightAfterBlink,
+            soundEnabled,
+            soundStyle,
+            soundCustomUrl,
+            soundCooldownSeconds
+        });
         processAllMessages();
         updateStatsBox();
 
@@ -1160,7 +1401,9 @@
 
         return {
             ok: true,
-            message: `Mentions surveillees pour @${mentionSettings.username}`
+            message: mentionSettings.soundEnabled
+                ? `Mentions surveillees pour @${mentionSettings.username} avec son`
+                : `Mentions surveillees pour @${mentionSettings.username}`
         };
     }
 
@@ -1634,8 +1877,89 @@
                     <span>Garder la couleur après le clignotement</span>
                 </label>
 
+                <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:10px;">
+                    <label style="
+                        display:flex;
+                        align-items:center;
+                        gap:10px;
+                        cursor:pointer;
+                        font-size:12px;
+                        color:#d4d4d8;
+                    ">
+                        <input id="tm-mention-sound-toggle" type="checkbox" ${mentionSettings.soundEnabled ? 'checked' : ''} style="
+                            width:16px;
+                            height:16px;
+                            accent-color:#38bdf8;
+                            cursor:pointer;
+                        ">
+                        <span>Son de notification</span>
+                    </label>
+                </div>
+
+                <div id="tm-mention-sound-options" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:10px;">
+                    <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:#c4c4c8;">
+                        <span>Son</span>
+                        <select id="tm-mention-sound-style-select"
+                            style="
+                                min-width:120px;
+                                background:#18181b;
+                                color:#fff;
+                                border:1px solid rgba(255,255,255,0.10);
+                                border-radius:10px;
+                                padding:10px 12px;
+                                outline:none;
+                            ">
+                            <option value="ping" ${mentionSettings.soundStyle === 'ping' ? 'selected' : ''}>Ping</option>
+                            <option value="soft" ${mentionSettings.soundStyle === 'soft' ? 'selected' : ''}>Doux</option>
+                            <option value="bell" ${mentionSettings.soundStyle === 'bell' ? 'selected' : ''}>Cloche</option>
+                            <option value="double" ${mentionSettings.soundStyle === 'double' ? 'selected' : ''}>Double</option>
+                            <option value="custom" ${mentionSettings.soundStyle === 'custom' ? 'selected' : ''}>Personnalisé</option>
+                        </select>
+                    </label>
+
+                    <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:#c4c4c8;flex:1 1 240px;min-width:0;">
+                        <span>URL audio</span>
+                        <input id="tm-mention-sound-custom-url-input" type="text" placeholder="https://.../son.mp3" value="${escapeHtml(mentionSettings.soundCustomUrl || '')}"
+                            style="
+                                flex:1 1 180px;
+                                min-width:0;
+                                background:#18181b;
+                                color:#fff;
+                                border:1px solid rgba(255,255,255,0.10);
+                                border-radius:10px;
+                                padding:10px 12px;
+                                outline:none;
+                            ">
+                    </label>
+
+                    <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:#c4c4c8;">
+                        <span>Délai mini</span>
+                        <input id="tm-mention-sound-cooldown-input" type="number" min="0" max="300" step="0.5" value="${mentionSettings.soundCooldownSeconds}"
+                            style="
+                                width:90px;
+                                background:#18181b;
+                                color:#fff;
+                                border:1px solid rgba(255,255,255,0.10);
+                                border-radius:10px;
+                                padding:10px 12px;
+                                outline:none;
+                            ">
+                        <span>s</span>
+                    </label>
+
+                    <button id="tm-mention-sound-test" type="button" style="
+                        border:none;
+                        background:#2563eb;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">Tester le son</button>
+                </div>
+
                 <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
-                    Quand un message contient @tonpseudo, il est surligne avec cette couleur. Mets 0 seconde pour desactiver le clignotement et laisse le pseudo vide pour couper la surveillance.
+                    Quand un message contient @tonpseudo, il est surligne avec cette couleur. Mets 0 seconde pour desactiver le clignotement, choisis un son si besoin et laisse le pseudo vide pour couper la surveillance.
                 </div>
             </div>
 
@@ -1693,6 +2017,12 @@
         const mentionColorInput = modal.querySelector('#tm-mention-color-input');
         const mentionBlinkInput = modal.querySelector('#tm-mention-blink-input');
         const mentionKeepHighlightToggle = modal.querySelector('#tm-mention-keep-highlight-toggle');
+        const mentionSoundToggle = modal.querySelector('#tm-mention-sound-toggle');
+        const mentionSoundOptions = modal.querySelector('#tm-mention-sound-options');
+        const mentionSoundStyleSelect = modal.querySelector('#tm-mention-sound-style-select');
+        const mentionSoundCustomUrlInput = modal.querySelector('#tm-mention-sound-custom-url-input');
+        const mentionSoundCooldownInput = modal.querySelector('#tm-mention-sound-cooldown-input');
+        const mentionSoundTestBtn = modal.querySelector('#tm-mention-sound-test');
         const mentionSaveBtn = modal.querySelector('#tm-mention-save');
         const fontSizeRange = modal.querySelector('#tm-font-size-range');
         const fontSizeValue = modal.querySelector('#tm-font-size-value');
@@ -1713,6 +2043,32 @@
         function setFeedback(message, isError = false) {
             feedback.textContent = message;
             feedback.style.color = isError ? '#fca5a5' : '#93c5fd';
+        }
+
+        function syncMentionSoundControlsState() {
+            const soundEnabled = mentionSoundToggle?.checked === true;
+            const customSoundSelected = mentionSoundStyleSelect?.value === 'custom';
+
+            if (mentionSoundOptions) {
+                mentionSoundOptions.style.display = soundEnabled ? 'flex' : 'none';
+            }
+
+            if (mentionSoundStyleSelect) {
+                mentionSoundStyleSelect.disabled = !soundEnabled;
+            }
+
+            if (mentionSoundCooldownInput) {
+                mentionSoundCooldownInput.disabled = !soundEnabled;
+            }
+
+            if (mentionSoundCustomUrlInput) {
+                mentionSoundCustomUrlInput.disabled = !soundEnabled || !customSoundSelected;
+            }
+
+            if (mentionSoundTestBtn) {
+                mentionSoundTestBtn.disabled = !soundEnabled;
+                mentionSoundTestBtn.style.cursor = soundEnabled ? 'pointer' : 'not-allowed';
+            }
         }
 
         function refreshHiddenUsersList() {
@@ -1886,7 +2242,11 @@
                 mentionUserInput.value,
                 mentionColorInput.value,
                 mentionBlinkInput.value,
-                mentionKeepHighlightToggle?.checked
+                mentionKeepHighlightToggle?.checked,
+                mentionSoundToggle?.checked,
+                mentionSoundStyleSelect?.value,
+                mentionSoundCustomUrlInput?.value,
+                mentionSoundCooldownInput?.value
             );
 
             mentionUserInput.value = mentionSettings.username;
@@ -1895,6 +2255,19 @@
             if (mentionKeepHighlightToggle) {
                 mentionKeepHighlightToggle.checked = mentionSettings.keepHighlightAfterBlink;
             }
+            if (mentionSoundToggle) {
+                mentionSoundToggle.checked = mentionSettings.soundEnabled;
+            }
+            if (mentionSoundStyleSelect) {
+                mentionSoundStyleSelect.value = mentionSettings.soundStyle;
+            }
+            if (mentionSoundCustomUrlInput) {
+                mentionSoundCustomUrlInput.value = mentionSettings.soundCustomUrl || '';
+            }
+            if (mentionSoundCooldownInput) {
+                mentionSoundCooldownInput.value = String(mentionSettings.soundCooldownSeconds);
+            }
+            syncMentionSoundControlsState();
             setFeedback(result.message, !result.ok);
         });
 
@@ -1910,6 +2283,36 @@
                 e.preventDefault();
                 mentionSaveBtn.click();
             }
+        });
+
+        mentionSoundCooldownInput?.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                mentionSaveBtn.click();
+            }
+        });
+
+        mentionSoundToggle?.addEventListener('change', syncMentionSoundControlsState);
+        mentionSoundStyleSelect?.addEventListener('change', syncMentionSoundControlsState);
+
+        mentionSoundCustomUrlInput?.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                mentionSaveBtn.click();
+            }
+        });
+
+        mentionSoundTestBtn?.addEventListener('click', async () => {
+            if (mentionSoundToggle?.checked !== true) return;
+
+            const played = await playMentionNotificationSound(
+                mentionSoundStyleSelect?.value,
+                mentionSoundCustomUrlInput?.value
+            );
+            setFeedback(
+                played ? 'Son de notification testé.' : 'Impossible de jouer le son pour le moment.',
+                !played
+            );
         });
 
         fontSizeRange?.addEventListener('input', () => {
@@ -1985,6 +2388,7 @@
         refreshHiddenUsersList();
         refreshHighlightedUsersList();
         userInput.focus();
+        syncMentionSoundControlsState();
         syncFontSizeValueLabel();
         previewPosition();
     }
