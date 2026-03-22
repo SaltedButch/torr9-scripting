@@ -1349,16 +1349,6 @@
                 </label>
 
                 <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
-                    <button id="tm-save-position" style="
-                        border:none;
-                        background:#16a34a;
-                        color:#fff;
-                        border-radius:10px;
-                        padding:10px 12px;
-                        cursor:pointer;
-                        font-weight:600;
-                    ">Enregistrer</button>
-
                     <button id="tm-reset-position" style="
                         border:none;
                         background:#3f3f46;
@@ -1668,7 +1658,7 @@
                 </label>
 
                 <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
-                    Ajuste la position sur cette vue et masque complètement la stats box si besoin.
+                    En mode debug, les messages blacklistés ne sont pas cachés : ils sont surlignés en rouge.
                 </div>
             </div>
 
@@ -1707,7 +1697,6 @@
         const rightValue = modal.querySelector('#tm-right-value');
         const bottomInput = modal.querySelector('#tm-bottom-input');
         const bottomValue = modal.querySelector('#tm-bottom-value');
-        const savePositionBtn = modal.querySelector('#tm-save-position');
         const resetPositionBtn = modal.querySelector('#tm-reset-position');
         const hideStatsToggle = modal.querySelector('#tm-hide-stats-toggle');
         const debugToggle = modal.querySelector('#tm-debug-toggle');
@@ -1796,16 +1785,39 @@
             }
         }
 
-        function previewPosition() {
+        function getPreviewPosition() {
             const fallback = loadPosition();
-            const preview = {
+            return {
                 rightPercent: parsePercentInput(rightInput.value, fallback.rightPercent, MAX_STATS_RIGHT_PERCENT),
                 bottomPercent: parsePercentInput(bottomInput.value, fallback.bottomPercent, MAX_STATS_BOTTOM_PERCENT)
             };
+        }
 
-            if (rightValue) rightValue.textContent = `${formatNumberInputValue(preview.rightPercent, MAX_STATS_RIGHT_PERCENT)}%`;
-            if (bottomValue) bottomValue.textContent = `${formatNumberInputValue(preview.bottomPercent, MAX_STATS_BOTTOM_PERCENT)}%`;
+        function syncPositionValueLabels(position) {
+            if (rightValue) rightValue.textContent = `${formatNumberInputValue(position.rightPercent, MAX_STATS_RIGHT_PERCENT)}%`;
+            if (bottomValue) bottomValue.textContent = `${formatNumberInputValue(position.bottomPercent, MAX_STATS_BOTTOM_PERCENT)}%`;
+        }
+
+        function previewPosition() {
+            const preview = getPreviewPosition();
+            syncPositionValueLabels(preview);
             applyBoxPosition(preview);
+        }
+
+        function commitPreviewPosition(showMessage = true) {
+            const newPos = getPreviewPosition();
+
+            rightInput.value = formatNumberInputValue(newPos.rightPercent, MAX_STATS_RIGHT_PERCENT);
+            bottomInput.value = formatNumberInputValue(newPos.bottomPercent, MAX_STATS_BOTTOM_PERCENT);
+            syncPositionValueLabels(newPos);
+
+            savePosition(newPos);
+            applyBoxPosition(newPos);
+            updateStatsBox();
+
+            if (showMessage) {
+                setFeedback(`Position enregistrée pour ${currentPageLabel}.`);
+            }
         }
 
         function syncFontSizeValueLabel() {
@@ -1925,26 +1937,13 @@
 
         rightInput.addEventListener('input', previewPosition);
         bottomInput.addEventListener('input', previewPosition);
+        rightInput.addEventListener('change', () => commitPreviewPosition(false));
+        bottomInput.addEventListener('change', () => commitPreviewPosition(false));
 
         hideStatsToggle?.addEventListener('change', () => {
             saveStatsHidden(hideStatsToggle.checked);
             applyStatsBoxVisibilityState();
             setFeedback(statsHidden ? `Stats box masquée pour ${currentPageLabel}.` : `Stats box affichée pour ${currentPageLabel}.`);
-        });
-
-        savePositionBtn.addEventListener('click', () => {
-            const newPos = {
-                rightPercent: parsePercentInput(rightInput.value, DEFAULT_POSITION.rightPercent, MAX_STATS_RIGHT_PERCENT),
-                bottomPercent: parsePercentInput(bottomInput.value, DEFAULT_POSITION.bottomPercent, MAX_STATS_BOTTOM_PERCENT)
-            };
-
-            rightInput.value = formatNumberInputValue(newPos.rightPercent, MAX_STATS_RIGHT_PERCENT);
-            bottomInput.value = formatNumberInputValue(newPos.bottomPercent, MAX_STATS_BOTTOM_PERCENT);
-
-            savePosition(newPos);
-            applyBoxPosition(newPos);
-            updateStatsBox();
-            setFeedback(`Position enregistrée pour ${currentPageLabel}.`);
         });
 
         resetPositionBtn.addEventListener('click', () => {
