@@ -1,8 +1,9 @@
 // ==UserScript==
-// @name         Torr9 Chat - filtre users + stats box réglable live
+// @name         Torr9 Chat - Shoutbox 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.16
-// @description  Cache ou met en avant des utilisateurs sur Torr9 avec compteur, debug, couleurs, mentions et reglages live
+// @version      2.17
+// @description  Blacklist, mise en avant, mentions, stats et réglages live pour la shoutbox Torr9
+// @author       Butchered
 // @match        https://torr9.net/*
 // @grant        none
 // ==/UserScript==
@@ -15,6 +16,8 @@
     const STORAGE_KEY_POS_CHAT = 'tm_torr9_stats_box_position_chat';
     const STORAGE_KEY_STATS_COLLAPSED_HOME = 'tm_torr9_stats_box_collapsed_home';
     const STORAGE_KEY_STATS_COLLAPSED_CHAT = 'tm_torr9_stats_box_collapsed_chat';
+    const STORAGE_KEY_STATS_HIDDEN_HOME = 'tm_torr9_stats_box_hidden_home';
+    const STORAGE_KEY_STATS_HIDDEN_CHAT = 'tm_torr9_stats_box_hidden_chat';
     const STORAGE_KEY_DEBUG = 'tm_torr9_debug_mode';
     const STORAGE_KEY_HOME_COLLAPSED = 'tm_torr9_home_chat_collapsed';
     const STORAGE_KEY_HIGHLIGHTED_USERS = 'tm_highlighted_shout_users_torr9';
@@ -32,6 +35,8 @@
     const DEFAULT_CHAT_FONT_SCALE = 1;
     const MIN_CHAT_FONT_SCALE = 0.85;
     const MAX_CHAT_FONT_SCALE = 1.7;
+    const MAX_STATS_RIGHT_PERCENT = 100;
+    const MAX_STATS_BOTTOM_PERCENT = 95;
     const MENTION_STYLE_ID = 'tm-torr9-mention-style';
 
     const DEFAULT_POSITION = {
@@ -47,6 +52,7 @@
     let debugMode = loadDebugMode();
     let homeChatCollapsed = loadHomeChatCollapsed();
     let statsCollapsed = loadStatsCollapsed();
+    let statsHidden = loadStatsHidden();
     let statsUpdateFrame = null;
     let toastHideTimer = null;
     let mentionSettings = loadMentionSettings();
@@ -86,6 +92,10 @@
 
     function getStatsCollapsedStorageKey() {
         return isChatPage() ? STORAGE_KEY_STATS_COLLAPSED_CHAT : STORAGE_KEY_STATS_COLLAPSED_HOME;
+    }
+
+    function getStatsHiddenStorageKey() {
+        return isChatPage() ? STORAGE_KEY_STATS_HIDDEN_CHAT : STORAGE_KEY_STATS_HIDDEN_HOME;
     }
 
     function loadHiddenUsers() {
@@ -139,6 +149,19 @@
     function saveStatsCollapsed(value) {
         statsCollapsed = !!value;
         localStorage.setItem(getStatsCollapsedStorageKey(), statsCollapsed ? '1' : '0');
+    }
+
+    function loadStatsHidden() {
+        try {
+            return localStorage.getItem(getStatsHiddenStorageKey()) === '1';
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function saveStatsHidden(value) {
+        statsHidden = !!value;
+        localStorage.setItem(getStatsHiddenStorageKey(), statsHidden ? '1' : '0');
     }
 
     function loadHighlightedUsers() {
@@ -245,8 +268,8 @@
                 typeof saved.bottomPercent === 'number'
             ) {
                 return {
-                    rightPercent: clamp(saved.rightPercent, 0, 95),
-                    bottomPercent: clamp(saved.bottomPercent, 0, 95)
+                    rightPercent: clamp(saved.rightPercent, 0, MAX_STATS_RIGHT_PERCENT),
+                    bottomPercent: clamp(saved.bottomPercent, 0, MAX_STATS_BOTTOM_PERCENT)
                 };
             }
         } catch (e) {}
@@ -255,8 +278,8 @@
 
     function savePosition(position) {
         localStorage.setItem(getPositionStorageKey(), JSON.stringify({
-            rightPercent: clamp(position.rightPercent, 0, 95),
-            bottomPercent: clamp(position.bottomPercent, 0, 95)
+            rightPercent: clamp(position.rightPercent, 0, MAX_STATS_RIGHT_PERCENT),
+            bottomPercent: clamp(position.bottomPercent, 0, MAX_STATS_BOTTOM_PERCENT)
         }));
     }
 
@@ -300,14 +323,14 @@
         return (name || '').trim().toLowerCase();
     }
 
-    function formatNumberInputValue(value) {
-        return String(clamp(Number(value) || 0, 0, 95));
+    function formatNumberInputValue(value, max = MAX_STATS_BOTTOM_PERCENT) {
+        return String(clamp(Number(value) || 0, 0, max));
     }
 
-    function parsePercentInput(value, fallback) {
+    function parsePercentInput(value, fallback, max = MAX_STATS_BOTTOM_PERCENT) {
         const num = Number(String(value).trim().replace(',', '.'));
         if (Number.isNaN(num)) return fallback;
-        return clamp(num, 0, 95);
+        return clamp(num, 0, max);
     }
 
     function parseBlinkSecondsInput(value, fallback = DEFAULT_MENTION_BLINK_SECONDS) {
@@ -800,13 +823,18 @@
     function applyBoxPosition(position = null) {
         if (!statsBox) return;
         const pos = position || loadPosition();
-        statsBox.style.right = `${clamp(pos.rightPercent, 0, 95)}%`;
-        statsBox.style.bottom = `${clamp(pos.bottomPercent, 0, 95)}%`;
+        statsBox.style.right = `${clamp(pos.rightPercent, 0, MAX_STATS_RIGHT_PERCENT)}%`;
+        statsBox.style.bottom = `${clamp(pos.bottomPercent, 0, MAX_STATS_BOTTOM_PERCENT)}%`;
     }
 
     function applyStatsBoxCollapsedState() {
         if (!statsBox) return;
         statsBox.style.width = statsCollapsed ? '220px' : '240px';
+    }
+
+    function applyStatsBoxVisibilityState() {
+        if (!statsBox) return;
+        statsBox.style.display = statsHidden ? 'none' : 'block';
     }
 
     function createStatsBox() {
@@ -818,6 +846,7 @@
             statsContent = existing.firstElementChild;
             bindStatsBoxEvents();
             applyStatsBoxCollapsedState();
+            applyStatsBoxVisibilityState();
             applyBoxPosition();
             updateStatsBox();
             return;
@@ -846,6 +875,7 @@
 
         bindStatsBoxEvents();
         applyStatsBoxCollapsedState();
+        applyStatsBoxVisibilityState();
         applyBoxPosition();
         updateStatsBox();
     }
@@ -1136,6 +1166,7 @@
         if (overlay) overlay.remove();
         modalOpen = false;
         applyChatFontScale(loadChatFontScale());
+        applyStatsBoxVisibilityState();
         applyHomepageChatCollapsedState();
         applyBoxPosition(loadPosition());
         updateStatsBox();
@@ -1176,6 +1207,9 @@
         const currentPos = loadPosition();
         const currentPageLabel = getCurrentPageLabel();
         const homeView = isHomePage();
+        const settingsGridColumns = window.innerWidth >= 780
+            ? 'repeat(2, minmax(0, 1fr))'
+            : 'minmax(0, 1fr)';
 
         const overlay = document.createElement('div');
         overlay.id = OVERLAY_ID;
@@ -1192,7 +1226,9 @@
         modal.style.left = '50%';
         modal.style.transform = 'translate(-50%, -50%)';
         modal.style.zIndex = '1000001';
-        modal.style.width = 'min(520px, calc(100vw - 24px))';
+        modal.style.width = 'min(860px, calc(100vw - 24px))';
+        modal.style.maxHeight = 'min(88vh, 900px)';
+        modal.style.overflowY = 'auto';
         modal.style.background = 'rgba(24,24,27,0.98)';
         modal.style.border = '1px solid rgba(255,255,255,0.08)';
         modal.style.borderRadius = '18px';
@@ -1220,199 +1256,12 @@
             ">×</button>
         </div>
 
-        <div style="display:grid;gap:14px;">
-            <div style="
-                padding:12px;
-                border-radius:14px;
-                background:rgba(255,255,255,0.03);
-                border:1px solid rgba(255,255,255,0.06);
-            ">
-                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Gérer les pseudos</div>
-
-                <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                    <input id="tm-user-input" type="text" placeholder="Pseudo"
-                        style="
-                            flex:1 1 180px;
-                            min-width:0;
-                            background:#18181b;
-                            color:#fff;
-                            border:1px solid rgba(255,255,255,0.10);
-                            border-radius:10px;
-                            padding:10px 12px;
-                            outline:none;
-                        ">
-                    <button id="tm-user-toggle" style="
-                        border:none;
-                        background:#2563eb;
-                        color:#fff;
-                        border-radius:10px;
-                        padding:10px 12px;
-                        cursor:pointer;
-                        font-weight:600;
-                    ">Ajouter / retirer</button>
-                </div>
-
-                <div style="margin-top:10px;font-size:12px;color:#a1a1aa;line-height:1.5;">
-                    Bloqués :
-                </div>
-
-                <div id="tm-hidden-users-list" style="
-                    margin-top:8px;
-                    display:flex;
-                    flex-wrap:wrap;
-                    gap:8px;
-                "></div>
-
-                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.4;">
-                    Clique sur un pseudo pour le charger dans le champ. Alt+clic directement sur un pseudo du chat pour le masquer.
-                </div>
-            </div>
-
-            <div style="
-                padding:12px;
-                border-radius:14px;
-                background:rgba(255,255,255,0.03);
-                border:1px solid rgba(255,255,255,0.06);
-            ">
-                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Mettre en avant</div>
-
-                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-                    <input id="tm-highlight-user-input" type="text" placeholder="Pseudo"
-                        style="
-                            flex:1 1 160px;
-                            min-width:0;
-                            background:#18181b;
-                            color:#fff;
-                            border:1px solid rgba(255,255,255,0.10);
-                            border-radius:10px;
-                            padding:10px 12px;
-                            outline:none;
-                        ">
-
-                    <input id="tm-highlight-color-input" type="color" value="${DEFAULT_HIGHLIGHT_COLOR}"
-                        style="
-                            width:48px;
-                            height:40px;
-                            padding:4px;
-                            background:#18181b;
-                            border:1px solid rgba(255,255,255,0.10);
-                            border-radius:10px;
-                            cursor:pointer;
-                        ">
-
-                    <button id="tm-highlight-save" style="
-                        border:none;
-                        background:#d97706;
-                        color:#fff;
-                        border-radius:10px;
-                        padding:10px 12px;
-                        cursor:pointer;
-                        font-weight:600;
-                    ">Ajouter / MAJ</button>
-
-                    <button id="tm-highlight-remove" style="
-                        border:none;
-                        background:#3f3f46;
-                        color:#fff;
-                        border-radius:10px;
-                        padding:10px 12px;
-                        cursor:pointer;
-                        font-weight:600;
-                    ">Retirer</button>
-                </div>
-
-                <div style="margin-top:10px;font-size:12px;color:#a1a1aa;line-height:1.5;">
-                    Mis en avant :
-                </div>
-
-                <div id="tm-highlight-users-list" style="
-                    margin-top:8px;
-                    display:flex;
-                    flex-wrap:wrap;
-                    gap:8px;
-                "></div>
-
-                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.4;">
-                    Clique sur un pseudo pour charger sa couleur. Les messages restents visibles mais sont surlignes avec la couleur choisie.
-                </div>
-            </div>
-
-            <div style="
-                padding:12px;
-                border-radius:14px;
-                background:rgba(255,255,255,0.03);
-                border:1px solid rgba(255,255,255,0.06);
-            ">
-                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Mentions @moi</div>
-
-                <div style="display:grid;grid-template-columns:minmax(0,1fr) auto auto auto;gap:8px;align-items:center;">
-                    <input id="tm-mention-user-input" type="text" placeholder="Mon pseudo" value="${escapeHtml(mentionSettings.username)}"
-                        style="
-                            min-width:0;
-                            background:#18181b;
-                            color:#fff;
-                            border:1px solid rgba(255,255,255,0.10);
-                            border-radius:10px;
-                            padding:10px 12px;
-                            outline:none;
-                        ">
-
-                    <input id="tm-mention-color-input" type="color" value="${mentionSettings.color}"
-                        style="
-                            width:48px;
-                            height:40px;
-                            padding:4px;
-                            background:#18181b;
-                            border:1px solid rgba(255,255,255,0.10);
-                            border-radius:10px;
-                            cursor:pointer;
-                        ">
-
-                    <input id="tm-mention-blink-input" type="number" min="0" max="30" step="0.5" value="${mentionSettings.blinkSeconds}"
-                        style="
-                            width:90px;
-                            background:#18181b;
-                            color:#fff;
-                            border:1px solid rgba(255,255,255,0.10);
-                            border-radius:10px;
-                            padding:10px 12px;
-                            outline:none;
-                        ">
-
-                    <button id="tm-mention-save" style="
-                        border:none;
-                        background:#059669;
-                        color:#fff;
-                        border-radius:10px;
-                        padding:10px 12px;
-                        cursor:pointer;
-                        font-weight:600;
-                    ">Enregistrer</button>
-                </div>
-
-                <label style="
-                    display:flex;
-                    align-items:center;
-                    gap:10px;
-                    cursor:pointer;
-                    font-size:12px;
-                    color:#d4d4d8;
-                    margin-top:10px;
-                ">
-                    <input id="tm-mention-keep-highlight-toggle" type="checkbox" ${mentionSettings.keepHighlightAfterBlink ? 'checked' : ''} style="
-                        width:16px;
-                        height:16px;
-                        accent-color:#22c55e;
-                        cursor:pointer;
-                    ">
-                    <span>Garder la couleur après le clignotement</span>
-                </label>
-
-                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
-                    Quand un message contient @tonpseudo, il est surligne avec cette couleur. Mets 0 seconde pour desactiver le clignotement et laisse le pseudo vide pour couper la surveillance.
-                </div>
-            </div>
-
+        <div style="
+            display:grid;
+            grid-template-columns:${settingsGridColumns};
+            gap:14px;
+            align-items:start;
+        ">
             ${homeView ? `
             <div style="
                 padding:12px;
@@ -1420,7 +1269,7 @@
                 background:rgba(255,255,255,0.03);
                 border:1px solid rgba(255,255,255,0.06);
             ">
-                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Affichage accueil</div>
+                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Page d’accueil</div>
 
                 <label style="
                     display:flex;
@@ -1436,14 +1285,91 @@
                         accent-color:#22c55e;
                         cursor:pointer;
                     ">
-                    <span>Ne garder que le bandeau du chat</span>
+                    <span>Masquer la shoutbox</span>
                 </label>
 
                 <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
-                    Sur la page d’accueil uniquement, masque les messages et la zone de saisie en gardant le bandeau supérieur.
+                    Permet de masquer la shoutbox sur la page d’accueil.
                 </div>
             </div>
             ` : ''}
+
+            <div style="
+                padding:12px;
+                border-radius:14px;
+                background:rgba(255,255,255,0.03);
+                border:1px solid rgba(255,255,255,0.06);
+            ">
+                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Position de la stats box (${currentPageLabel})</div>
+
+                <div style="display:grid;gap:12px;">
+                    <label style="display:flex;flex-direction:column;gap:6px;">
+                        <span style="display:flex;justify-content:space-between;gap:12px;font-size:12px;color:#c4c4c8;">
+                            <span>Position (0 Gauche; 100 Droite)</span>
+                            <span id="tm-right-value">${formatNumberInputValue(currentPos.rightPercent, MAX_STATS_RIGHT_PERCENT)}%</span>
+                        </span>
+                        <input id="tm-right-input" type="range" min="0" max="${MAX_STATS_RIGHT_PERCENT}" step="0.5" value="${formatNumberInputValue(currentPos.rightPercent, MAX_STATS_RIGHT_PERCENT)}"
+                            style="
+                                width:100%;
+                                accent-color:#38bdf8;
+                                cursor:pointer;
+                            ">
+                    </label>
+
+                    <label style="display:flex;flex-direction:column;gap:6px;">
+                        <span style="display:flex;justify-content:space-between;gap:12px;font-size:12px;color:#c4c4c8;">
+                            <span>Bas</span>
+                            <span id="tm-bottom-value">${formatNumberInputValue(currentPos.bottomPercent, MAX_STATS_BOTTOM_PERCENT)}%</span>
+                        </span>
+                        <input id="tm-bottom-input" type="range" min="0" max="${MAX_STATS_BOTTOM_PERCENT}" step="0.5" value="${formatNumberInputValue(currentPos.bottomPercent, MAX_STATS_BOTTOM_PERCENT)}"
+                            style="
+                                width:100%;
+                                accent-color:#38bdf8;
+                                cursor:pointer;
+                            ">
+                    </label>
+                </div>
+
+                <label style="
+                    display:flex;
+                    align-items:center;
+                    gap:10px;
+                    cursor:pointer;
+                    font-size:12px;
+                    color:#d4d4d8;
+                    margin-top:12px;
+                ">
+                    <input id="tm-hide-stats-toggle" type="checkbox" ${statsHidden ? 'checked' : ''} style="
+                        width:16px;
+                        height:16px;
+                        accent-color:#f59e0b;
+                        cursor:pointer;
+                    ">
+                    <span>Masquer complètement la stats box</span>
+                </label>
+
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
+                    <button id="tm-save-position" style="
+                        border:none;
+                        background:#16a34a;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">Enregistrer</button>
+
+                    <button id="tm-reset-position" style="
+                        border:none;
+                        background:#3f3f46;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">Reset position</button>
+                </div>
+            </div>
 
             <div style="
                 padding:12px;
@@ -1527,48 +1453,90 @@
                 background:rgba(255,255,255,0.03);
                 border:1px solid rgba(255,255,255,0.06);
             ">
-                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Position de la stats box (${currentPageLabel})</div>
+                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Blacklist</div>
 
-                <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
-                    <label style="display:flex;flex-direction:column;gap:6px;">
-                        <span style="font-size:12px;color:#c4c4c8;">Right %</span>
-                        <input id="tm-right-input" type="number" min="0" max="95" step="0.1" value="${formatNumberInputValue(currentPos.rightPercent)}"
-                            style="
-                                background:#18181b;
-                                color:#fff;
-                                border:1px solid rgba(255,255,255,0.10);
-                                border-radius:10px;
-                                padding:10px 12px;
-                                outline:none;
-                            ">
-                    </label>
-
-                    <label style="display:flex;flex-direction:column;gap:6px;">
-                        <span style="font-size:12px;color:#c4c4c8;">Bottom %</span>
-                        <input id="tm-bottom-input" type="number" min="0" max="95" step="0.1" value="${formatNumberInputValue(currentPos.bottomPercent)}"
-                            style="
-                                background:#18181b;
-                                color:#fff;
-                                border:1px solid rgba(255,255,255,0.10);
-                                border-radius:10px;
-                                padding:10px 12px;
-                                outline:none;
-                            ">
-                    </label>
-                </div>
-
-                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
-                    <button id="tm-save-position" style="
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <input id="tm-user-input" type="text" placeholder="Pseudo"
+                        style="
+                            flex:1 1 180px;
+                            min-width:0;
+                            background:#18181b;
+                            color:#fff;
+                            border:1px solid rgba(255,255,255,0.10);
+                            border-radius:10px;
+                            padding:10px 12px;
+                            outline:none;
+                        ">
+                    <button id="tm-user-toggle" style="
                         border:none;
-                        background:#16a34a;
+                        background:#2563eb;
                         color:#fff;
                         border-radius:10px;
                         padding:10px 12px;
                         cursor:pointer;
                         font-weight:600;
-                    ">Enregistrer</button>
+                    ">Ajouter / retirer</button>
+                </div>
 
-                    <button id="tm-reset-position" style="
+                <div style="margin-top:10px;font-size:12px;color:#a1a1aa;line-height:1.5;">
+                    Bloqués :
+                </div>
+
+                <div id="tm-hidden-users-list" style="
+                    margin-top:8px;
+                    display:flex;
+                    flex-wrap:wrap;
+                    gap:8px;
+                "></div>
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.4;">
+                    Clique sur un pseudo pour le charger dans le champ. Alt+clic directement sur un pseudo du chat permet de le blacklister.
+                </div>
+            </div>
+
+            <div style="
+                padding:12px;
+                border-radius:14px;
+                background:rgba(255,255,255,0.03);
+                border:1px solid rgba(255,255,255,0.06);
+            ">
+                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Mettre en avant</div>
+
+                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+                    <input id="tm-highlight-user-input" type="text" placeholder="Pseudo"
+                        style="
+                            flex:1 1 160px;
+                            min-width:0;
+                            background:#18181b;
+                            color:#fff;
+                            border:1px solid rgba(255,255,255,0.10);
+                            border-radius:10px;
+                            padding:10px 12px;
+                            outline:none;
+                        ">
+
+                    <input id="tm-highlight-color-input" type="color" value="${DEFAULT_HIGHLIGHT_COLOR}"
+                        style="
+                            width:48px;
+                            height:40px;
+                            padding:4px;
+                            background:#18181b;
+                            border:1px solid rgba(255,255,255,0.10);
+                            border-radius:10px;
+                            cursor:pointer;
+                        ">
+
+                    <button id="tm-highlight-save" style="
+                        border:none;
+                        background:#d97706;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">Ajouter / MAJ</button>
+
+                    <button id="tm-highlight-remove" style="
                         border:none;
                         background:#3f3f46;
                         color:#fff;
@@ -1576,7 +1544,101 @@
                         padding:10px 12px;
                         cursor:pointer;
                         font-weight:600;
-                    ">Reset position</button>
+                    ">Retirer</button>
+
+                </div>
+
+                <div style="margin-top:10px;font-size:12px;color:#a1a1aa;line-height:1.5;">
+                    Mis en avant :
+                </div>
+
+                <div id="tm-highlight-users-list" style="
+                    margin-top:8px;
+                    display:flex;
+                    flex-wrap:wrap;
+                    gap:8px;
+                "></div>
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.4;">
+                    Clique sur un pseudo pour charger sa couleur. Les messages restents visibles mais sont surlignes avec la couleur choisie.
+                </div>
+            </div>
+
+            <div style="
+                padding:12px;
+                border-radius:14px;
+                background:rgba(255,255,255,0.03);
+                border:1px solid rgba(255,255,255,0.06);
+            ">
+                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Mentions @moi</div>
+
+                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+                    <input id="tm-mention-user-input" type="text" placeholder="Mon pseudo" value="${escapeHtml(mentionSettings.username)}"
+                        style="
+                            flex:1 1 180px;
+                            min-width:0;
+                            background:#18181b;
+                            color:#fff;
+                            border:1px solid rgba(255,255,255,0.10);
+                            border-radius:10px;
+                            padding:10px 12px;
+                            outline:none;
+                        ">
+
+                    <input id="tm-mention-color-input" type="color" value="${mentionSettings.color}"
+                        style="
+                            width:48px;
+                            height:40px;
+                            padding:4px;
+                            background:#18181b;
+                            border:1px solid rgba(255,255,255,0.10);
+                            border-radius:10px;
+                            cursor:pointer;
+                        ">
+
+                    <input id="tm-mention-blink-input" type="number" min="0" max="30" step="0.5" value="${mentionSettings.blinkSeconds}"
+                        style="
+                            width:90px;
+                            background:#18181b;
+                            color:#fff;
+                            border:1px solid rgba(255,255,255,0.10);
+                            border-radius:10px;
+                            padding:10px 12px;
+                            outline:none;
+                        ">
+
+                    <button id="tm-mention-save" style="
+                        border:none;
+                        background:#059669;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">Enregistrer</button>
+                </div>
+
+                <label style="
+                    display:flex;
+                    align-items:center;
+                    flex-wrap:wrap;
+                    gap:10px;
+                    cursor:pointer;
+                    font-size:12px;
+                    color:#d4d4d8;
+                    margin-top:10px;
+                ">
+                    <input id="tm-mention-keep-highlight-toggle" type="checkbox" ${mentionSettings.keepHighlightAfterBlink ? 'checked' : ''} style="
+                        width:16px;
+                        height:16px;
+                        accent-color:#22c55e;
+                        cursor:pointer;
+                    ">
+                    <span>Garder la couleur après le clignotement</span>
+                </label>
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                    Quand un message contient @tonpseudo, il est surligne avec cette couleur. Mets 0 seconde pour desactiver le clignotement et laisse le pseudo vide pour couper la surveillance.
                 </div>
             </div>
 
@@ -1606,7 +1668,7 @@
                 </label>
 
                 <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
-                    En mode debug, les messages blacklistés ne sont pas cachés : ils sont surlignés en rouge.
+                    Ajuste la position sur cette vue et masque complètement la stats box si besoin.
                 </div>
             </div>
 
@@ -1642,9 +1704,12 @@
         const fontSizeSaveBtn = modal.querySelector('#tm-font-size-save');
         const fontSizeResetBtn = modal.querySelector('#tm-font-size-reset');
         const rightInput = modal.querySelector('#tm-right-input');
+        const rightValue = modal.querySelector('#tm-right-value');
         const bottomInput = modal.querySelector('#tm-bottom-input');
+        const bottomValue = modal.querySelector('#tm-bottom-value');
         const savePositionBtn = modal.querySelector('#tm-save-position');
         const resetPositionBtn = modal.querySelector('#tm-reset-position');
+        const hideStatsToggle = modal.querySelector('#tm-hide-stats-toggle');
         const debugToggle = modal.querySelector('#tm-debug-toggle');
         const homeCollapseToggle = modal.querySelector('#tm-home-collapse-toggle-setting');
         const feedback = modal.querySelector('#tm-feedback');
@@ -1734,9 +1799,12 @@
         function previewPosition() {
             const fallback = loadPosition();
             const preview = {
-                rightPercent: parsePercentInput(rightInput.value, fallback.rightPercent),
-                bottomPercent: parsePercentInput(bottomInput.value, fallback.bottomPercent)
+                rightPercent: parsePercentInput(rightInput.value, fallback.rightPercent, MAX_STATS_RIGHT_PERCENT),
+                bottomPercent: parsePercentInput(bottomInput.value, fallback.bottomPercent, MAX_STATS_BOTTOM_PERCENT)
             };
+
+            if (rightValue) rightValue.textContent = `${formatNumberInputValue(preview.rightPercent, MAX_STATS_RIGHT_PERCENT)}%`;
+            if (bottomValue) bottomValue.textContent = `${formatNumberInputValue(preview.bottomPercent, MAX_STATS_BOTTOM_PERCENT)}%`;
             applyBoxPosition(preview);
         }
 
@@ -1858,14 +1926,20 @@
         rightInput.addEventListener('input', previewPosition);
         bottomInput.addEventListener('input', previewPosition);
 
+        hideStatsToggle?.addEventListener('change', () => {
+            saveStatsHidden(hideStatsToggle.checked);
+            applyStatsBoxVisibilityState();
+            setFeedback(statsHidden ? `Stats box masquée pour ${currentPageLabel}.` : `Stats box affichée pour ${currentPageLabel}.`);
+        });
+
         savePositionBtn.addEventListener('click', () => {
             const newPos = {
-                rightPercent: parsePercentInput(rightInput.value, DEFAULT_POSITION.rightPercent),
-                bottomPercent: parsePercentInput(bottomInput.value, DEFAULT_POSITION.bottomPercent)
+                rightPercent: parsePercentInput(rightInput.value, DEFAULT_POSITION.rightPercent, MAX_STATS_RIGHT_PERCENT),
+                bottomPercent: parsePercentInput(bottomInput.value, DEFAULT_POSITION.bottomPercent, MAX_STATS_BOTTOM_PERCENT)
             };
 
-            rightInput.value = formatNumberInputValue(newPos.rightPercent);
-            bottomInput.value = formatNumberInputValue(newPos.bottomPercent);
+            rightInput.value = formatNumberInputValue(newPos.rightPercent, MAX_STATS_RIGHT_PERCENT);
+            bottomInput.value = formatNumberInputValue(newPos.bottomPercent, MAX_STATS_BOTTOM_PERCENT);
 
             savePosition(newPos);
             applyBoxPosition(newPos);
@@ -1876,8 +1950,8 @@
         resetPositionBtn.addEventListener('click', () => {
             resetPosition();
             const pos = loadPosition();
-            rightInput.value = formatNumberInputValue(pos.rightPercent);
-            bottomInput.value = formatNumberInputValue(pos.bottomPercent);
+            rightInput.value = formatNumberInputValue(pos.rightPercent, MAX_STATS_RIGHT_PERCENT);
+            bottomInput.value = formatNumberInputValue(pos.bottomPercent, MAX_STATS_BOTTOM_PERCENT);
             applyBoxPosition(pos);
             updateStatsBox();
             setFeedback(`Position réinitialisée pour ${currentPageLabel}.`);
@@ -2013,6 +2087,7 @@
     function refreshForRoute() {
         if (isSupportedPage()) {
             statsCollapsed = loadStatsCollapsed();
+            statsHidden = loadStatsHidden();
 
             if (isHomePage() && !getHomepageChatContainer()) {
                 stopObserver();
