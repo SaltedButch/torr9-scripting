@@ -80,7 +80,7 @@ The intended branch policy is:
 - `hotfix/*`: urgent fixes created from `main`.
 - `userscripts`: generated artifacts branch used by Tampermonkey.
 
-Detailed release steps are documented in [CONTRIBUTING.md](torr9-scripting/CONTRIBUTING.md).
+Detailed release steps are documented in [CONTRIBUTING.md](/CONTRIBUTING.md).
 
 ## GitHub Actions
 
