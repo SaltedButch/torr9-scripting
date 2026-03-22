@@ -1,0 +1,7 @@
+{
+  "repository": "SaltedButch/torr9-scripting",
+  "source_branch": "main",
+  "publish_branch": "userscripts",
+  "scripts_dir": "src/userscripts",
+  "dist_dir": "dist"
+}

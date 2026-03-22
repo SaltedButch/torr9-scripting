@@ -1,0 +1,66 @@
+name: Publish Userscripts
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build userscripts
+        run: python3 tools/build_userscripts.py
+
+      - name: Publish dist to userscripts branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          publish_dir="$(mktemp -d)"
+
+          if git ls-remote --exit-code --heads origin userscripts >/dev/null 2>&1; then
+            git fetch origin userscripts
+            git worktree add "$publish_dir" origin/userscripts
+            git -C "$publish_dir" switch -C userscripts
+          else
+            git worktree add --detach "$publish_dir"
+            git -C "$publish_dir" switch --orphan userscripts
+          fi
+
+          find "$publish_dir" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -R dist/. "$publish_dir"/
+
+          cat > "$publish_dir/README.md" <<'EOF'
+          # Generated userscripts
+
+          Cette branche est générée automatiquement depuis `main`.
+          Installer les scripts via les fichiers `*.user.js`.
+          EOF
+
+          git -C "$publish_dir" config user.name "github-actions[bot]"
+          git -C "$publish_dir" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$publish_dir" add --all
+
+          if git -C "$publish_dir" diff --cached --quiet; then
+            echo "No changes to publish."
+            exit 0
+          fi
+
+          git -C "$publish_dir" commit -m "Publish userscripts for ${GITHUB_SHA}"
+          git -C "$publish_dir" push --force origin userscripts
