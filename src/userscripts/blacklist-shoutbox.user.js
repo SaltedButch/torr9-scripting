@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torr9 Chat - Shoutbox 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.17
+// @version      2.18
 // @description  Blacklist, mise en avant, mentions, stats et réglages live pour la shoutbox Torr9
 // @author       Butchered
 // @match        https://torr9.net/*
@@ -27,6 +27,7 @@
     const MODAL_ID = 'tm-torr9-chat-modal';
     const OVERLAY_ID = 'tm-torr9-chat-overlay';
     const TOAST_ID = 'tm-torr9-chat-toast';
+    const IMAGE_PREVIEW_ID = 'tm-torr9-image-preview';
     const HOME_COLLAPSE_BUTTON_ID = 'tm-home-chat-collapse-toggle';
     const DEFAULT_HIGHLIGHT_COLOR = '#f59e0b';
     const DEFAULT_MENTION_COLOR = '#22c55e';
@@ -49,6 +50,7 @@
     let statsContent = null;
     let routeWatcher = null;
     let modalOpen = false;
+    let hoveredMessageImage = null;
     let debugMode = loadDebugMode();
     let homeChatCollapsed = loadHomeChatCollapsed();
     let statsCollapsed = loadStatsCollapsed();
@@ -1165,6 +1167,7 @@
         if (modal) modal.remove();
         if (overlay) overlay.remove();
         modalOpen = false;
+        hideImagePreview();
         applyChatFontScale(loadChatFontScale());
         applyStatsBoxVisibilityState();
         applyHomepageChatCollapsedState();
@@ -1203,6 +1206,7 @@
         if (modalOpen) return;
 
         modalOpen = true;
+        hideImagePreview();
 
         const currentPos = loadPosition();
         const currentPageLabel = getCurrentPageLabel();
@@ -2027,6 +2031,121 @@
         return '';
     }
 
+    function getMessageTextBlock(messageEl) {
+        if (!(messageEl instanceof HTMLElement)) return null;
+
+        if (isChatPage()) {
+            return messageEl.querySelector(':scope > .flex-1.min-w-0 > .text-sm.text-gray-200.break-words');
+        }
+
+        if (isHomePage()) {
+            return messageEl.querySelector(':scope > .flex-1.min-w-0 > p.break-words.leading-snug');
+        }
+
+        return null;
+    }
+
+    function getMessageContentImageFromTarget(target) {
+        if (!(target instanceof Element)) return null;
+
+        const image = target.closest('img');
+        if (!(image instanceof HTMLImageElement)) return null;
+        if (image.closest(`#${PANEL_ID}, #${MODAL_ID}, #${OVERLAY_ID}, #${TOAST_ID}`)) return null;
+
+        const messageEl = findMessageElementFromTarget(image);
+        if (!messageEl || !messageEl.contains(image)) return null;
+
+        const textBlock = getMessageTextBlock(messageEl);
+        if (!(textBlock instanceof HTMLElement) || !textBlock.contains(image)) return null;
+        if (!image.currentSrc && !image.src) return null;
+        if ((image.naturalWidth && image.naturalWidth <= 32) || (image.naturalHeight && image.naturalHeight <= 32)) {
+            return null;
+        }
+
+        return image;
+    }
+
+    function getOrCreateImagePreview() {
+        let preview = document.getElementById(IMAGE_PREVIEW_ID);
+        if (preview) return preview;
+        if (!document.body) return null;
+
+        preview = document.createElement('div');
+        preview.id = IMAGE_PREVIEW_ID;
+        preview.style.position = 'fixed';
+        preview.style.zIndex = '1000003';
+        preview.style.display = 'none';
+        preview.style.pointerEvents = 'none';
+        preview.style.padding = '8px';
+        preview.style.borderRadius = '14px';
+        preview.style.background = 'rgba(24,24,27,0.96)';
+        preview.style.border = '1px solid rgba(255,255,255,0.08)';
+        preview.style.boxShadow = '0 18px 38px rgba(0,0,0,0.42)';
+        preview.style.backdropFilter = 'blur(8px)';
+
+        const img = document.createElement('img');
+        img.alt = '';
+        img.style.display = 'block';
+        img.style.maxWidth = 'min(520px, calc(100vw - 40px))';
+        img.style.maxHeight = 'min(70vh, 560px)';
+        img.style.borderRadius = '10px';
+        img.style.objectFit = 'contain';
+
+        preview.appendChild(img);
+        document.body.appendChild(preview);
+        return preview;
+    }
+
+    function positionImagePreview(clientX, clientY) {
+        const preview = document.getElementById(IMAGE_PREVIEW_ID);
+        if (!(preview instanceof HTMLElement) || preview.style.display === 'none') return;
+
+        const offset = 18;
+        const rect = preview.getBoundingClientRect();
+        const maxLeft = window.innerWidth - rect.width - 12;
+        const maxTop = window.innerHeight - rect.height - 12;
+        const left = clamp(clientX + offset, 12, Math.max(12, maxLeft));
+        const top = clamp(clientY + offset, 12, Math.max(12, maxTop));
+
+        preview.style.left = `${left}px`;
+        preview.style.top = `${top}px`;
+    }
+
+    function hideImagePreview() {
+        hoveredMessageImage = null;
+
+        const preview = document.getElementById(IMAGE_PREVIEW_ID);
+        if (!(preview instanceof HTMLElement)) return;
+
+        preview.style.display = 'none';
+        preview.style.left = '-9999px';
+        preview.style.top = '-9999px';
+
+        const image = preview.firstElementChild;
+        if (image instanceof HTMLImageElement) {
+            image.removeAttribute('src');
+        }
+    }
+
+    function showImagePreview(imageEl, clientX, clientY) {
+        const preview = getOrCreateImagePreview();
+        if (!(preview instanceof HTMLElement)) return;
+
+        const previewImage = preview.firstElementChild;
+        if (!(previewImage instanceof HTMLImageElement)) return;
+
+        const source = imageEl.currentSrc || imageEl.src;
+        if (!source) {
+            hideImagePreview();
+            return;
+        }
+
+        hoveredMessageImage = imageEl;
+        previewImage.src = source;
+        preview.style.display = 'block';
+        positionImagePreview(clientX, clientY);
+    }
+
     function messageMentionsWatchedUser(messageEl) {
         const watchedUsername = mentionSettings.username;
         if (!watchedUsername) return false;
@@ -2076,6 +2195,32 @@
         }, true);
     }
 
+    function installImagePreviewHandler() {
+        document.addEventListener('mousemove', (event) => {
+            if (modalOpen || !isSupportedPage()) {
+                if (hoveredMessageImage) hideImagePreview();
+                return;
+            }
+
+            const image = getMessageContentImageFromTarget(event.target);
+            if (!image) {
+                if (hoveredMessageImage) hideImagePreview();
+                return;
+            }
+
+            if (hoveredMessageImage !== image) {
+                showImagePreview(image, event.clientX, event.clientY);
+                return;
+            }
+
+            positionImagePreview(event.clientX, event.clientY);
+        }, true);
+
+        document.addEventListener('scroll', () => {
+            if (hoveredMessageImage) hideImagePreview();
+        }, true);
+    }
+
     function stopObserver() {
         if (observer) {
             observer.disconnect();
@@ -2107,6 +2252,7 @@
             stopObserver();
             removeStatsBox();
             closeSettingsModal();
+            hideImagePreview();
             removeToast();
         }
     }
@@ -2161,6 +2307,7 @@
 
     function init() {
         installQuickToggleHandler();
+        installImagePreviewHandler();
         installRouteWatcher();
         document.addEventListener('click', handleStatsBoxActionClick, true);
         refreshForRoute();
