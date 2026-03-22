@@ -1,8 +1,9 @@
 // ==UserScript==
-// @name         Torr9 Chat - filtre users + stats box réglable live
+// @name         Torr9 Chat - Shoutbox 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.15
-// @description  Cache ou met en avant des utilisateurs sur Torr9 avec compteur, debug, couleurs, mentions et reglages live
+// @version      2.17
+// @description  Blacklist, mise en avant, mentions, stats et réglages live pour la shoutbox Torr9
+// @author       Butchered
 // @match        https://torr9.net/*
 // @grant        none
 // ==/UserScript==
@@ -15,10 +16,13 @@
     const STORAGE_KEY_POS_CHAT = 'tm_torr9_stats_box_position_chat';
     const STORAGE_KEY_STATS_COLLAPSED_HOME = 'tm_torr9_stats_box_collapsed_home';
     const STORAGE_KEY_STATS_COLLAPSED_CHAT = 'tm_torr9_stats_box_collapsed_chat';
+    const STORAGE_KEY_STATS_HIDDEN_HOME = 'tm_torr9_stats_box_hidden_home';
+    const STORAGE_KEY_STATS_HIDDEN_CHAT = 'tm_torr9_stats_box_hidden_chat';
     const STORAGE_KEY_DEBUG = 'tm_torr9_debug_mode';
     const STORAGE_KEY_HOME_COLLAPSED = 'tm_torr9_home_chat_collapsed';
     const STORAGE_KEY_HIGHLIGHTED_USERS = 'tm_highlighted_shout_users_torr9';
     const STORAGE_KEY_MENTION_SETTINGS = 'tm_torr9_mention_highlight_settings';
+    const STORAGE_KEY_CHAT_FONT_SCALE = 'tm_torr9_chat_font_scale';
     const PANEL_ID = 'tm-torr9-chat-stats';
     const MODAL_ID = 'tm-torr9-chat-modal';
     const OVERLAY_ID = 'tm-torr9-chat-overlay';
@@ -28,6 +32,11 @@
     const DEFAULT_MENTION_COLOR = '#22c55e';
     const DEFAULT_MENTION_BLINK_SECONDS = 6;
     const DEFAULT_MENTION_KEEP_HIGHLIGHT = true;
+    const DEFAULT_CHAT_FONT_SCALE = 1;
+    const MIN_CHAT_FONT_SCALE = 0.85;
+    const MAX_CHAT_FONT_SCALE = 1.7;
+    const MAX_STATS_RIGHT_PERCENT = 100;
+    const MAX_STATS_BOTTOM_PERCENT = 95;
     const MENTION_STYLE_ID = 'tm-torr9-mention-style';
 
     const DEFAULT_POSITION = {
@@ -43,9 +52,11 @@
     let debugMode = loadDebugMode();
     let homeChatCollapsed = loadHomeChatCollapsed();
     let statsCollapsed = loadStatsCollapsed();
+    let statsHidden = loadStatsHidden();
     let statsUpdateFrame = null;
     let toastHideTimer = null;
     let mentionSettings = loadMentionSettings();
+    let chatFontScale = loadChatFontScale();
 
     const hiddenUsers = loadHiddenUsers();
     const highlightedUsers = loadHighlightedUsers();
@@ -81,6 +92,10 @@
 
     function getStatsCollapsedStorageKey() {
         return isChatPage() ? STORAGE_KEY_STATS_COLLAPSED_CHAT : STORAGE_KEY_STATS_COLLAPSED_HOME;
+    }
+
+    function getStatsHiddenStorageKey() {
+        return isChatPage() ? STORAGE_KEY_STATS_HIDDEN_CHAT : STORAGE_KEY_STATS_HIDDEN_HOME;
     }
 
     function loadHiddenUsers() {
@@ -134,6 +149,19 @@
     function saveStatsCollapsed(value) {
         statsCollapsed = !!value;
         localStorage.setItem(getStatsCollapsedStorageKey(), statsCollapsed ? '1' : '0');
+    }
+
+    function loadStatsHidden() {
+        try {
+            return localStorage.getItem(getStatsHiddenStorageKey()) === '1';
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function saveStatsHidden(value) {
+        statsHidden = !!value;
+        localStorage.setItem(getStatsHiddenStorageKey(), statsHidden ? '1' : '0');
     }
 
     function loadHighlightedUsers() {
@@ -194,6 +222,43 @@
         localStorage.setItem(STORAGE_KEY_MENTION_SETTINGS, JSON.stringify(mentionSettings));
     }
 
+    function clampChatFontScale(value) {
+        return clamp(value, MIN_CHAT_FONT_SCALE, MAX_CHAT_FONT_SCALE);
+    }
+
+    function loadChatFontScale() {
+        try {
+            const rawValue = localStorage.getItem(STORAGE_KEY_CHAT_FONT_SCALE);
+            if (!rawValue) return DEFAULT_CHAT_FONT_SCALE;
+
+            const parsed = Number(String(rawValue).trim().replace(',', '.'));
+            if (Number.isNaN(parsed)) return DEFAULT_CHAT_FONT_SCALE;
+            return clampChatFontScale(parsed);
+        } catch (e) {
+            return DEFAULT_CHAT_FONT_SCALE;
+        }
+    }
+
+    function saveChatFontScale(value) {
+        chatFontScale = clampChatFontScale(value);
+        localStorage.setItem(STORAGE_KEY_CHAT_FONT_SCALE, String(chatFontScale));
+    }
+
+    function formatChatFontScalePercent(value = chatFontScale) {
+        return String(Math.round(clampChatFontScale(value) * 100));
+    }
+
+    function parseChatFontScalePercentInput(value, fallback = DEFAULT_CHAT_FONT_SCALE) {
+        const num = Number(String(value).trim().replace(',', '.'));
+        if (Number.isNaN(num)) return clampChatFontScale(fallback);
+        return clampChatFontScale(num / 100);
+    }
+
+    function scalePixels(basePx, scale = chatFontScale) {
+        const scaled = Math.round(basePx * clampChatFontScale(scale) * 10) / 10;
+        return `${scaled}px`;
+    }
+
     function loadPosition() {
         try {
             const saved = JSON.parse(localStorage.getItem(getPositionStorageKey()) || 'null');
@@ -203,8 +268,8 @@
                 typeof saved.bottomPercent === 'number'
             ) {
                 return {
-                    rightPercent: clamp(saved.rightPercent, 0, 95),
-                    bottomPercent: clamp(saved.bottomPercent, 0, 95)
+                    rightPercent: clamp(saved.rightPercent, 0, MAX_STATS_RIGHT_PERCENT),
+                    bottomPercent: clamp(saved.bottomPercent, 0, MAX_STATS_BOTTOM_PERCENT)
                 };
             }
         } catch (e) {}
@@ -213,8 +278,8 @@
 
     function savePosition(position) {
         localStorage.setItem(getPositionStorageKey(), JSON.stringify({
-            rightPercent: clamp(position.rightPercent, 0, 95),
-            bottomPercent: clamp(position.bottomPercent, 0, 95)
+            rightPercent: clamp(position.rightPercent, 0, MAX_STATS_RIGHT_PERCENT),
+            bottomPercent: clamp(position.bottomPercent, 0, MAX_STATS_BOTTOM_PERCENT)
         }));
     }
 
@@ -258,14 +323,14 @@
         return (name || '').trim().toLowerCase();
     }
 
-    function formatNumberInputValue(value) {
-        return String(clamp(Number(value) || 0, 0, 95));
+    function formatNumberInputValue(value, max = MAX_STATS_BOTTOM_PERCENT) {
+        return String(clamp(Number(value) || 0, 0, max));
     }
 
-    function parsePercentInput(value, fallback) {
+    function parsePercentInput(value, fallback, max = MAX_STATS_BOTTOM_PERCENT) {
         const num = Number(String(value).trim().replace(',', '.'));
         if (Number.isNaN(num)) return fallback;
-        return clamp(num, 0, 95);
+        return clamp(num, 0, max);
     }
 
     function parseBlinkSecondsInput(value, fallback = DEFAULT_MENTION_BLINK_SECONDS) {
@@ -314,6 +379,71 @@
         const chatContainer = container || getHomepageChatContainer();
         if (!(chatContainer instanceof HTMLElement)) return null;
         return chatContainer.querySelector('.custom-scrollbar');
+    }
+
+    function applyMessageTypography(messageEl, scale = chatFontScale) {
+        if (!(messageEl instanceof HTMLElement)) return;
+
+        const safeScale = clampChatFontScale(scale);
+
+        if (isChatPage()) {
+            const userButton = messageEl.querySelector(':scope > .flex-1.min-w-0 > .flex.items-baseline button[type="button"]');
+            const textBlock = messageEl.querySelector(':scope > .flex-1.min-w-0 > .text-sm.text-gray-200.break-words');
+            const metaSpans = messageEl.querySelectorAll(':scope > .flex-1.min-w-0 > .flex.items-baseline span');
+
+            if (userButton instanceof HTMLElement) {
+                userButton.style.fontSize = scalePixels(14, safeScale);
+                userButton.style.lineHeight = '1.35';
+            }
+
+            metaSpans.forEach((span) => {
+                if (span instanceof HTMLElement) {
+                    span.style.fontSize = scalePixels(12, safeScale);
+                    span.style.lineHeight = '1.35';
+                }
+            });
+
+            if (textBlock instanceof HTMLElement) {
+                textBlock.style.fontSize = scalePixels(14, safeScale);
+                textBlock.style.lineHeight = safeScale >= 1.2 ? '1.6' : '1.5';
+            }
+
+            return;
+        }
+
+        if (isHomePage()) {
+            const userSpan = messageEl.querySelector('span.text-xs.font-bold');
+            const textBlock = messageEl.querySelector(':scope > .flex-1.min-w-0 > p.break-words.leading-snug');
+            const metaSpans = messageEl.querySelectorAll(':scope > .flex-1.min-w-0 > .flex.items-center span:not(.text-xs.font-bold)');
+
+            if (userSpan instanceof HTMLElement) {
+                userSpan.style.fontSize = scalePixels(12, safeScale);
+                userSpan.style.lineHeight = '1.35';
+            }
+
+            metaSpans.forEach((span) => {
+                if (span instanceof HTMLElement) {
+                    span.style.fontSize = scalePixels(11, safeScale);
+                    span.style.lineHeight = '1.35';
+                }
+            });
+
+            if (textBlock instanceof HTMLElement) {
+                textBlock.style.fontSize = scalePixels(13, safeScale);
+                textBlock.style.lineHeight = safeScale >= 1.2 ? '1.6' : '1.5';
+            }
+        }
+    }
+
+    function applyChatFontScale(scale = chatFontScale) {
+        const root = getActiveChatRoot();
+        if (!root) return;
+
+        root.querySelectorAll('div').forEach((el) => {
+            if (isChatMessage(el)) {
+                applyMessageTypography(el, scale);
+            }
+        });
     }
 
     function getUsernameFromMessage(messageEl) {
@@ -693,13 +823,18 @@
     function applyBoxPosition(position = null) {
         if (!statsBox) return;
         const pos = position || loadPosition();
-        statsBox.style.right = `${clamp(pos.rightPercent, 0, 95)}%`;
-        statsBox.style.bottom = `${clamp(pos.bottomPercent, 0, 95)}%`;
+        statsBox.style.right = `${clamp(pos.rightPercent, 0, MAX_STATS_RIGHT_PERCENT)}%`;
+        statsBox.style.bottom = `${clamp(pos.bottomPercent, 0, MAX_STATS_BOTTOM_PERCENT)}%`;
     }
 
     function applyStatsBoxCollapsedState() {
         if (!statsBox) return;
         statsBox.style.width = statsCollapsed ? '220px' : '240px';
+    }
+
+    function applyStatsBoxVisibilityState() {
+        if (!statsBox) return;
+        statsBox.style.display = statsHidden ? 'none' : 'block';
     }
 
     function createStatsBox() {
@@ -711,6 +846,7 @@
             statsContent = existing.firstElementChild;
             bindStatsBoxEvents();
             applyStatsBoxCollapsedState();
+            applyStatsBoxVisibilityState();
             applyBoxPosition();
             updateStatsBox();
             return;
@@ -739,6 +875,7 @@
 
         bindStatsBoxEvents();
         applyStatsBoxCollapsedState();
+        applyStatsBoxVisibilityState();
         applyBoxPosition();
         updateStatsBox();
     }
@@ -873,6 +1010,8 @@
     }
 
     function hideOrShowMessage(messageEl) {
+        applyMessageTypography(messageEl);
+
         const username = getLogicalUsername(messageEl);
 
         if (!username) {
@@ -1026,6 +1165,8 @@
         if (modal) modal.remove();
         if (overlay) overlay.remove();
         modalOpen = false;
+        applyChatFontScale(loadChatFontScale());
+        applyStatsBoxVisibilityState();
         applyHomepageChatCollapsedState();
         applyBoxPosition(loadPosition());
         updateStatsBox();
@@ -1066,6 +1207,9 @@
         const currentPos = loadPosition();
         const currentPageLabel = getCurrentPageLabel();
         const homeView = isHomePage();
+        const settingsGridColumns = window.innerWidth >= 780
+            ? 'repeat(2, minmax(0, 1fr))'
+            : 'minmax(0, 1fr)';
 
         const overlay = document.createElement('div');
         overlay.id = OVERLAY_ID;
@@ -1082,7 +1226,9 @@
         modal.style.left = '50%';
         modal.style.transform = 'translate(-50%, -50%)';
         modal.style.zIndex = '1000001';
-        modal.style.width = 'min(520px, calc(100vw - 24px))';
+        modal.style.width = 'min(860px, calc(100vw - 24px))';
+        modal.style.maxHeight = 'min(88vh, 900px)';
+        modal.style.overflowY = 'auto';
         modal.style.background = 'rgba(24,24,27,0.98)';
         modal.style.border = '1px solid rgba(255,255,255,0.08)';
         modal.style.borderRadius = '18px';
@@ -1110,14 +1256,204 @@
             ">×</button>
         </div>
 
-        <div style="display:grid;gap:14px;">
+        <div style="
+            display:grid;
+            grid-template-columns:${settingsGridColumns};
+            gap:14px;
+            align-items:start;
+        ">
+            ${homeView ? `
             <div style="
                 padding:12px;
                 border-radius:14px;
                 background:rgba(255,255,255,0.03);
                 border:1px solid rgba(255,255,255,0.06);
             ">
-                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Gérer les pseudos</div>
+                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Page d’accueil</div>
+
+                <label style="
+                    display:flex;
+                    align-items:center;
+                    gap:10px;
+                    cursor:pointer;
+                    font-size:13px;
+                    color:#e4e4e7;
+                ">
+                    <input id="tm-home-collapse-toggle-setting" type="checkbox" ${homeChatCollapsed ? 'checked' : ''} style="
+                        width:16px;
+                        height:16px;
+                        accent-color:#22c55e;
+                        cursor:pointer;
+                    ">
+                    <span>Masquer la shoutbox</span>
+                </label>
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                    Permet de masquer la shoutbox sur la page d’accueil.
+                </div>
+            </div>
+            ` : ''}
+
+            <div style="
+                padding:12px;
+                border-radius:14px;
+                background:rgba(255,255,255,0.03);
+                border:1px solid rgba(255,255,255,0.06);
+            ">
+                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Position de la stats box (${currentPageLabel})</div>
+
+                <div style="display:grid;gap:12px;">
+                    <label style="display:flex;flex-direction:column;gap:6px;">
+                        <span style="display:flex;justify-content:space-between;gap:12px;font-size:12px;color:#c4c4c8;">
+                            <span>Position (0 Gauche; 100 Droite)</span>
+                            <span id="tm-right-value">${formatNumberInputValue(currentPos.rightPercent, MAX_STATS_RIGHT_PERCENT)}%</span>
+                        </span>
+                        <input id="tm-right-input" type="range" min="0" max="${MAX_STATS_RIGHT_PERCENT}" step="0.5" value="${formatNumberInputValue(currentPos.rightPercent, MAX_STATS_RIGHT_PERCENT)}"
+                            style="
+                                width:100%;
+                                accent-color:#38bdf8;
+                                cursor:pointer;
+                            ">
+                    </label>
+
+                    <label style="display:flex;flex-direction:column;gap:6px;">
+                        <span style="display:flex;justify-content:space-between;gap:12px;font-size:12px;color:#c4c4c8;">
+                            <span>Bas</span>
+                            <span id="tm-bottom-value">${formatNumberInputValue(currentPos.bottomPercent, MAX_STATS_BOTTOM_PERCENT)}%</span>
+                        </span>
+                        <input id="tm-bottom-input" type="range" min="0" max="${MAX_STATS_BOTTOM_PERCENT}" step="0.5" value="${formatNumberInputValue(currentPos.bottomPercent, MAX_STATS_BOTTOM_PERCENT)}"
+                            style="
+                                width:100%;
+                                accent-color:#38bdf8;
+                                cursor:pointer;
+                            ">
+                    </label>
+                </div>
+
+                <label style="
+                    display:flex;
+                    align-items:center;
+                    gap:10px;
+                    cursor:pointer;
+                    font-size:12px;
+                    color:#d4d4d8;
+                    margin-top:12px;
+                ">
+                    <input id="tm-hide-stats-toggle" type="checkbox" ${statsHidden ? 'checked' : ''} style="
+                        width:16px;
+                        height:16px;
+                        accent-color:#f59e0b;
+                        cursor:pointer;
+                    ">
+                    <span>Masquer complètement la stats box</span>
+                </label>
+
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
+                    <button id="tm-save-position" style="
+                        border:none;
+                        background:#16a34a;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">Enregistrer</button>
+
+                    <button id="tm-reset-position" style="
+                        border:none;
+                        background:#3f3f46;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">Reset position</button>
+                </div>
+            </div>
+
+            <div style="
+                padding:12px;
+                border-radius:14px;
+                background:rgba(255,255,255,0.03);
+                border:1px solid rgba(255,255,255,0.06);
+            ">
+                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Accessibilité</div>
+
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+                    <div style="font-size:12px;color:#c4c4c8;">
+                        Taille de police shoutbox
+                    </div>
+                    <div id="tm-font-size-value" style="
+                        min-width:52px;
+                        text-align:right;
+                        font-size:12px;
+                        color:#f4f4f5;
+                        font-weight:700;
+                    ">${formatChatFontScalePercent()}%</div>
+                </div>
+
+                <input id="tm-font-size-range" type="range" min="${MIN_CHAT_FONT_SCALE * 100}" max="${MAX_CHAT_FONT_SCALE * 100}" step="5" value="${formatChatFontScalePercent()}"
+                    style="
+                        width:100%;
+                        margin-top:12px;
+                        accent-color:#38bdf8;
+                        cursor:pointer;
+                    ">
+
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
+                    <button id="tm-font-size-decrease" style="
+                        border:none;
+                        background:#3f3f46;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">A-</button>
+
+                    <button id="tm-font-size-increase" style="
+                        border:none;
+                        background:#0f766e;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">A+</button>
+
+                    <button id="tm-font-size-save" style="
+                        border:none;
+                        background:#2563eb;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">Enregistrer</button>
+
+                    <button id="tm-font-size-reset" style="
+                        border:none;
+                        background:#3f3f46;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">Reset police</button>
+                </div>
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                    Agrandit ou réduit les pseudos et les messages dans la shoutbox. L’aperçu est immédiat sur la vue courante.
+                </div>
+            </div>
+
+            <div style="
+                padding:12px;
+                border-radius:14px;
+                background:rgba(255,255,255,0.03);
+                border:1px solid rgba(255,255,255,0.06);
+            ">
+                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Blacklist</div>
 
                 <div style="display:flex;gap:8px;flex-wrap:wrap;">
                     <input id="tm-user-input" type="text" placeholder="Pseudo"
@@ -1154,7 +1490,7 @@
                 "></div>
 
                 <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.4;">
-                    Clique sur un pseudo pour le charger dans le champ. Alt+clic directement sur un pseudo du chat pour le masquer.
+                    Clique sur un pseudo pour le charger dans le champ. Alt+clic directement sur un pseudo du chat permet de le blacklister.
                 </div>
             </div>
 
@@ -1209,6 +1545,7 @@
                         cursor:pointer;
                         font-weight:600;
                     ">Retirer</button>
+
                 </div>
 
                 <div style="margin-top:10px;font-size:12px;color:#a1a1aa;line-height:1.5;">
@@ -1235,9 +1572,10 @@
             ">
                 <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Mentions @moi</div>
 
-                <div style="display:grid;grid-template-columns:minmax(0,1fr) auto auto auto;gap:8px;align-items:center;">
+                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
                     <input id="tm-mention-user-input" type="text" placeholder="Mon pseudo" value="${escapeHtml(mentionSettings.username)}"
                         style="
+                            flex:1 1 180px;
                             min-width:0;
                             background:#18181b;
                             color:#fff;
@@ -1283,6 +1621,7 @@
                 <label style="
                     display:flex;
                     align-items:center;
+                    flex-wrap:wrap;
                     gap:10px;
                     cursor:pointer;
                     font-size:12px;
@@ -1300,97 +1639,6 @@
 
                 <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
                     Quand un message contient @tonpseudo, il est surligne avec cette couleur. Mets 0 seconde pour desactiver le clignotement et laisse le pseudo vide pour couper la surveillance.
-                </div>
-            </div>
-
-            ${homeView ? `
-            <div style="
-                padding:12px;
-                border-radius:14px;
-                background:rgba(255,255,255,0.03);
-                border:1px solid rgba(255,255,255,0.06);
-            ">
-                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Affichage accueil</div>
-
-                <label style="
-                    display:flex;
-                    align-items:center;
-                    gap:10px;
-                    cursor:pointer;
-                    font-size:13px;
-                    color:#e4e4e7;
-                ">
-                    <input id="tm-home-collapse-toggle-setting" type="checkbox" ${homeChatCollapsed ? 'checked' : ''} style="
-                        width:16px;
-                        height:16px;
-                        accent-color:#22c55e;
-                        cursor:pointer;
-                    ">
-                    <span>Ne garder que le bandeau du chat</span>
-                </label>
-
-                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
-                    Sur la page d’accueil uniquement, masque les messages et la zone de saisie en gardant le bandeau supérieur.
-                </div>
-            </div>
-            ` : ''}
-
-            <div style="
-                padding:12px;
-                border-radius:14px;
-                background:rgba(255,255,255,0.03);
-                border:1px solid rgba(255,255,255,0.06);
-            ">
-                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Position de la stats box (${currentPageLabel})</div>
-
-                <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
-                    <label style="display:flex;flex-direction:column;gap:6px;">
-                        <span style="font-size:12px;color:#c4c4c8;">Right %</span>
-                        <input id="tm-right-input" type="number" min="0" max="95" step="0.1" value="${formatNumberInputValue(currentPos.rightPercent)}"
-                            style="
-                                background:#18181b;
-                                color:#fff;
-                                border:1px solid rgba(255,255,255,0.10);
-                                border-radius:10px;
-                                padding:10px 12px;
-                                outline:none;
-                            ">
-                    </label>
-
-                    <label style="display:flex;flex-direction:column;gap:6px;">
-                        <span style="font-size:12px;color:#c4c4c8;">Bottom %</span>
-                        <input id="tm-bottom-input" type="number" min="0" max="95" step="0.1" value="${formatNumberInputValue(currentPos.bottomPercent)}"
-                            style="
-                                background:#18181b;
-                                color:#fff;
-                                border:1px solid rgba(255,255,255,0.10);
-                                border-radius:10px;
-                                padding:10px 12px;
-                                outline:none;
-                            ">
-                    </label>
-                </div>
-
-                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
-                    <button id="tm-save-position" style="
-                        border:none;
-                        background:#16a34a;
-                        color:#fff;
-                        border-radius:10px;
-                        padding:10px 12px;
-                        cursor:pointer;
-                        font-weight:600;
-                    ">Enregistrer</button>
-
-                    <button id="tm-reset-position" style="
-                        border:none;
-                        background:#3f3f46;
-                        color:#fff;
-                        border-radius:10px;
-                        padding:10px 12px;
-                        cursor:pointer;
-                        font-weight:600;
-                    ">Reset position</button>
                 </div>
             </div>
 
@@ -1420,7 +1668,7 @@
                 </label>
 
                 <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
-                    En mode debug, les messages blacklistés ne sont pas cachés : ils sont surlignés en rouge.
+                    Ajuste la position sur cette vue et masque complètement la stats box si besoin.
                 </div>
             </div>
 
@@ -1449,10 +1697,19 @@
         const mentionBlinkInput = modal.querySelector('#tm-mention-blink-input');
         const mentionKeepHighlightToggle = modal.querySelector('#tm-mention-keep-highlight-toggle');
         const mentionSaveBtn = modal.querySelector('#tm-mention-save');
+        const fontSizeRange = modal.querySelector('#tm-font-size-range');
+        const fontSizeValue = modal.querySelector('#tm-font-size-value');
+        const fontSizeDecreaseBtn = modal.querySelector('#tm-font-size-decrease');
+        const fontSizeIncreaseBtn = modal.querySelector('#tm-font-size-increase');
+        const fontSizeSaveBtn = modal.querySelector('#tm-font-size-save');
+        const fontSizeResetBtn = modal.querySelector('#tm-font-size-reset');
         const rightInput = modal.querySelector('#tm-right-input');
+        const rightValue = modal.querySelector('#tm-right-value');
         const bottomInput = modal.querySelector('#tm-bottom-input');
+        const bottomValue = modal.querySelector('#tm-bottom-value');
         const savePositionBtn = modal.querySelector('#tm-save-position');
         const resetPositionBtn = modal.querySelector('#tm-reset-position');
+        const hideStatsToggle = modal.querySelector('#tm-hide-stats-toggle');
         const debugToggle = modal.querySelector('#tm-debug-toggle');
         const homeCollapseToggle = modal.querySelector('#tm-home-collapse-toggle-setting');
         const feedback = modal.querySelector('#tm-feedback');
@@ -1542,10 +1799,26 @@
         function previewPosition() {
             const fallback = loadPosition();
             const preview = {
-                rightPercent: parsePercentInput(rightInput.value, fallback.rightPercent),
-                bottomPercent: parsePercentInput(bottomInput.value, fallback.bottomPercent)
+                rightPercent: parsePercentInput(rightInput.value, fallback.rightPercent, MAX_STATS_RIGHT_PERCENT),
+                bottomPercent: parsePercentInput(bottomInput.value, fallback.bottomPercent, MAX_STATS_BOTTOM_PERCENT)
             };
+
+            if (rightValue) rightValue.textContent = `${formatNumberInputValue(preview.rightPercent, MAX_STATS_RIGHT_PERCENT)}%`;
+            if (bottomValue) bottomValue.textContent = `${formatNumberInputValue(preview.bottomPercent, MAX_STATS_BOTTOM_PERCENT)}%`;
             applyBoxPosition(preview);
+        }
+
+        function syncFontSizeValueLabel() {
+            if (fontSizeValue && fontSizeRange) {
+                fontSizeValue.textContent = `${fontSizeRange.value}%`;
+            }
+        }
+
+        function setPreviewFontScale(scale) {
+            if (!fontSizeRange) return;
+            fontSizeRange.value = formatChatFontScalePercent(scale);
+            syncFontSizeValueLabel();
+            applyChatFontScale(scale);
         }
 
         closeBtn.addEventListener('click', closeSettingsModal);
@@ -1620,17 +1893,53 @@
             }
         });
 
+        fontSizeRange?.addEventListener('input', () => {
+            syncFontSizeValueLabel();
+            applyChatFontScale(parseChatFontScalePercentInput(fontSizeRange.value, chatFontScale));
+        });
+
+        fontSizeDecreaseBtn?.addEventListener('click', () => {
+            const nextScale = parseChatFontScalePercentInput((Number(fontSizeRange?.value || formatChatFontScalePercent()) - 5), chatFontScale);
+            setPreviewFontScale(nextScale);
+        });
+
+        fontSizeIncreaseBtn?.addEventListener('click', () => {
+            const nextScale = parseChatFontScalePercentInput((Number(fontSizeRange?.value || formatChatFontScalePercent()) + 5), chatFontScale);
+            setPreviewFontScale(nextScale);
+        });
+
+        fontSizeSaveBtn?.addEventListener('click', () => {
+            const nextScale = parseChatFontScalePercentInput(fontSizeRange?.value || formatChatFontScalePercent(), chatFontScale);
+            saveChatFontScale(nextScale);
+            applyChatFontScale();
+            setPreviewFontScale(chatFontScale);
+            setFeedback(`Taille de police enregistrée : ${formatChatFontScalePercent()}%.`);
+        });
+
+        fontSizeResetBtn?.addEventListener('click', () => {
+            saveChatFontScale(DEFAULT_CHAT_FONT_SCALE);
+            applyChatFontScale();
+            setPreviewFontScale(chatFontScale);
+            setFeedback('Taille de police réinitialisée.');
+        });
+
         rightInput.addEventListener('input', previewPosition);
         bottomInput.addEventListener('input', previewPosition);
 
+        hideStatsToggle?.addEventListener('change', () => {
+            saveStatsHidden(hideStatsToggle.checked);
+            applyStatsBoxVisibilityState();
+            setFeedback(statsHidden ? `Stats box masquée pour ${currentPageLabel}.` : `Stats box affichée pour ${currentPageLabel}.`);
+        });
+
         savePositionBtn.addEventListener('click', () => {
             const newPos = {
-                rightPercent: parsePercentInput(rightInput.value, DEFAULT_POSITION.rightPercent),
-                bottomPercent: parsePercentInput(bottomInput.value, DEFAULT_POSITION.bottomPercent)
+                rightPercent: parsePercentInput(rightInput.value, DEFAULT_POSITION.rightPercent, MAX_STATS_RIGHT_PERCENT),
+                bottomPercent: parsePercentInput(bottomInput.value, DEFAULT_POSITION.bottomPercent, MAX_STATS_BOTTOM_PERCENT)
             };
 
-            rightInput.value = formatNumberInputValue(newPos.rightPercent);
-            bottomInput.value = formatNumberInputValue(newPos.bottomPercent);
+            rightInput.value = formatNumberInputValue(newPos.rightPercent, MAX_STATS_RIGHT_PERCENT);
+            bottomInput.value = formatNumberInputValue(newPos.bottomPercent, MAX_STATS_BOTTOM_PERCENT);
 
             savePosition(newPos);
             applyBoxPosition(newPos);
@@ -1641,8 +1950,8 @@
         resetPositionBtn.addEventListener('click', () => {
             resetPosition();
             const pos = loadPosition();
-            rightInput.value = formatNumberInputValue(pos.rightPercent);
-            bottomInput.value = formatNumberInputValue(pos.bottomPercent);
+            rightInput.value = formatNumberInputValue(pos.rightPercent, MAX_STATS_RIGHT_PERCENT);
+            bottomInput.value = formatNumberInputValue(pos.bottomPercent, MAX_STATS_BOTTOM_PERCENT);
             applyBoxPosition(pos);
             updateStatsBox();
             setFeedback(`Position réinitialisée pour ${currentPageLabel}.`);
@@ -1670,6 +1979,7 @@
         refreshHiddenUsersList();
         refreshHighlightedUsersList();
         userInput.focus();
+        syncFontSizeValueLabel();
         previewPosition();
     }
 
@@ -1777,6 +2087,7 @@
     function refreshForRoute() {
         if (isSupportedPage()) {
             statsCollapsed = loadStatsCollapsed();
+            statsHidden = loadStatsHidden();
 
             if (isHomePage() && !getHomepageChatContainer()) {
                 stopObserver();
