@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torr9 Chat - Shoutbox 2.0
 // @namespace    https://github.com/SaltedButch/torr9-scripting
-// @version      2.19
+// @version      2.22
 // @description  Blacklist, mise en avant, mentions, stats et réglages live pour la shoutbox Torr9
 // @author       Butchered
 // @match        https://torr9.net/*
@@ -25,6 +25,7 @@
     const STORAGE_KEY_HOME_COLLAPSED = 'tm_torr9_home_chat_collapsed';
     const STORAGE_KEY_HIGHLIGHTED_USERS = 'tm_highlighted_shout_users_torr9';
     const STORAGE_KEY_MENTION_SETTINGS = 'tm_torr9_mention_highlight_settings';
+    const STORAGE_KEY_LAST_MENTION_SOUND_NOTIFICATION = 'tm_torr9_last_mention_sound_notification';
     const STORAGE_KEY_CHAT_FONT_SCALE = 'tm_torr9_chat_font_scale';
     const PANEL_ID = 'tm-torr9-chat-stats';
     const MODAL_ID = 'tm-torr9-chat-modal';
@@ -68,7 +69,8 @@
     let chatFontScale = loadChatFontScale();
     let mentionSoundContext = null;
     let mentionSoundElement = null;
-    let lastMentionSoundAt = 0;
+    let lastMentionSoundRecord = loadLastMentionSoundRecord();
+    let lastMentionSoundAt = lastMentionSoundRecord?.notifiedAt || 0;
 
     const hiddenUsers = loadHiddenUsers();
     const highlightedUsers = loadHighlightedUsers();
@@ -251,6 +253,46 @@
         localStorage.setItem(STORAGE_KEY_MENTION_SETTINGS, JSON.stringify(mentionSettings));
     }
 
+    function loadLastMentionSoundRecord() {
+        try {
+            const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY_LAST_MENTION_SOUND_NOTIFICATION) || 'null');
+            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+
+            const hash = String(parsed.hash || '').trim();
+            const messageTimestamp = String(parsed.messageTimestamp || '').trim();
+            const messageTimestampKey = Number(parsed.messageTimestampKey) || 0;
+            const notifiedAt = Number(parsed.notifiedAt) || 0;
+
+            if (!hash || !messageTimestamp || messageTimestampKey <= 0 || notifiedAt <= 0) return null;
+            return { hash, messageTimestamp, messageTimestampKey, notifiedAt };
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function saveLastMentionSoundRecord(record) {
+        if (
+            !record ||
+            typeof record !== 'object' ||
+            !String(record.hash || '').trim() ||
+            !String(record.messageTimestamp || '').trim() ||
+            !(Number(record.messageTimestampKey) > 0) ||
+            !(Number(record.notifiedAt) > 0)
+        ) {
+            lastMentionSoundRecord = null;
+            localStorage.removeItem(STORAGE_KEY_LAST_MENTION_SOUND_NOTIFICATION);
+            return;
+        }
+
+        lastMentionSoundRecord = {
+            hash: String(record.hash).trim(),
+            messageTimestamp: String(record.messageTimestamp).trim(),
+            messageTimestampKey: Number(record.messageTimestampKey),
+            notifiedAt: Number(record.notifiedAt)
+        };
+        localStorage.setItem(STORAGE_KEY_LAST_MENTION_SOUND_NOTIFICATION, JSON.stringify(lastMentionSoundRecord));
+    }
+
     function clampChatFontScale(value) {
         return clamp(value, MIN_CHAT_FONT_SCALE, MAX_CHAT_FONT_SCALE);
     }
@@ -386,6 +428,17 @@
         if (/^https?:\/\//i.test(raw)) return raw;
         if (/^data:audio\//i.test(raw)) return raw;
         return DEFAULT_MENTION_SOUND_CUSTOM_URL;
+    }
+
+    function hashString(value) {
+        let hash = 5381;
+        const input = String(value || '');
+
+        for (let i = 0; i < input.length; i += 1) {
+            hash = ((hash << 5) + hash) ^ input.charCodeAt(i);
+        }
+
+        return (hash >>> 0).toString(36);
     }
 
     function escapeHtml(str) {
@@ -564,6 +617,23 @@
             .sort((a, b) => b[1] - a[1]);
 
         const total = entries.reduce((sum, [, count]) => sum + count, 0);
+        const settingsButtonHtml = `
+            <button type="button" data-tm-action="open-settings" title="Ouvrir les paramètres" aria-label="Ouvrir les paramètres" style="
+                border:none;
+                background:#27272a;
+                color:#d4d4d8;
+                border-radius:8px;
+                width:24px;
+                height:24px;
+                display:inline-flex;
+                align-items:center;
+                justify-content:center;
+                cursor:pointer;
+                font-size:14px;
+                font-weight:600;
+                line-height:1;
+            ">⚙</button>
+        `;
 
         if (statsCollapsed) {
             return `
@@ -571,7 +641,45 @@
                     <div style="font-weight:700;font-size:13px;color:#fff;">
                         Messages bloqués
                     </div>
-                    <button type="button" data-tm-action="toggle-stats-collapsed" title="Développer la stats box" aria-label="Développer la stats box" style="
+                    <div style="display:flex;align-items:center;gap:6px;">
+                        ${settingsButtonHtml}
+                        <button type="button" data-tm-action="toggle-stats-collapsed" title="Développer la stats box" aria-label="Développer la stats box" style="
+                            border:none;
+                            background:#27272a;
+                            color:#d4d4d8;
+                            border-radius:8px;
+                            width:24px;
+                            height:24px;
+                            display:inline-flex;
+                            align-items:center;
+                            justify-content:center;
+                            cursor:pointer;
+                            font-size:15px;
+                            font-weight:600;
+                            line-height:1;
+                        ">+</button>
+                    </div>
+                </div>
+
+                <div style="font-size:12px;color:#cfcfcf;">
+                    Total session : <span style="color:#fff;font-weight:700;">${total}</span>
+                </div>
+
+                <div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.08);font-size:11px;color:#9ca3af;line-height:1.45;">
+                    <p>Ctrl+Alt+C ou Ctrl+Cmd+C : paramètres · Alt+clic pseudo : pour blacklister</p>
+                    <p>${debugMode ? 'toggle · Debug ON' : ''}</p>
+                </div>
+            `;
+        }
+
+        let html = `
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px;">
+                <div style="font-weight:700;font-size:13px;color:#fff;">
+                    Messages bloqués
+                </div>
+                <div style="display:flex;align-items:center;gap:6px;">
+                    ${settingsButtonHtml}
+                    <button type="button" data-tm-action="toggle-stats-collapsed" title="Réduire la stats box" aria-label="Réduire la stats box" style="
                         border:none;
                         background:#27272a;
                         color:#d4d4d8;
@@ -585,40 +693,8 @@
                         font-size:15px;
                         font-weight:600;
                         line-height:1;
-                    ">+</button>
+                    ">-</button>
                 </div>
-
-                <div style="font-size:12px;color:#cfcfcf;">
-                    Total session : <span style="color:#fff;font-weight:700;">${total}</span>
-                </div>
-
-                <div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.08);font-size:11px;color:#9ca3af;line-height:1.45;">
-                    <p>Ctrl+Alt+C : paramètres · Alt+clic pseudo : pour blacklister</p>
-                    <p>${debugMode ? 'toggle · Debug ON' : ''}</p>
-                </div>
-            `;
-        }
-
-        let html = `
-            <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px;">
-                <div style="font-weight:700;font-size:13px;color:#fff;">
-                    Messages bloqués
-                </div>
-                <button type="button" data-tm-action="toggle-stats-collapsed" title="Réduire la stats box" aria-label="Réduire la stats box" style="
-                    border:none;
-                    background:#27272a;
-                    color:#d4d4d8;
-                    border-radius:8px;
-                    width:24px;
-                    height:24px;
-                    display:inline-flex;
-                    align-items:center;
-                    justify-content:center;
-                    cursor:pointer;
-                    font-size:15px;
-                    font-weight:600;
-                    line-height:1;
-                ">-</button>
             </div>
 
             <div style="font-size:12px;color:#cfcfcf;margin-bottom:8px;">
@@ -650,7 +726,7 @@
 
         html += `
             <div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.08);font-size:11px;color:#9ca3af;line-height:1.45;">
-                <p>Ctrl+Alt+C : paramètres · Alt+clic pseudo : pour blacklister</p>
+                <p>Ctrl+Alt+C ou Ctrl+Cmd+C : paramètres · Alt+clic pseudo : pour blacklister</p>
                 <p>${debugMode ? 'toggle · Debug ON' : ''}</p>
             </div>
         `;
@@ -1210,6 +1286,22 @@
         if (!mentionSettings.soundEnabled) return;
         if (mentionSoundNotifiedMessages.has(messageEl)) return;
 
+        const signature = getMentionNotificationSignature(messageEl);
+        if (
+            signature &&
+            lastMentionSoundRecord &&
+            (
+                signature.messageTimestampKey < lastMentionSoundRecord.messageTimestampKey ||
+                (
+                    signature.messageTimestampKey === lastMentionSoundRecord.messageTimestampKey &&
+                    signature.hash === lastMentionSoundRecord.hash
+                )
+            )
+        ) {
+            mentionSoundNotifiedMessages.add(messageEl);
+            return;
+        }
+
         mentionSoundNotifiedMessages.add(messageEl);
 
         const cooldownSeconds = parseMentionSoundCooldownInput(
@@ -1223,7 +1315,15 @@
         }
 
         lastMentionSoundAt = now;
-        void playMentionNotificationSound(mentionSettings.soundStyle, mentionSettings.soundCustomUrl);
+        void playMentionNotificationSound(mentionSettings.soundStyle, mentionSettings.soundCustomUrl).then((played) => {
+            if (!played || !signature) return;
+            saveLastMentionSoundRecord({
+                hash: signature.hash,
+                messageTimestamp: signature.messageTimestamp,
+                messageTimestampKey: signature.messageTimestampKey,
+                notifiedAt: now
+            });
+        });
     }
 
     function hideOrShowMessage(messageEl, options = {}) {
@@ -1442,6 +1542,13 @@
             event.preventDefault();
             event.stopPropagation();
             toggleStatsCollapsed();
+            return;
+        }
+
+        if (action === 'open-settings') {
+            event.preventDefault();
+            event.stopPropagation();
+            openSettingsModal();
             return;
         }
 
@@ -2438,6 +2545,61 @@
         return '';
     }
 
+    function getMessageTimestampText(messageEl) {
+        if (!(messageEl instanceof HTMLElement)) return '';
+
+        if (isChatPage()) {
+            const metaSpan = messageEl.querySelector(':scope > .flex-1.min-w-0 > .flex.items-baseline span');
+            return (metaSpan?.textContent || '').trim();
+        }
+
+        if (isHomePage()) {
+            const metaSpans = messageEl.querySelectorAll(':scope > .flex-1.min-w-0 > .flex.items-center span:not(.text-xs.font-bold)');
+            return Array.from(metaSpans)
+                .map((span) => span.textContent.trim())
+                .filter(Boolean)
+                .join(' | ');
+        }
+
+        return '';
+    }
+
+    function parseMessageTimestampKey(timestampText) {
+        const raw = String(timestampText || '').trim();
+        if (!raw) return 0;
+
+        const match = raw.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s*[aà]\s*|\s+)(\d{1,2}):(\d{2})(?::(\d{2}))?/i);
+        if (!match) return 0;
+
+        const [, dayRaw, monthRaw, yearRaw, hourRaw, minuteRaw, secondRaw = '0'] = match;
+        const day = Number(dayRaw);
+        const monthIndex = Number(monthRaw) - 1;
+        const year = Number(yearRaw);
+        const hour = Number(hourRaw);
+        const minute = Number(minuteRaw);
+        const second = Number(secondRaw);
+
+        const timestamp = new Date(year, monthIndex, day, hour, minute, second).getTime();
+        return Number.isFinite(timestamp) ? timestamp : 0;
+    }
+
+    function getMentionNotificationSignature(messageEl) {
+        if (!(messageEl instanceof HTMLElement)) return null;
+
+        const username = normalizeName(getLogicalUsername(messageEl) || '');
+        const messageText = getMessageTextContent(messageEl);
+        const messageTimestamp = getMessageTimestampText(messageEl);
+        const messageTimestampKey = parseMessageTimestampKey(messageTimestamp);
+
+        if (!username || !messageText || !messageTimestamp || messageTimestampKey <= 0) return null;
+
+        return {
+            hash: hashString(`${location.pathname}|${username}|${messageTimestamp}|${messageText}`),
+            messageTimestamp,
+            messageTimestampKey
+        };
+    }
+
     function getMessageTextBlock(messageEl) {
         if (!(messageEl instanceof HTMLElement)) return null;
 
@@ -2705,7 +2867,11 @@
     }
 
     document.addEventListener('keydown', function (e) {
-        if (e.ctrlKey && e.altKey && e.key.toLowerCase() === 'c') {
+        const key = String(e.key || '').toLowerCase();
+        const isClassicShortcut = e.ctrlKey && e.altKey && !e.metaKey && key === 'c';
+        const isMacShortcut = e.ctrlKey && e.metaKey && !e.altKey && key === 'c';
+
+        if (isClassicShortcut || isMacShortcut) {
             if (!isSupportedPage()) return;
             e.preventDefault();
             openSettingsModal();
@@ -2718,7 +2884,7 @@
         installRouteWatcher();
         document.addEventListener('click', handleStatsBoxActionClick, true);
         refreshForRoute();
-        console.log('[Torr9 Chat] Script actif. Raccourci : Ctrl+Alt+C');
+        console.log('[Torr9 Chat] Script actif. Raccourcis : Ctrl+Alt+C / Ctrl+Cmd+C');
     }
 
     if (document.readyState === 'loading') {
