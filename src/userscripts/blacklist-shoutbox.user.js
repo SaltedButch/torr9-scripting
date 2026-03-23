@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torr9 Chat - Shoutbox 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.20
+// @version      2.22
 // @description  Blacklist, mise en avant, mentions, stats et réglages live pour la shoutbox Torr9
 // @author       Butchered
 // @match        https://torr9.net/*
@@ -614,6 +614,23 @@
             .sort((a, b) => b[1] - a[1]);
 
         const total = entries.reduce((sum, [, count]) => sum + count, 0);
+        const settingsButtonHtml = `
+            <button type="button" data-tm-action="open-settings" title="Ouvrir les paramètres" aria-label="Ouvrir les paramètres" style="
+                border:none;
+                background:#27272a;
+                color:#d4d4d8;
+                border-radius:8px;
+                width:24px;
+                height:24px;
+                display:inline-flex;
+                align-items:center;
+                justify-content:center;
+                cursor:pointer;
+                font-size:14px;
+                font-weight:600;
+                line-height:1;
+            ">⚙</button>
+        `;
 
         if (statsCollapsed) {
             return `
@@ -621,7 +638,45 @@
                     <div style="font-weight:700;font-size:13px;color:#fff;">
                         Messages bloqués
                     </div>
-                    <button type="button" data-tm-action="toggle-stats-collapsed" title="Développer la stats box" aria-label="Développer la stats box" style="
+                    <div style="display:flex;align-items:center;gap:6px;">
+                        ${settingsButtonHtml}
+                        <button type="button" data-tm-action="toggle-stats-collapsed" title="Développer la stats box" aria-label="Développer la stats box" style="
+                            border:none;
+                            background:#27272a;
+                            color:#d4d4d8;
+                            border-radius:8px;
+                            width:24px;
+                            height:24px;
+                            display:inline-flex;
+                            align-items:center;
+                            justify-content:center;
+                            cursor:pointer;
+                            font-size:15px;
+                            font-weight:600;
+                            line-height:1;
+                        ">+</button>
+                    </div>
+                </div>
+
+                <div style="font-size:12px;color:#cfcfcf;">
+                    Total session : <span style="color:#fff;font-weight:700;">${total}</span>
+                </div>
+
+                <div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.08);font-size:11px;color:#9ca3af;line-height:1.45;">
+                    <p>Ctrl+Alt+C ou Ctrl+Cmd+C : paramètres · Alt+clic pseudo : pour blacklister</p>
+                    <p>${debugMode ? 'toggle · Debug ON' : ''}</p>
+                </div>
+            `;
+        }
+
+        let html = `
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px;">
+                <div style="font-weight:700;font-size:13px;color:#fff;">
+                    Messages bloqués
+                </div>
+                <div style="display:flex;align-items:center;gap:6px;">
+                    ${settingsButtonHtml}
+                    <button type="button" data-tm-action="toggle-stats-collapsed" title="Réduire la stats box" aria-label="Réduire la stats box" style="
                         border:none;
                         background:#27272a;
                         color:#d4d4d8;
@@ -635,40 +690,8 @@
                         font-size:15px;
                         font-weight:600;
                         line-height:1;
-                    ">+</button>
+                    ">-</button>
                 </div>
-
-                <div style="font-size:12px;color:#cfcfcf;">
-                    Total session : <span style="color:#fff;font-weight:700;">${total}</span>
-                </div>
-
-                <div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.08);font-size:11px;color:#9ca3af;line-height:1.45;">
-                    <p>Ctrl+Alt+C : paramètres · Alt+clic pseudo : pour blacklister</p>
-                    <p>${debugMode ? 'toggle · Debug ON' : ''}</p>
-                </div>
-            `;
-        }
-
-        let html = `
-            <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px;">
-                <div style="font-weight:700;font-size:13px;color:#fff;">
-                    Messages bloqués
-                </div>
-                <button type="button" data-tm-action="toggle-stats-collapsed" title="Réduire la stats box" aria-label="Réduire la stats box" style="
-                    border:none;
-                    background:#27272a;
-                    color:#d4d4d8;
-                    border-radius:8px;
-                    width:24px;
-                    height:24px;
-                    display:inline-flex;
-                    align-items:center;
-                    justify-content:center;
-                    cursor:pointer;
-                    font-size:15px;
-                    font-weight:600;
-                    line-height:1;
-                ">-</button>
             </div>
 
             <div style="font-size:12px;color:#cfcfcf;margin-bottom:8px;">
@@ -700,7 +723,7 @@
 
         html += `
             <div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.08);font-size:11px;color:#9ca3af;line-height:1.45;">
-                <p>Ctrl+Alt+C : paramètres · Alt+clic pseudo : pour blacklister</p>
+                <p>Ctrl+Alt+C ou Ctrl+Cmd+C : paramètres · Alt+clic pseudo : pour blacklister</p>
                 <p>${debugMode ? 'toggle · Debug ON' : ''}</p>
             </div>
         `;
@@ -1516,6 +1539,13 @@
             event.preventDefault();
             event.stopPropagation();
             toggleStatsCollapsed();
+            return;
+        }
+
+        if (action === 'open-settings') {
+            event.preventDefault();
+            event.stopPropagation();
+            openSettingsModal();
             return;
         }
 
@@ -2834,7 +2864,11 @@
     }
 
     document.addEventListener('keydown', function (e) {
-        if (e.ctrlKey && e.altKey && e.key.toLowerCase() === 'c') {
+        const key = String(e.key || '').toLowerCase();
+        const isClassicShortcut = e.ctrlKey && e.altKey && !e.metaKey && key === 'c';
+        const isMacShortcut = e.ctrlKey && e.metaKey && !e.altKey && key === 'c';
+
+        if (isClassicShortcut || isMacShortcut) {
             if (!isSupportedPage()) return;
             e.preventDefault();
             openSettingsModal();
@@ -2847,7 +2881,7 @@
         installRouteWatcher();
         document.addEventListener('click', handleStatsBoxActionClick, true);
         refreshForRoute();
-        console.log('[Torr9 Chat] Script actif. Raccourci : Ctrl+Alt+C');
+        console.log('[Torr9 Chat] Script actif. Raccourcis : Ctrl+Alt+C / Ctrl+Cmd+C');
     }
 
     if (document.readyState === 'loading') {
