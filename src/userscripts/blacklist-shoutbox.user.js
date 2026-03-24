@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torr9 Chat - Shoutbox 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.22
+// @version      2.30
 // @description  Blacklist, mise en avant, mentions, stats et réglages live pour la shoutbox Torr9
 // @author       Butchered
 // @match        https://torr9.net/*
@@ -23,7 +23,10 @@
     const STORAGE_KEY_HIGHLIGHTED_USERS = 'tm_highlighted_shout_users_torr9';
     const STORAGE_KEY_MENTION_SETTINGS = 'tm_torr9_mention_highlight_settings';
     const STORAGE_KEY_LAST_MENTION_SOUND_NOTIFICATION = 'tm_torr9_last_mention_sound_notification';
+    const STORAGE_KEY_RECENT_MENTION_SOUND_NOTIFICATIONS = 'tm_torr9_recent_mention_sound_notifications';
     const STORAGE_KEY_CHAT_FONT_SCALE = 'tm_torr9_chat_font_scale';
+    const STORAGE_KEY_LIGHT_THEME_HOME = 'tm_torr9_light_theme_home';
+    const STORAGE_KEY_LIGHT_THEME_CHAT = 'tm_torr9_light_theme_chat';
     const PANEL_ID = 'tm-torr9-chat-stats';
     const MODAL_ID = 'tm-torr9-chat-modal';
     const OVERLAY_ID = 'tm-torr9-chat-overlay';
@@ -31,19 +34,25 @@
     const IMAGE_PREVIEW_ID = 'tm-torr9-image-preview';
     const HOME_COLLAPSE_BUTTON_ID = 'tm-home-chat-collapse-toggle';
     const DEFAULT_HIGHLIGHT_COLOR = '#f59e0b';
+    const DEFAULT_HIGHLIGHT_OPACITY = 14;
     const DEFAULT_MENTION_COLOR = '#22c55e';
+    const DEFAULT_MENTION_OPACITY = 18;
     const DEFAULT_MENTION_BLINK_SECONDS = 6;
     const DEFAULT_MENTION_KEEP_HIGHLIGHT = true;
+    const DEFAULT_MENTION_INCLUDE_REPLY_CONTEXT = false;
     const DEFAULT_MENTION_SOUND_ENABLED = false;
     const DEFAULT_MENTION_SOUND_STYLE = 'ping';
     const DEFAULT_MENTION_SOUND_CUSTOM_URL = '';
     const DEFAULT_MENTION_SOUND_COOLDOWN_SECONDS = 8;
+    const ALLOWED_CHAT_CHANNELS = new Set(['general', 'aide', 'bug report', 'bug reports']);
     const DEFAULT_CHAT_FONT_SCALE = 1;
     const MIN_CHAT_FONT_SCALE = 0.85;
     const MAX_CHAT_FONT_SCALE = 1.7;
     const MAX_STATS_RIGHT_PERCENT = 100;
     const MAX_STATS_BOTTOM_PERCENT = 95;
+    const MAX_RECENT_MENTION_SOUND_RECORDS = 40;
     const MENTION_STYLE_ID = 'tm-torr9-mention-style';
+    const LIGHT_THEME_STYLE_ID = 'tm-torr9-light-theme-style';
 
     const DEFAULT_POSITION = {
         rightPercent: 2,
@@ -64,10 +73,13 @@
     let toastHideTimer = null;
     let mentionSettings = loadMentionSettings();
     let chatFontScale = loadChatFontScale();
+    let lightThemeEnabled = loadLightThemeEnabled();
     let mentionSoundContext = null;
     let mentionSoundElement = null;
     let lastMentionSoundRecord = loadLastMentionSoundRecord();
+    let recentMentionSoundRecords = loadRecentMentionSoundRecords(lastMentionSoundRecord);
     let lastMentionSoundAt = lastMentionSoundRecord?.notifiedAt || 0;
+    let lastChatContextKey = 'other';
 
     const hiddenUsers = loadHiddenUsers();
     const highlightedUsers = loadHighlightedUsers();
@@ -108,6 +120,10 @@
 
     function getStatsHiddenStorageKey() {
         return isChatPage() ? STORAGE_KEY_STATS_HIDDEN_CHAT : STORAGE_KEY_STATS_HIDDEN_HOME;
+    }
+
+    function getLightThemeStorageKey() {
+        return isChatPage() ? STORAGE_KEY_LIGHT_THEME_CHAT : STORAGE_KEY_LIGHT_THEME_HOME;
     }
 
     function loadHiddenUsers() {
@@ -183,7 +199,7 @@
 
             return Object.fromEntries(
                 Object.entries(parsed)
-                    .map(([username, color]) => [normalizeName(username), normalizeHexColor(color)])
+                    .map(([username, value]) => [normalizeName(username), normalizeHighlightUserConfig(value)])
                     .filter(([username]) => !!username)
             );
         } catch (e) {
@@ -202,8 +218,10 @@
                 return {
                     username: '',
                     color: DEFAULT_MENTION_COLOR,
+                    opacityPercent: DEFAULT_MENTION_OPACITY,
                     blinkSeconds: DEFAULT_MENTION_BLINK_SECONDS,
                     keepHighlightAfterBlink: DEFAULT_MENTION_KEEP_HIGHLIGHT,
+                    includeReplyContext: DEFAULT_MENTION_INCLUDE_REPLY_CONTEXT,
                     soundEnabled: DEFAULT_MENTION_SOUND_ENABLED,
                     soundStyle: DEFAULT_MENTION_SOUND_STYLE,
                     soundCustomUrl: DEFAULT_MENTION_SOUND_CUSTOM_URL,
@@ -214,8 +232,10 @@
             return {
                 username: normalizeName(parsed.username || ''),
                 color: normalizeHexColor(parsed.color, DEFAULT_MENTION_COLOR),
+                opacityPercent: parseOpacityPercentInput(parsed.opacityPercent, DEFAULT_MENTION_OPACITY),
                 blinkSeconds: clamp(Number(parsed.blinkSeconds) || 0, 0, 30),
                 keepHighlightAfterBlink: parsed.keepHighlightAfterBlink !== false,
+                includeReplyContext: parsed.includeReplyContext === true,
                 soundEnabled: parsed.soundEnabled === true,
                 soundStyle: normalizeMentionSoundStyle(parsed.soundStyle),
                 soundCustomUrl: normalizeMentionSoundCustomUrl(parsed.soundCustomUrl),
@@ -225,8 +245,10 @@
             return {
                 username: '',
                 color: DEFAULT_MENTION_COLOR,
+                opacityPercent: DEFAULT_MENTION_OPACITY,
                 blinkSeconds: DEFAULT_MENTION_BLINK_SECONDS,
                 keepHighlightAfterBlink: DEFAULT_MENTION_KEEP_HIGHLIGHT,
+                includeReplyContext: DEFAULT_MENTION_INCLUDE_REPLY_CONTEXT,
                 soundEnabled: DEFAULT_MENTION_SOUND_ENABLED,
                 soundStyle: DEFAULT_MENTION_SOUND_STYLE,
                 soundCustomUrl: DEFAULT_MENTION_SOUND_CUSTOM_URL,
@@ -239,8 +261,10 @@
         mentionSettings = {
             username: normalizeName(nextSettings?.username || ''),
             color: normalizeHexColor(nextSettings?.color, DEFAULT_MENTION_COLOR),
+            opacityPercent: parseOpacityPercentInput(nextSettings?.opacityPercent, DEFAULT_MENTION_OPACITY),
             blinkSeconds: clamp(Number(nextSettings?.blinkSeconds) || 0, 0, 30),
             keepHighlightAfterBlink: nextSettings?.keepHighlightAfterBlink !== false,
+            includeReplyContext: nextSettings?.includeReplyContext === true,
             soundEnabled: nextSettings?.soundEnabled === true,
             soundStyle: normalizeMentionSoundStyle(nextSettings?.soundStyle),
             soundCustomUrl: normalizeMentionSoundCustomUrl(nextSettings?.soundCustomUrl),
@@ -253,41 +277,87 @@
     function loadLastMentionSoundRecord() {
         try {
             const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY_LAST_MENTION_SOUND_NOTIFICATION) || 'null');
-            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-
-            const hash = String(parsed.hash || '').trim();
-            const messageTimestamp = String(parsed.messageTimestamp || '').trim();
-            const messageTimestampKey = Number(parsed.messageTimestampKey) || 0;
-            const notifiedAt = Number(parsed.notifiedAt) || 0;
-
-            if (!hash || !messageTimestamp || messageTimestampKey <= 0 || notifiedAt <= 0) return null;
-            return { hash, messageTimestamp, messageTimestampKey, notifiedAt };
+            return normalizeMentionSoundRecord(parsed);
         } catch (e) {
             return null;
         }
     }
 
+    function normalizeMentionSoundRecord(record) {
+        if (!record || typeof record !== 'object' || Array.isArray(record)) return null;
+
+        const hash = String(record.hash || '').trim();
+        const messageTimestamp = String(record.messageTimestamp || '').trim();
+        const messageTimestampKey = Number(record.messageTimestampKey) || 0;
+        const notifiedAt = Number(record.notifiedAt) || 0;
+
+        if (!hash || messageTimestampKey < 0 || notifiedAt < 0) return null;
+
+        return {
+            hash,
+            messageTimestamp,
+            messageTimestampKey,
+            notifiedAt
+        };
+    }
+
+    function loadRecentMentionSoundRecords(fallbackRecord = null) {
+        try {
+            const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY_RECENT_MENTION_SOUND_NOTIFICATIONS) || '[]');
+            const records = Array.isArray(parsed)
+                ? parsed.map(normalizeMentionSoundRecord).filter(Boolean)
+                : [];
+
+            if (records.length > 0) {
+                return records.slice(-MAX_RECENT_MENTION_SOUND_RECORDS);
+            }
+        } catch (e) {}
+
+        return fallbackRecord ? [fallbackRecord] : [];
+    }
+
     function saveLastMentionSoundRecord(record) {
-        if (
-            !record ||
-            typeof record !== 'object' ||
-            !String(record.hash || '').trim() ||
-            !String(record.messageTimestamp || '').trim() ||
-            !(Number(record.messageTimestampKey) > 0) ||
-            !(Number(record.notifiedAt) > 0)
-        ) {
+        const normalizedRecord = normalizeMentionSoundRecord(record);
+
+        if (!normalizedRecord) {
             lastMentionSoundRecord = null;
             localStorage.removeItem(STORAGE_KEY_LAST_MENTION_SOUND_NOTIFICATION);
             return;
         }
 
-        lastMentionSoundRecord = {
-            hash: String(record.hash).trim(),
-            messageTimestamp: String(record.messageTimestamp).trim(),
-            messageTimestampKey: Number(record.messageTimestampKey),
-            notifiedAt: Number(record.notifiedAt)
-        };
+        lastMentionSoundRecord = normalizedRecord;
         localStorage.setItem(STORAGE_KEY_LAST_MENTION_SOUND_NOTIFICATION, JSON.stringify(lastMentionSoundRecord));
+    }
+
+    function saveRecentMentionSoundRecords() {
+        localStorage.setItem(
+            STORAGE_KEY_RECENT_MENTION_SOUND_NOTIFICATIONS,
+            JSON.stringify(recentMentionSoundRecords.slice(-MAX_RECENT_MENTION_SOUND_RECORDS))
+        );
+    }
+
+    function rememberMentionSoundRecord(record) {
+        const normalizedRecord = normalizeMentionSoundRecord(record);
+        if (!normalizedRecord) return;
+
+        recentMentionSoundRecords = recentMentionSoundRecords
+            .filter((entry) => !(entry.hash === normalizedRecord.hash && entry.messageTimestampKey === normalizedRecord.messageTimestampKey));
+        recentMentionSoundRecords.push(normalizedRecord);
+
+        if (recentMentionSoundRecords.length > MAX_RECENT_MENTION_SOUND_RECORDS) {
+            recentMentionSoundRecords = recentMentionSoundRecords.slice(-MAX_RECENT_MENTION_SOUND_RECORDS);
+        }
+
+        saveRecentMentionSoundRecords();
+    }
+
+    function hasRememberedMentionSoundRecord(signature) {
+        if (!signature) return false;
+
+        return recentMentionSoundRecords.some((record) =>
+            record.hash === signature.hash &&
+            record.messageTimestampKey === signature.messageTimestampKey
+        );
     }
 
     function clampChatFontScale(value) {
@@ -312,6 +382,19 @@
         localStorage.setItem(STORAGE_KEY_CHAT_FONT_SCALE, String(chatFontScale));
     }
 
+    function loadLightThemeEnabled() {
+        try {
+            return localStorage.getItem(getLightThemeStorageKey()) === '1';
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function saveLightThemeEnabled(value) {
+        lightThemeEnabled = !!value;
+        localStorage.setItem(getLightThemeStorageKey(), lightThemeEnabled ? '1' : '0');
+    }
+
     function formatChatFontScalePercent(value = chatFontScale) {
         return String(Math.round(clampChatFontScale(value) * 100));
     }
@@ -325,6 +408,104 @@
     function scalePixels(basePx, scale = chatFontScale) {
         const scaled = Math.round(basePx * clampChatFontScale(scale) * 10) / 10;
         return `${scaled}px`;
+    }
+
+    function ensureLightThemeStyle() {
+        if (document.getElementById(LIGHT_THEME_STYLE_ID)) return;
+        if (!document.head) return;
+
+        const style = document.createElement('style');
+        style.id = LIGHT_THEME_STYLE_ID;
+        style.textContent = `
+            :root[data-tm-torr9-theme="light"] #${PANEL_ID} {
+                background: rgba(255,255,255,0.96) !important;
+                border-color: rgba(148,163,184,0.35) !important;
+                box-shadow: 0 14px 30px rgba(15,23,42,0.12) !important;
+                color: #0f172a !important;
+            }
+
+            :root[data-tm-torr9-theme="light"] #${PANEL_ID} div,
+            :root[data-tm-torr9-theme="light"] #${PANEL_ID} span,
+            :root[data-tm-torr9-theme="light"] #${PANEL_ID} p {
+                color: #0f172a !important;
+            }
+
+            :root[data-tm-torr9-theme="light"] #${PANEL_ID} button,
+            :root[data-tm-torr9-theme="light"] #${HOME_COLLAPSE_BUTTON_ID} {
+                background: #e2e8f0 !important;
+                border-color: rgba(148,163,184,0.35) !important;
+                color: #0f172a !important;
+            }
+
+            :root[data-tm-torr9-theme="light"] #${TOAST_ID} {
+                background: rgba(255,255,255,0.98) !important;
+                border-color: rgba(148,163,184,0.3) !important;
+                box-shadow: 0 14px 30px rgba(15,23,42,0.12) !important;
+                color: #0f172a !important;
+            }
+
+            [data-tm-chat-surface="light"] {
+                background: linear-gradient(180deg, rgba(248,250,252,0.96), rgba(241,245,249,0.96));
+                border-radius: 16px;
+                box-shadow: inset 0 0 0 1px rgba(148,163,184,0.18);
+                padding: 10px;
+            }
+
+            [data-tm-chat-surface="light"] .group.relative.flex.items-start {
+                background: rgba(255,255,255,0.92);
+                border: 1px solid rgba(226,232,240,0.98);
+                border-radius: 14px;
+                box-shadow: 0 8px 18px rgba(15,23,42,0.05);
+                margin-bottom: 6px;
+                padding: 8px 10px;
+            }
+
+            [data-tm-chat-surface="light"] .group.relative.flex.items-start > .flex-1.min-w-0 > .flex.items-baseline button[type="button"],
+            [data-tm-chat-surface="light"] .group.relative.flex.items-start span.text-xs.font-bold {
+                color: #0f172a !important;
+            }
+
+            [data-tm-chat-surface="light"] .group.relative.flex.items-start > .flex-1.min-w-0 > .text-sm.text-gray-200.break-words,
+            [data-tm-chat-surface="light"] .group.relative.flex.items-start > .flex-1.min-w-0 > p.break-words.leading-snug {
+                color: #1f2937 !important;
+            }
+
+            [data-tm-chat-surface="light"] .group.relative.flex.items-start > .flex-1.min-w-0 > .flex.items-baseline span,
+            [data-tm-chat-surface="light"] .group.relative.flex.items-start > .flex-1.min-w-0 > .flex.items-center span:not(.text-xs.font-bold),
+            [data-tm-chat-surface="light"] .group.relative.flex.items-start > .flex-1.min-w-0 > .flex.items-center.gap-2.mb-1.text-xs button[type="button"] {
+                color: #64748b !important;
+            }
+        `;
+
+        document.head.appendChild(style);
+    }
+
+    function applyLightThemeState() {
+        ensureLightThemeStyle();
+
+        if (lightThemeEnabled) {
+            document.documentElement.setAttribute('data-tm-torr9-theme', 'light');
+        } else {
+            document.documentElement.removeAttribute('data-tm-torr9-theme');
+        }
+
+        const activeRoot = getActiveChatRoot();
+        if (activeRoot instanceof HTMLElement) {
+            if (lightThemeEnabled) {
+                activeRoot.setAttribute('data-tm-chat-surface', 'light');
+            } else {
+                activeRoot.removeAttribute('data-tm-chat-surface');
+            }
+        }
+
+        const homeContainer = getHomepageChatContainer();
+        if (homeContainer instanceof HTMLElement) {
+            if (lightThemeEnabled && isHomePage()) {
+                homeContainer.setAttribute('data-tm-chat-surface', 'light');
+            } else {
+                homeContainer.removeAttribute('data-tm-chat-surface');
+            }
+        }
     }
 
     function loadPosition() {
@@ -407,6 +588,12 @@
         return clamp(num, 0, 30);
     }
 
+    function parseOpacityPercentInput(value, fallback = DEFAULT_MENTION_OPACITY) {
+        const num = Number(String(value).trim().replace(',', '.'));
+        if (Number.isNaN(num)) return clamp(fallback, 0, 100);
+        return clamp(num, 0, 100);
+    }
+
     function parseMentionSoundCooldownInput(value, fallback = DEFAULT_MENTION_SOUND_COOLDOWN_SECONDS) {
         const num = Number(String(value).trim().replace(',', '.'));
         if (Number.isNaN(num)) return clamp(fallback, 0, 300);
@@ -425,6 +612,27 @@
         if (/^https?:\/\//i.test(raw)) return raw;
         if (/^data:audio\//i.test(raw)) return raw;
         return DEFAULT_MENTION_SOUND_CUSTOM_URL;
+    }
+
+    function normalizeHighlightUserConfig(value) {
+        if (typeof value === 'string') {
+            return {
+                color: normalizeHexColor(value, DEFAULT_HIGHLIGHT_COLOR),
+                opacityPercent: DEFAULT_HIGHLIGHT_OPACITY
+            };
+        }
+
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+            return {
+                color: DEFAULT_HIGHLIGHT_COLOR,
+                opacityPercent: DEFAULT_HIGHLIGHT_OPACITY
+            };
+        }
+
+        return {
+            color: normalizeHexColor(value.color, DEFAULT_HIGHLIGHT_COLOR),
+            opacityPercent: parseOpacityPercentInput(value.opacityPercent, DEFAULT_HIGHLIGHT_OPACITY)
+        };
     }
 
     function hashString(value) {
@@ -461,9 +669,133 @@
     }
 
     function getActiveChatRoot() {
-        if (isChatPage()) return document.body;
+        if (isChatPage()) return getChatPageMessagesRoot() || document.body;
         if (isHomePage()) return getHomepageMessagesRoot();
         return null;
+    }
+
+    function normalizeChatContextLabel(label) {
+        return String(label || '')
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .trim()
+            .toLowerCase()
+            .replace(/\s+/g, ' ');
+    }
+
+    function getChatPageHeaderTitle() {
+        if (!isChatPage()) return '';
+
+        const titles = Array.from(document.querySelectorAll('h2.text-sm.font-semibold.text-white.truncate'));
+        for (const title of titles) {
+            const value = String(title.textContent || '').trim();
+            if (!value) continue;
+            if (normalizeChatContextLabel(value) === 'chat') continue;
+            return value;
+        }
+
+        return '';
+    }
+
+    function getChatPageHeaderElement() {
+        if (!isChatPage()) return null;
+
+        const titles = Array.from(document.querySelectorAll('h2.text-sm.font-semibold.text-white.truncate'));
+        for (const title of titles) {
+            const value = String(title.textContent || '').trim();
+            if (!value) continue;
+            if (normalizeChatContextLabel(value) === 'chat') continue;
+
+            const header = title.closest('div');
+            if (header instanceof HTMLElement) {
+                return header;
+            }
+        }
+
+        return null;
+    }
+
+    function getChatPageMessagesRoot() {
+        if (!isChatPage()) return null;
+
+        const header = getChatPageHeaderElement();
+        if (!(header instanceof HTMLElement)) return null;
+
+        const container = header.parentElement;
+        if (!(container instanceof HTMLElement)) return null;
+
+        const scrollers = Array.from(container.querySelectorAll('.custom-scrollbar'));
+        for (const scroller of scrollers) {
+            if (
+                scroller instanceof HTMLElement &&
+                scroller.querySelector('.group.relative.flex.items-start')
+            ) {
+                return scroller;
+            }
+        }
+
+        return null;
+    }
+
+    function logMentionDebug(message, details = null) {
+        if (!debugMode) return;
+
+        if (details === null) {
+            console.debug('[Torr9 Chat][Mention]', message);
+            return;
+        }
+
+        console.debug('[Torr9 Chat][Mention]', message, details);
+    }
+
+    function normalizeMentionComparableText(value) {
+        return String(value || '')
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .replace(/[\u200b-\u200d\ufeff]/g, '')
+            .trim()
+            .toLowerCase();
+    }
+
+    function getCurrentChatContext() {
+        if (!isChatPage()) return null;
+
+        const headerTitle = getChatPageHeaderTitle();
+        if (headerTitle) {
+            if (headerTitle.startsWith('#')) {
+                return {
+                    type: 'channel',
+                    name: headerTitle.slice(1).trim()
+                };
+            }
+
+            return {
+                type: 'private',
+                name: headerTitle
+            };
+        }
+
+        return null;
+    }
+
+    function getCurrentChatContextKey() {
+        if (isHomePage()) return 'home';
+        if (!isChatPage()) return 'other';
+
+        const context = getCurrentChatContext();
+        if (!context) return 'chat:unknown';
+
+        return `${context.type}:${normalizeChatContextLabel(context.name)}`;
+    }
+
+    function isMentionAndHighlightContextAllowed() {
+        if (isHomePage()) return true;
+        if (!isChatPage()) return false;
+
+        const context = getCurrentChatContext();
+        if (!context) return true;
+
+        return context.type === 'channel' && ALLOWED_CHAT_CHANNELS.has(normalizeChatContextLabel(context.name));
     }
 
     function getHomepageChatHeader(container = null) {
@@ -1060,33 +1392,42 @@
         }
     }
 
-    function applyHighlightStyle(messageEl, username, color) {
+    function applyHighlightStyle(messageEl, username, highlightConfig) {
+        const color = normalizeHexColor(highlightConfig?.color, DEFAULT_HIGHLIGHT_COLOR);
+        const opacityPercent = parseOpacityPercentInput(highlightConfig?.opacityPercent, DEFAULT_HIGHLIGHT_OPACITY);
+        const baseAlpha = opacityPercent / 100;
+        const accentColor = hexToRgba(color, Math.min(1, baseAlpha * 5.15));
+        const edgeColor = hexToRgba(color, Math.min(1, baseAlpha * 7));
+
         messageEl.style.removeProperty('display');
-        messageEl.style.background = hexToRgba(color, 0.14);
-        messageEl.style.outline = `1px solid ${hexToRgba(color, 0.72)}`;
-        messageEl.style.boxShadow = `inset 3px 0 0 ${color}`;
+        messageEl.style.background = hexToRgba(color, baseAlpha);
+        messageEl.style.outline = `1px solid ${accentColor}`;
+        messageEl.style.boxShadow = `inset 3px 0 0 ${edgeColor}`;
         messageEl.setAttribute('data-tm-highlight-user', username);
         messageEl.title = `Mis en avant : ${username}`;
     }
 
     function applyMentionHighlightStyle(messageEl) {
         const color = normalizeHexColor(mentionSettings.color, DEFAULT_MENTION_COLOR);
+        const opacityPercent = parseOpacityPercentInput(mentionSettings.opacityPercent, DEFAULT_MENTION_OPACITY);
+        const baseAlpha = opacityPercent / 100;
+        const accentColor = hexToRgba(color, Math.min(1, baseAlpha * 4.55));
         const blinkSeconds = parseBlinkSecondsInput(mentionSettings.blinkSeconds, DEFAULT_MENTION_BLINK_SECONDS);
         const keepHighlightAfterBlink = mentionSettings.keepHighlightAfterBlink !== false;
-        const signature = `${color}|${blinkSeconds}|${keepHighlightAfterBlink ? 'keep' : 'off'}`;
+        const signature = `${color}|${opacityPercent}|${blinkSeconds}|${keepHighlightAfterBlink ? 'keep' : 'off'}`;
         const existingState = mentionBlinkStates.get(messageEl);
 
         ensureMentionAnimationStyle();
 
         messageEl.style.removeProperty('display');
-        messageEl.style.background = hexToRgba(color, 0.18);
-        messageEl.style.outline = `1px solid ${hexToRgba(color, 0.82)}`;
-        messageEl.style.boxShadow = `inset 3px 0 0 ${color}`;
-        messageEl.style.setProperty('--tm-mention-color', color);
-        messageEl.style.setProperty('--tm-mention-glow-soft', hexToRgba(color, 0.22));
-        messageEl.style.setProperty('--tm-mention-glow-strong', hexToRgba(color, 0.58));
-        messageEl.style.setProperty('--tm-mention-bg-soft', hexToRgba(color, 0.06));
-        messageEl.style.setProperty('--tm-mention-bg-strong', hexToRgba(color, 0.32));
+        messageEl.style.background = hexToRgba(color, baseAlpha);
+        messageEl.style.outline = `1px solid ${accentColor}`;
+        messageEl.style.boxShadow = `inset 3px 0 0 ${accentColor}`;
+        messageEl.style.setProperty('--tm-mention-color', accentColor);
+        messageEl.style.setProperty('--tm-mention-glow-soft', hexToRgba(color, Math.min(1, baseAlpha * 1.22)));
+        messageEl.style.setProperty('--tm-mention-glow-strong', hexToRgba(color, Math.min(1, baseAlpha * 3.22)));
+        messageEl.style.setProperty('--tm-mention-bg-soft', hexToRgba(color, Math.min(1, baseAlpha * 0.33)));
+        messageEl.style.setProperty('--tm-mention-bg-strong', hexToRgba(color, Math.min(1, baseAlpha * 1.78)));
         messageEl.setAttribute('data-tm-mention-highlight', mentionSettings.username);
         messageEl.title = `Mention @${mentionSettings.username}`;
 
@@ -1106,9 +1447,9 @@
             messageEl.style.removeProperty('animation');
 
             if (keepHighlightAfterBlink) {
-                messageEl.style.background = hexToRgba(color, 0.18);
-                messageEl.style.outline = `1px solid ${hexToRgba(color, 0.82)}`;
-                messageEl.style.boxShadow = `inset 3px 0 0 ${color}`;
+                messageEl.style.background = hexToRgba(color, baseAlpha);
+                messageEl.style.outline = `1px solid ${accentColor}`;
+                messageEl.style.boxShadow = `inset 3px 0 0 ${accentColor}`;
                 messageEl.style.removeProperty('filter');
                 mentionBlinkStates.set(messageEl, { signature, timeoutId: null });
                 return;
@@ -1280,21 +1621,66 @@
 
     function maybeNotifyMention(messageEl) {
         if (!(messageEl instanceof HTMLElement)) return;
-        if (!mentionSettings.soundEnabled) return;
-        if (mentionSoundNotifiedMessages.has(messageEl)) return;
+        if (!mentionSettings.soundEnabled) {
+            logMentionDebug('skip: sound disabled');
+            return;
+        }
+        if (mentionSoundNotifiedMessages.has(messageEl)) {
+            logMentionDebug('skip: message element already handled for this session');
+            return;
+        }
 
         const signature = getMentionNotificationSignature(messageEl);
+        logMentionDebug('candidate', {
+            signature,
+            lastMentionSoundRecord,
+            recentMentionSoundRecordsCount: recentMentionSoundRecords.length,
+            lastMentionSoundAt,
+            messageText: getMessageTextContent(messageEl),
+            messageTimestamp: getMessageTimestampText(messageEl)
+        });
+
+        if (signature && hasRememberedMentionSoundRecord(signature)) {
+            logMentionDebug('skip: already covered by recent history', {
+                signature,
+                recentMentionSoundRecordsCount: recentMentionSoundRecords.length
+            });
+            mentionSoundNotifiedMessages.add(messageEl);
+            return;
+        }
+
         if (
             signature &&
             lastMentionSoundRecord &&
             (
-                signature.messageTimestampKey < lastMentionSoundRecord.messageTimestampKey ||
+                (
+                    signature.messageTimestampKey > 0 &&
+                    lastMentionSoundRecord.messageTimestampKey > 0 &&
+                    signature.messageTimestampKey < lastMentionSoundRecord.messageTimestampKey
+                ) ||
                 (
                     signature.messageTimestampKey === lastMentionSoundRecord.messageTimestampKey &&
+                    signature.hash === lastMentionSoundRecord.hash
+                ) ||
+                (
+                    (
+                        signature.messageTimestampKey <= 0 ||
+                        lastMentionSoundRecord.messageTimestampKey <= 0
+                    ) &&
                     signature.hash === lastMentionSoundRecord.hash
                 )
             )
         ) {
+            logMentionDebug('skip: already covered by last record', {
+                signature,
+                lastMentionSoundRecord
+            });
+            rememberMentionSoundRecord({
+                hash: signature.hash,
+                messageTimestamp: signature.messageTimestamp,
+                messageTimestampKey: signature.messageTimestampKey,
+                notifiedAt: lastMentionSoundRecord.notifiedAt
+            });
             mentionSoundNotifiedMessages.add(messageEl);
             return;
         }
@@ -1308,13 +1694,76 @@
         const now = Date.now();
 
         if (cooldownSeconds > 0 && now - lastMentionSoundAt < cooldownSeconds * 1000) {
+            logMentionDebug('skip: cooldown active', {
+                signature,
+                cooldownSeconds,
+                now,
+                lastMentionSoundAt,
+                remainingMs: Math.max(0, cooldownSeconds * 1000 - (now - lastMentionSoundAt))
+            });
+            if (signature) {
+                saveLastMentionSoundRecord({
+                    hash: signature.hash,
+                    messageTimestamp: signature.messageTimestamp,
+                    messageTimestampKey: signature.messageTimestampKey,
+                    notifiedAt: lastMentionSoundAt
+                });
+                rememberMentionSoundRecord({
+                    hash: signature.hash,
+                    messageTimestamp: signature.messageTimestamp,
+                    messageTimestampKey: signature.messageTimestampKey,
+                    notifiedAt: lastMentionSoundAt
+                });
+            }
             return;
+        }
+
+        const previousLastMentionSoundAt = lastMentionSoundAt;
+        if (signature) {
+            logMentionDebug('record: pre-play', {
+                signature,
+                previousLastMentionSoundAt,
+                attemptAt: now
+            });
+            saveLastMentionSoundRecord({
+                hash: signature.hash,
+                messageTimestamp: signature.messageTimestamp,
+                messageTimestampKey: signature.messageTimestampKey,
+                notifiedAt: previousLastMentionSoundAt
+            });
+            rememberMentionSoundRecord({
+                hash: signature.hash,
+                messageTimestamp: signature.messageTimestamp,
+                messageTimestampKey: signature.messageTimestampKey,
+                notifiedAt: previousLastMentionSoundAt
+            });
         }
 
         lastMentionSoundAt = now;
         void playMentionNotificationSound(mentionSettings.soundStyle, mentionSettings.soundCustomUrl).then((played) => {
-            if (!played || !signature) return;
+            if (!played) {
+                logMentionDebug('play result: failed', {
+                    signature,
+                    attemptedAt: now,
+                    previousLastMentionSoundAt
+                });
+                if (lastMentionSoundAt === now) {
+                    lastMentionSoundAt = previousLastMentionSoundAt;
+                }
+                return;
+            }
+            if (!signature) return;
+            logMentionDebug('play result: success', {
+                signature,
+                notifiedAt: now
+            });
             saveLastMentionSoundRecord({
+                hash: signature.hash,
+                messageTimestamp: signature.messageTimestamp,
+                messageTimestampKey: signature.messageTimestampKey,
+                notifiedAt: now
+            });
+            rememberMentionSoundRecord({
                 hash: signature.hash,
                 messageTimestamp: signature.messageTimestamp,
                 messageTimestampKey: signature.messageTimestampKey,
@@ -1325,6 +1774,7 @@
 
     function hideOrShowMessage(messageEl, options = {}) {
         const allowMentionSound = options.allowMentionSound === true;
+        const allowMentionAndHighlight = options.allowMentionAndHighlight !== false;
         applyMessageTypography(messageEl);
 
         const username = getLogicalUsername(messageEl);
@@ -1336,7 +1786,7 @@
         }
 
         const normalized = normalizeName(username);
-        const highlightColor = highlightedUsers[normalized];
+        const highlightConfig = highlightedUsers[normalized];
         const mentionsWatchedUser = messageMentionsWatchedUser(messageEl);
 
         if (hiddenUsers.has(normalized)) {
@@ -1352,15 +1802,15 @@
                 clearDebugStyle(messageEl);
                 messageEl.style.display = 'none';
             }
-        } else if (mentionsWatchedUser) {
+        } else if (allowMentionAndHighlight && mentionsWatchedUser) {
             clearDebugStyle(messageEl);
             applyMentionHighlightStyle(messageEl);
             if (allowMentionSound) {
                 maybeNotifyMention(messageEl);
             }
-        } else if (highlightColor) {
+        } else if (allowMentionAndHighlight && highlightConfig) {
             clearDebugStyle(messageEl);
-            applyHighlightStyle(messageEl, normalized, highlightColor);
+            applyHighlightStyle(messageEl, normalized, highlightConfig);
         } else {
             messageEl.style.removeProperty('display');
             clearDebugStyle(messageEl);
@@ -1372,11 +1822,15 @@
 
         const root = getActiveChatRoot();
         if (!root) return;
+        const allowMentionAndHighlight = isMentionAndHighlightContextAllowed();
 
         const allDivs = root.querySelectorAll('div');
         allDivs.forEach(el => {
             if (isChatMessage(el)) {
-                hideOrShowMessage(el, { allowMentionSound: false });
+                hideOrShowMessage(el, {
+                    allowMentionSound: false,
+                    allowMentionAndHighlight
+                });
             }
         });
 
@@ -1391,14 +1845,21 @@
         if (!(node instanceof HTMLElement)) return;
         if (node !== root && !root.contains(node) && node !== document.body) return;
         if (node.closest(`#${PANEL_ID}, #${MODAL_ID}, #${OVERLAY_ID}, #${TOAST_ID}`)) return;
+        const allowMentionAndHighlight = isMentionAndHighlightContextAllowed();
 
         if (isChatMessage(node)) {
-            hideOrShowMessage(node, { allowMentionSound: true });
+            hideOrShowMessage(node, {
+                allowMentionSound: true,
+                allowMentionAndHighlight
+            });
         }
 
         node.querySelectorAll?.('div').forEach(el => {
             if (isChatMessage(el)) {
-                hideOrShowMessage(el, { allowMentionSound: true });
+                hideOrShowMessage(el, {
+                    allowMentionSound: true,
+                    allowMentionAndHighlight
+                });
             }
         });
 
@@ -1424,14 +1885,15 @@
         }
     }
 
-    function addOrUpdateHighlightedUser(usernameRaw, colorRaw) {
+    function addOrUpdateHighlightedUser(usernameRaw, colorRaw, opacityPercentRaw) {
         const username = normalizeName(usernameRaw);
         if (!username) return { ok: false, message: 'Pseudo vide.' };
 
         const color = normalizeHexColor(colorRaw);
+        const opacityPercent = parseOpacityPercentInput(opacityPercentRaw, DEFAULT_HIGHLIGHT_OPACITY);
         const hadHighlight = !!highlightedUsers[username];
 
-        highlightedUsers[username] = color;
+        highlightedUsers[username] = { color, opacityPercent };
         saveHighlightedUsers();
         processAllMessages();
         updateStatsBox();
@@ -1460,8 +1922,10 @@
     function updateMentionSettings(
         usernameRaw,
         colorRaw,
+        opacityPercentRaw,
         blinkSecondsRaw,
         keepHighlightAfterBlinkRaw,
+        includeReplyContextRaw,
         soundEnabledRaw,
         soundStyleRaw,
         soundCustomUrlRaw,
@@ -1469,8 +1933,10 @@
     ) {
         const username = normalizeName(usernameRaw);
         const color = normalizeHexColor(colorRaw, DEFAULT_MENTION_COLOR);
+        const opacityPercent = parseOpacityPercentInput(opacityPercentRaw, DEFAULT_MENTION_OPACITY);
         const blinkSeconds = parseBlinkSecondsInput(blinkSecondsRaw, DEFAULT_MENTION_BLINK_SECONDS);
         const keepHighlightAfterBlink = !!keepHighlightAfterBlinkRaw;
+        const includeReplyContext = !!includeReplyContextRaw;
         const soundEnabled = !!soundEnabledRaw;
         const soundStyle = normalizeMentionSoundStyle(soundStyleRaw);
         const soundCustomUrl = normalizeMentionSoundCustomUrl(soundCustomUrlRaw);
@@ -1482,8 +1948,10 @@
         saveMentionSettings({
             username,
             color,
+            opacityPercent,
             blinkSeconds,
             keepHighlightAfterBlink,
+            includeReplyContext,
             soundEnabled,
             soundStyle,
             soundCustomUrl,
@@ -1561,9 +2029,19 @@
         const currentPos = loadPosition();
         const currentPageLabel = getCurrentPageLabel();
         const homeView = isHomePage();
-        const settingsGridColumns = window.innerWidth >= 780
-            ? 'repeat(2, minmax(0, 1fr))'
-            : 'minmax(0, 1fr)';
+        const settingsColumnCount = window.innerWidth >= 780 ? 2 : 1;
+        const settingsCardStyle = `
+            display:inline-block;
+            width:100%;
+            padding:12px;
+            margin:0 0 14px 0;
+            border-radius:14px;
+            background:rgba(255,255,255,0.03);
+            border:1px solid rgba(255,255,255,0.06);
+            box-sizing:border-box;
+            break-inside:avoid;
+            vertical-align:top;
+        `;
 
         const overlay = document.createElement('div');
         overlay.id = OVERLAY_ID;
@@ -1571,7 +2049,6 @@
         overlay.style.inset = '0';
         overlay.style.zIndex = '1000000';
         overlay.style.background = 'rgba(0,0,0,0.45)';
-        overlay.style.backdropFilter = 'blur(3px)';
 
         const modal = document.createElement('div');
         modal.id = MODAL_ID;
@@ -1611,18 +2088,11 @@
         </div>
 
         <div style="
-            display:grid;
-            grid-template-columns:${settingsGridColumns};
-            gap:14px;
-            align-items:start;
+            column-count:${settingsColumnCount};
+            column-gap:14px;
         ">
             ${homeView ? `
-            <div style="
-                padding:12px;
-                border-radius:14px;
-                background:rgba(255,255,255,0.03);
-                border:1px solid rgba(255,255,255,0.06);
-            ">
+            <div style="${settingsCardStyle}">
                 <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Page d’accueil</div>
 
                 <label style="
@@ -1648,12 +2118,7 @@
             </div>
             ` : ''}
 
-            <div style="
-                padding:12px;
-                border-radius:14px;
-                background:rgba(255,255,255,0.03);
-                border:1px solid rgba(255,255,255,0.06);
-            ">
+            <div style="${settingsCardStyle}">
                 <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Position de la stats box (${currentPageLabel})</div>
 
                 <div style="display:grid;gap:12px;">
@@ -1713,14 +2178,10 @@
                         font-weight:600;
                     ">Reset position</button>
                 </div>
+
             </div>
 
-            <div style="
-                padding:12px;
-                border-radius:14px;
-                background:rgba(255,255,255,0.03);
-                border:1px solid rgba(255,255,255,0.06);
-            ">
+            <div style="${settingsCardStyle}">
                 <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Accessibilité</div>
 
                 <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
@@ -1789,14 +2250,30 @@
                 <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
                     Agrandit ou réduit les pseudos et les messages dans la shoutbox. L’aperçu est immédiat sur la vue courante.
                 </div>
+                <label style="
+                    display:flex;
+                    align-items:center;
+                    gap:10px;
+                    cursor:pointer;
+                    font-size:12px;
+                    color:#d4d4d8;
+                    margin-top:12px;
+                ">
+                    <input id="tm-light-theme-toggle" type="checkbox" ${lightThemeEnabled ? 'checked' : ''} style="
+                        width:16px;
+                        height:16px;
+                        accent-color:#f59e0b;
+                        cursor:pointer;
+                    ">
+                    <span>Theme clair <span style="font-weight:700;text-decoration:underline;">BETA</span> pour la shoutbox</span>
+                </label>
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                    Eclaircit la zone de chat, les messages, la stats box et les toasts du script. Reglage enregistre separement pour ${currentPageLabel}.
+                </div>
             </div>
 
-            <div style="
-                padding:12px;
-                border-radius:14px;
-                background:rgba(255,255,255,0.03);
-                border:1px solid rgba(255,255,255,0.06);
-            ">
+            <div style="${settingsCardStyle}">
                 <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Blacklist</div>
 
                 <div style="display:flex;gap:8px;flex-wrap:wrap;">
@@ -1838,12 +2315,7 @@
                 </div>
             </div>
 
-            <div style="
-                padding:12px;
-                border-radius:14px;
-                background:rgba(255,255,255,0.03);
-                border:1px solid rgba(255,255,255,0.06);
-            ">
+            <div style="${settingsCardStyle}">
                 <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Mettre en avant</div>
 
                 <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
@@ -1892,6 +2364,41 @@
 
                 </div>
 
+                <div style="display:grid;gap:8px;margin-top:12px;">
+                    <label style="display:flex;flex-direction:column;gap:6px;">
+                        <span style="display:flex;justify-content:space-between;gap:12px;font-size:12px;color:#c4c4c8;">
+                            <span>Opacité</span>
+                            <span id="tm-highlight-opacity-value">${DEFAULT_HIGHLIGHT_OPACITY}%</span>
+                        </span>
+                        <input id="tm-highlight-opacity-input" type="range" min="0" max="100" step="1" value="${DEFAULT_HIGHLIGHT_OPACITY}"
+                            title="Opacité %"
+                            style="
+                                width:100%;
+                                accent-color:#f59e0b;
+                                cursor:pointer;
+                            ">
+                    </label>
+
+                    <div>
+                        <div style="font-size:12px;color:#c4c4c8;margin-bottom:6px;">Aperçu</div>
+                        <div id="tm-highlight-preview" style="
+                            padding:10px 12px;
+                            border-radius:12px;
+                            background:rgba(245,158,11,0.14);
+                            border:1px solid rgba(245,158,11,0.42);
+                            box-shadow:inset 3px 0 0 rgba(245,158,11,0.75);
+                        ">
+                            <div style="display:flex;align-items:center;gap:8px;font-size:11px;color:#d4d4d8;margin-bottom:4px;">
+                                <span style="font-weight:700;color:#fff;">Pseudo</span>
+                                <span id="tm-highlight-preview-meta">Mise en avant</span>
+                            </div>
+                            <div id="tm-highlight-preview-text" style="font-size:12px;color:#f4f4f5;line-height:1.45;">
+                                Exemple de message mis en avant.
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <div style="margin-top:10px;font-size:12px;color:#a1a1aa;line-height:1.5;">
                     Mis en avant :
                 </div>
@@ -1908,12 +2415,7 @@
                 </div>
             </div>
 
-            <div style="
-                padding:12px;
-                border-radius:14px;
-                background:rgba(255,255,255,0.03);
-                border:1px solid rgba(255,255,255,0.06);
-            ">
+            <div style="${settingsCardStyle}">
                 <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Mentions @moi</div>
 
                 <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
@@ -1950,16 +2452,45 @@
                             padding:10px 12px;
                             outline:none;
                         ">
+                </div>
 
-                    <button id="tm-mention-save" style="
-                        border:none;
-                        background:#059669;
-                        color:#fff;
-                        border-radius:10px;
-                        padding:10px 12px;
-                        cursor:pointer;
-                        font-weight:600;
-                    ">Enregistrer</button>
+                <div style="display:grid;gap:10px;margin-top:12px;">
+                    <label style="display:flex;flex-direction:column;gap:6px;">
+                        <span style="display:flex;justify-content:space-between;gap:12px;font-size:12px;color:#c4c4c8;">
+                            <span>Opacité</span>
+                            <span id="tm-mention-opacity-value">${mentionSettings.opacityPercent}%</span>
+                        </span>
+                        <input id="tm-mention-opacity-input" type="range" min="0" max="100" step="1" value="${mentionSettings.opacityPercent}"
+                            title="Opacité %"
+                            style="
+                                width:100%;
+                                accent-color:#22c55e;
+                                cursor:pointer;
+                            ">
+                    </label>
+
+                    <div style="font-size:11px;color:#71717a;line-height:1.4;">
+                        Ajuste la transparence de la surbrillance.
+                    </div>
+
+                    <div>
+                        <div style="font-size:12px;color:#c4c4c8;margin-bottom:6px;">Aperçu</div>
+                        <div id="tm-mention-preview" style="
+                            padding:10px 12px;
+                            border-radius:12px;
+                            background:rgba(34,197,94,0.18);
+                            border:1px solid rgba(34,197,94,0.45);
+                            box-shadow:inset 3px 0 0 rgba(34,197,94,0.7);
+                        ">
+                            <div style="display:flex;align-items:center;gap:8px;font-size:11px;color:#d4d4d8;margin-bottom:4px;">
+                                <span style="font-weight:700;color:#fff;">Pseudo</span>
+                                <span id="tm-mention-preview-meta">Mention @moi</span>
+                            </div>
+                            <div id="tm-mention-preview-text" style="font-size:12px;color:#f4f4f5;line-height:1.45;">
+                                Exemple de message contenant une mention.
+                            </div>
+                        </div>
+                    </div>
                 </div>
 
                 <label style="
@@ -1979,6 +2510,25 @@
                         cursor:pointer;
                     ">
                     <span>Garder la couleur après le clignotement</span>
+                </label>
+
+                <label style="
+                    display:flex;
+                    align-items:center;
+                    flex-wrap:wrap;
+                    gap:10px;
+                    cursor:pointer;
+                    font-size:12px;
+                    color:#d4d4d8;
+                    margin-top:10px;
+                ">
+                    <input id="tm-mention-include-reply-toggle" type="checkbox" ${mentionSettings.includeReplyContext ? 'checked' : ''} style="
+                        width:16px;
+                        height:16px;
+                        accent-color:#06b6d4;
+                        cursor:pointer;
+                    ">
+                    <span>Considérer aussi les réponses citées vers @moi</span>
                 </label>
 
                 <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:10px;">
@@ -2062,17 +2612,24 @@
                     ">Tester le son</button>
                 </div>
 
+                <div style="display:flex;justify-content:flex-start;gap:8px;flex-wrap:wrap;margin-top:12px;">
+                    <button id="tm-mention-save" style="
+                        border:none;
+                        background:#059669;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">Enregistrer</button>
+                </div>
+
                 <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
-                    Quand un message contient @tonpseudo, il est surligne avec cette couleur. Mets 0 seconde pour desactiver le clignotement, choisis un son si besoin et laisse le pseudo vide pour couper la surveillance.
+                    Quand un message contient @tonpseudo, il est surligne avec cette couleur. Tu peux aussi inclure les réponses citées, régler l'opacité, mettre 0 seconde pour desactiver le clignotement, choisir un son si besoin et laisser le pseudo vide pour couper la surveillance.
                 </div>
             </div>
 
-            <div style="
-                padding:12px;
-                border-radius:14px;
-                background:rgba(255,255,255,0.03);
-                border:1px solid rgba(255,255,255,0.06);
-            ">
+            <div style="${settingsCardStyle}">
                 <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Debug</div>
 
                 <label style="
@@ -2095,14 +2652,16 @@
                 <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
                     En mode debug, les messages blacklistés ne sont pas cachés : ils sont surlignés en rouge.
                 </div>
-            </div>
 
-            <div id="tm-feedback" style="
-                min-height:20px;
-                font-size:12px;
-                color:#93c5fd;
-            "></div>
+            </div>
         </div>
+
+        <div id="tm-feedback" style="
+            min-height:20px;
+            margin-top:4px;
+            font-size:12px;
+            color:#93c5fd;
+        "></div>
     `;
 
         document.body.appendChild(overlay);
@@ -2114,13 +2673,24 @@
         const hiddenUsersList = modal.querySelector('#tm-hidden-users-list');
         const highlightUserInput = modal.querySelector('#tm-highlight-user-input');
         const highlightColorInput = modal.querySelector('#tm-highlight-color-input');
+        const highlightOpacityInput = modal.querySelector('#tm-highlight-opacity-input');
+        const highlightOpacityValue = modal.querySelector('#tm-highlight-opacity-value');
+        const highlightPreview = modal.querySelector('#tm-highlight-preview');
+        const highlightPreviewMeta = modal.querySelector('#tm-highlight-preview-meta');
+        const highlightPreviewText = modal.querySelector('#tm-highlight-preview-text');
         const highlightSaveBtn = modal.querySelector('#tm-highlight-save');
         const highlightRemoveBtn = modal.querySelector('#tm-highlight-remove');
         const highlightUsersList = modal.querySelector('#tm-highlight-users-list');
         const mentionUserInput = modal.querySelector('#tm-mention-user-input');
         const mentionColorInput = modal.querySelector('#tm-mention-color-input');
+        const mentionOpacityInput = modal.querySelector('#tm-mention-opacity-input');
+        const mentionOpacityValue = modal.querySelector('#tm-mention-opacity-value');
         const mentionBlinkInput = modal.querySelector('#tm-mention-blink-input');
+        const mentionPreview = modal.querySelector('#tm-mention-preview');
+        const mentionPreviewMeta = modal.querySelector('#tm-mention-preview-meta');
+        const mentionPreviewText = modal.querySelector('#tm-mention-preview-text');
         const mentionKeepHighlightToggle = modal.querySelector('#tm-mention-keep-highlight-toggle');
+        const mentionIncludeReplyToggle = modal.querySelector('#tm-mention-include-reply-toggle');
         const mentionSoundToggle = modal.querySelector('#tm-mention-sound-toggle');
         const mentionSoundOptions = modal.querySelector('#tm-mention-sound-options');
         const mentionSoundStyleSelect = modal.querySelector('#tm-mention-sound-style-select');
@@ -2134,6 +2704,7 @@
         const fontSizeIncreaseBtn = modal.querySelector('#tm-font-size-increase');
         const fontSizeSaveBtn = modal.querySelector('#tm-font-size-save');
         const fontSizeResetBtn = modal.querySelector('#tm-font-size-reset');
+        const lightThemeToggle = modal.querySelector('#tm-light-theme-toggle');
         const rightInput = modal.querySelector('#tm-right-input');
         const rightValue = modal.querySelector('#tm-right-value');
         const bottomInput = modal.querySelector('#tm-bottom-input');
@@ -2172,6 +2743,69 @@
             if (mentionSoundTestBtn) {
                 mentionSoundTestBtn.disabled = !soundEnabled;
                 mentionSoundTestBtn.style.cursor = soundEnabled ? 'pointer' : 'not-allowed';
+            }
+        }
+
+        function syncHighlightOpacityValue() {
+            const opacityPercent = parseOpacityPercentInput(
+                highlightOpacityInput?.value,
+                DEFAULT_HIGHLIGHT_OPACITY
+            );
+            const previewColor = normalizeHexColor(highlightColorInput?.value, DEFAULT_HIGHLIGHT_COLOR);
+            const previewAlpha = opacityPercent / 100;
+            const previewAccent = hexToRgba(previewColor, Math.min(1, previewAlpha * 5.15));
+            const previewUsername = normalizeName(highlightUserInput?.value || '') || 'pseudo';
+
+            if (highlightOpacityInput) {
+                highlightOpacityInput.value = String(opacityPercent);
+            }
+
+            if (highlightOpacityValue) {
+                highlightOpacityValue.textContent = `${opacityPercent}%`;
+            }
+
+            if (highlightPreview instanceof HTMLElement) {
+                highlightPreview.style.background = hexToRgba(previewColor, previewAlpha);
+                highlightPreview.style.border = `1px solid ${previewAccent}`;
+                highlightPreview.style.boxShadow = `inset 3px 0 0 ${previewAccent}`;
+            }
+
+            if (highlightPreviewMeta) {
+                highlightPreviewMeta.textContent = `Mise en avant : ${previewUsername}`;
+            }
+
+            if (highlightPreviewText) {
+                highlightPreviewText.textContent = `Exemple de message de ${previewUsername} mis en avant.`;
+            }
+        }
+
+        function syncMentionOpacityPreview() {
+            const previewColor = normalizeHexColor(mentionColorInput?.value, DEFAULT_MENTION_COLOR);
+            const previewOpacity = parseOpacityPercentInput(mentionOpacityInput?.value, mentionSettings.opacityPercent);
+            const previewAlpha = previewOpacity / 100;
+            const previewAccent = hexToRgba(previewColor, Math.min(1, previewAlpha * 4.55));
+            const previewUsername = normalizeName(mentionUserInput?.value || '') || 'moi';
+
+            if (mentionOpacityInput) {
+                mentionOpacityInput.value = String(previewOpacity);
+            }
+
+            if (mentionOpacityValue) {
+                mentionOpacityValue.textContent = `${previewOpacity}%`;
+            }
+
+            if (mentionPreview instanceof HTMLElement) {
+                mentionPreview.style.background = hexToRgba(previewColor, previewAlpha);
+                mentionPreview.style.border = `1px solid ${previewAccent}`;
+                mentionPreview.style.boxShadow = `inset 3px 0 0 ${previewAccent}`;
+            }
+
+            if (mentionPreviewMeta) {
+                mentionPreviewMeta.textContent = `Mention @${previewUsername}`;
+            }
+
+            if (mentionPreviewText) {
+                mentionPreviewText.textContent = `Exemple de message contenant @${previewUsername}.`;
             }
         }
 
@@ -2227,12 +2861,14 @@
                 return;
             }
 
-            for (const [user, color] of users) {
+            for (const [user, config] of users) {
+                const color = normalizeHexColor(config?.color, DEFAULT_HIGHLIGHT_COLOR);
+                const opacityPercent = parseOpacityPercentInput(config?.opacityPercent, DEFAULT_HIGHLIGHT_OPACITY);
                 const chip = document.createElement('button');
                 chip.type = 'button';
                 chip.textContent = user;
                 chip.style.border = `1px solid ${hexToRgba(color, 0.38)}`;
-                chip.style.background = hexToRgba(color, 0.12);
+                chip.style.background = hexToRgba(color, opacityPercent / 100);
                 chip.style.color = color;
                 chip.style.borderRadius = '999px';
                 chip.style.padding = '6px 10px';
@@ -2243,6 +2879,10 @@
                 chip.addEventListener('click', () => {
                     highlightUserInput.value = user;
                     highlightColorInput.value = normalizeHexColor(color);
+                    if (highlightOpacityInput) {
+                        highlightOpacityInput.value = String(opacityPercent);
+                    }
+                    syncHighlightOpacityValue();
                     highlightUserInput.focus();
                     highlightUserInput.select();
                     setFeedback(`Mise en avant chargee : ${user}`);
@@ -2319,7 +2959,11 @@
         });
 
         highlightSaveBtn.addEventListener('click', () => {
-            const result = addOrUpdateHighlightedUser(highlightUserInput.value, highlightColorInput.value);
+            const result = addOrUpdateHighlightedUser(
+                highlightUserInput.value,
+                highlightColorInput.value,
+                highlightOpacityInput?.value
+            );
             setFeedback(result.message, !result.ok);
             refreshHighlightedUsersList();
             highlightUserInput.focus();
@@ -2341,12 +2985,18 @@
             }
         });
 
+        highlightUserInput.addEventListener('input', syncHighlightOpacityValue);
+        highlightColorInput?.addEventListener('input', syncHighlightOpacityValue);
+        highlightOpacityInput?.addEventListener('input', syncHighlightOpacityValue);
+
         mentionSaveBtn.addEventListener('click', () => {
             const result = updateMentionSettings(
                 mentionUserInput.value,
                 mentionColorInput.value,
+                mentionOpacityInput?.value,
                 mentionBlinkInput.value,
                 mentionKeepHighlightToggle?.checked,
+                mentionIncludeReplyToggle?.checked,
                 mentionSoundToggle?.checked,
                 mentionSoundStyleSelect?.value,
                 mentionSoundCustomUrlInput?.value,
@@ -2355,9 +3005,16 @@
 
             mentionUserInput.value = mentionSettings.username;
             mentionColorInput.value = mentionSettings.color;
+            if (mentionOpacityInput) {
+                mentionOpacityInput.value = String(mentionSettings.opacityPercent);
+            }
+            syncMentionOpacityPreview();
             mentionBlinkInput.value = String(mentionSettings.blinkSeconds);
             if (mentionKeepHighlightToggle) {
                 mentionKeepHighlightToggle.checked = mentionSettings.keepHighlightAfterBlink;
+            }
+            if (mentionIncludeReplyToggle) {
+                mentionIncludeReplyToggle.checked = mentionSettings.includeReplyContext;
             }
             if (mentionSoundToggle) {
                 mentionSoundToggle.checked = mentionSettings.soundEnabled;
@@ -2382,12 +3039,18 @@
             }
         });
 
+        mentionUserInput.addEventListener('input', syncMentionOpacityPreview);
+
+        mentionColorInput?.addEventListener('input', syncMentionOpacityPreview);
+
         mentionBlinkInput.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
                 e.preventDefault();
                 mentionSaveBtn.click();
             }
         });
+
+        mentionOpacityInput?.addEventListener('input', syncMentionOpacityPreview);
 
         mentionSoundCooldownInput?.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
@@ -2449,6 +3112,16 @@
             setFeedback('Taille de police réinitialisée.');
         });
 
+        lightThemeToggle?.addEventListener('change', () => {
+            saveLightThemeEnabled(lightThemeToggle.checked);
+            applyLightThemeState();
+            processAllMessages();
+            if (lightThemeEnabled) {
+                showToast(`Theme clair BETA active pour ${currentPageLabel}. Feature tout juste commencee, rendu encore evolutif.`);
+            }
+            setFeedback(lightThemeEnabled ? `Theme clair active pour ${currentPageLabel}.` : `Theme clair desactive pour ${currentPageLabel}.`);
+        });
+
         rightInput.addEventListener('input', previewPosition);
         bottomInput.addEventListener('input', previewPosition);
         rightInput.addEventListener('change', () => commitPreviewPosition(false));
@@ -2492,7 +3165,9 @@
         refreshHiddenUsersList();
         refreshHighlightedUsersList();
         userInput.focus();
+        syncHighlightOpacityValue();
         syncMentionSoundControlsState();
+        syncMentionOpacityPreview();
         syncFontSizeValueLabel();
         previewPosition();
     }
@@ -2546,8 +3221,17 @@
         if (!(messageEl instanceof HTMLElement)) return '';
 
         if (isChatPage()) {
-            const metaSpan = messageEl.querySelector(':scope > .flex-1.min-w-0 > .flex.items-baseline span');
-            return (metaSpan?.textContent || '').trim();
+            const metaSpans = Array.from(messageEl.querySelectorAll(':scope > .flex-1.min-w-0 > .flex.items-baseline span'));
+            const parsedCandidate = metaSpans
+                .map((span) => (span.textContent || '').trim())
+                .find((text) => parseMessageTimestampKey(text) > 0);
+
+            if (parsedCandidate) return parsedCandidate;
+
+            return metaSpans
+                .map((span) => (span.textContent || '').trim())
+                .filter(Boolean)
+                .pop() || '';
         }
 
         if (isHomePage()) {
@@ -2585,16 +3269,42 @@
 
         const username = normalizeName(getLogicalUsername(messageEl) || '');
         const messageText = getMessageTextContent(messageEl);
+        const replyContextText = getMessageReplyContextText(messageEl);
         const messageTimestamp = getMessageTimestampText(messageEl);
         const messageTimestampKey = parseMessageTimestampKey(messageTimestamp);
 
-        if (!username || !messageText || !messageTimestamp || messageTimestampKey <= 0) return null;
+        if (!username || (!messageText && !replyContextText)) {
+            logMentionDebug('signature: invalid message data', {
+                username,
+                messageText,
+                replyContextText,
+                messageTimestamp,
+                messageTimestampKey
+            });
+            return null;
+        }
+
+        if (messageTimestamp && messageTimestampKey <= 0) {
+            logMentionDebug('signature: timestamp not parsed, using hash fallback only', {
+                username,
+                messageTimestamp,
+                messageText,
+                replyContextText
+            });
+        }
 
         return {
-            hash: hashString(`${location.pathname}|${username}|${messageTimestamp}|${messageText}`),
+            hash: hashString(`${location.pathname}|${username}|${messageTimestamp}|${replyContextText}|${messageText}`),
             messageTimestamp,
             messageTimestampKey
         };
+    }
+
+    function getMessageReplyContextText(messageEl) {
+        if (!(messageEl instanceof HTMLElement) || !isChatPage()) return '';
+
+        const replyButton = messageEl.querySelector(':scope > .flex-1.min-w-0 > .flex.items-center.gap-2.mb-1.text-xs button[type="button"]');
+        return String(replyButton?.textContent || '').trim();
     }
 
     function getMessageTextBlock(messageEl) {
@@ -2717,10 +3427,39 @@
         if (!watchedUsername) return false;
 
         const messageText = getMessageTextContent(messageEl);
-        if (!messageText) return false;
+        const normalizedWatchedUsername = normalizeMentionComparableText(watchedUsername);
+        const normalizedMessageText = normalizeMentionComparableText(messageText);
+        const mentionRegex = new RegExp(
+            `(^|[^\\p{L}\\p{N}_])@${escapeRegExp(normalizedWatchedUsername)}(?=$|[^\\p{L}\\p{N}_])`,
+            'u'
+        );
+        const directMentionMatched = !!normalizedWatchedUsername && !!normalizedMessageText && mentionRegex.test(normalizedMessageText);
 
-        const mentionRegex = new RegExp(`(^|[^\\w])@${escapeRegExp(watchedUsername)}(?=$|[^\\w])`, 'i');
-        return mentionRegex.test(messageText);
+        let replyContextText = '';
+        let normalizedReplyContextText = '';
+        let replyMentionMatched = false;
+
+        if (mentionSettings.includeReplyContext === true && isChatPage()) {
+            replyContextText = getMessageReplyContextText(messageEl);
+            normalizedReplyContextText = normalizeMentionComparableText(replyContextText).replace(/^@+/, '');
+            replyMentionMatched = !!normalizedWatchedUsername && normalizedReplyContextText === normalizedWatchedUsername;
+        }
+
+        const matched = directMentionMatched || replyMentionMatched;
+
+        logMentionDebug('mention check', {
+            watchedUsername,
+            normalizedWatchedUsername,
+            messageText,
+            normalizedMessageText,
+            replyContextText,
+            normalizedReplyContextText,
+            directMentionMatched,
+            replyMentionMatched,
+            matched
+        });
+
+        return matched;
     }
 
     function findUsernameTrigger(target) {
@@ -2795,9 +3534,12 @@
     }
 
     function refreshForRoute() {
+        lastChatContextKey = getCurrentChatContextKey();
+
         if (isSupportedPage()) {
             statsCollapsed = loadStatsCollapsed();
             statsHidden = loadStatsHidden();
+            lightThemeEnabled = loadLightThemeEnabled();
 
             if (isHomePage() && !getHomepageChatContainer()) {
                 stopObserver();
@@ -2807,6 +3549,7 @@
             createStatsBox();
             applyHomepageChatCollapsedState();
             applyBoxPosition();
+            applyLightThemeState();
 
             if (isHomePage() && homeChatCollapsed) {
                 stopObserver();
@@ -2815,6 +3558,8 @@
                 startObserver();
             }
         } else {
+            lightThemeEnabled = false;
+            applyLightThemeState();
             stopObserver();
             removeStatsBox();
             closeSettingsModal();
@@ -2836,6 +3581,9 @@
                 lastUrl = location.href;
                 lastPageType = currentPageType;
                 refreshForRoute();
+            } else if (isChatPage() && getCurrentChatContextKey() !== lastChatContextKey) {
+                lastChatContextKey = getCurrentChatContextKey();
+                processAllMessages();
             } else if (isHomePage() && !getHomepageChatContainer()) {
                 stopObserver();
             } else if (isHomePage() && getHomepageChatContainer() && !observer) {
