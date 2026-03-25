@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torr9 Chat - Shoutbox 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.30
+// @version      2.31
 // @description  Blacklist, mise en avant, mentions, stats et réglages live pour la shoutbox Torr9
 // @author       Butchered
 // @match        https://torr9.net/*
@@ -51,6 +51,10 @@
     const MAX_STATS_RIGHT_PERCENT = 100;
     const MAX_STATS_BOTTOM_PERCENT = 95;
     const MAX_RECENT_MENTION_SOUND_RECORDS = 40;
+    const LONG_PRESS_REACTION_DELAY_MS = 420;
+    const LONG_PRESS_REACTION_MOVE_THRESHOLD_PX = 10;
+    const LONG_PRESS_REACTION_PICKER_OFFSET_X = 18;
+    const LONG_PRESS_REACTION_PICKER_OFFSET_Y = 0;
     const MENTION_STYLE_ID = 'tm-torr9-mention-style';
     const LIGHT_THEME_STYLE_ID = 'tm-torr9-light-theme-style';
 
@@ -80,6 +84,7 @@
     let recentMentionSoundRecords = loadRecentMentionSoundRecords(lastMentionSoundRecord);
     let lastMentionSoundAt = lastMentionSoundRecord?.notifiedAt || 0;
     let lastChatContextKey = 'other';
+    let longPressReactionState = null;
 
     const hiddenUsers = loadHiddenUsers();
     const highlightedUsers = loadHighlightedUsers();
@@ -3307,6 +3312,155 @@
         return String(replyButton?.textContent || '').trim();
     }
 
+    function getButtonSearchLabel(button) {
+        if (!(button instanceof HTMLButtonElement)) return '';
+
+        return normalizeMentionComparableText(
+            [
+                button.getAttribute('aria-label'),
+                button.getAttribute('title'),
+                button.textContent
+            ]
+                .filter(Boolean)
+                .join(' ')
+        );
+    }
+
+    function getMessageActionButtonsContainer(messageEl) {
+        if (!(messageEl instanceof HTMLElement) || !isChatPage()) return null;
+
+        return messageEl.querySelector(
+            ':scope > .absolute.right-2.-top-3.flex.items-center.gap-0\\.5.bg-zinc-900.border.border-zinc-700.rounded-lg.shadow-lg.px-1.py-0\\.5.z-10'
+        );
+    }
+
+    function getMessageReplyActionButton(messageEl) {
+        if (!(messageEl instanceof HTMLElement) || !isChatPage()) return null;
+
+        const actionButtonsContainer = getMessageActionButtonsContainer(messageEl);
+        const directReplyButton = actionButtonsContainer?.querySelector('button[title="Repondre"]');
+        if (directReplyButton instanceof HTMLButtonElement) {
+            return directReplyButton;
+        }
+
+        const usernameButton = messageEl.querySelector(':scope > .flex-1.min-w-0 > .flex.items-baseline button[type="button"]');
+        const replyContextButton = messageEl.querySelector(':scope > .flex-1.min-w-0 > .flex.items-center.gap-2.mb-1.text-xs button[type="button"]');
+        const buttons = Array.from(
+            (actionButtonsContainer || messageEl).querySelectorAll('button')
+        );
+
+        const labeledReplyButton = buttons.find((button) => {
+            if (!(button instanceof HTMLButtonElement)) return false;
+            if (button === usernameButton || button === replyContextButton) return false;
+
+            const label = getButtonSearchLabel(button);
+
+            return /\b(repondre|reponse|reply)\b/.test(label);
+        });
+
+        if (labeledReplyButton instanceof HTMLButtonElement) {
+            return labeledReplyButton;
+        }
+
+        const iconOnlyButtons = buttons.filter((button) => {
+            if (!(button instanceof HTMLButtonElement)) return false;
+            if (button === usernameButton || button === replyContextButton) return false;
+
+            const label = getButtonSearchLabel(button);
+            if (label) return false;
+            return !!button.querySelector('svg');
+        });
+
+        return iconOnlyButtons.length === 1 ? iconOnlyButtons[0] : null;
+    }
+
+    function getMessageReactionActionButton(messageEl) {
+        if (!(messageEl instanceof HTMLElement) || !isChatPage()) return null;
+
+        const actionButtonsContainer = getMessageActionButtonsContainer(messageEl);
+        const directReactionButton = actionButtonsContainer?.querySelector('button[title="Reagir"]');
+        if (directReactionButton instanceof HTMLButtonElement) {
+            return directReactionButton;
+        }
+
+        const usernameButton = messageEl.querySelector(':scope > .flex-1.min-w-0 > .flex.items-baseline button[type="button"]');
+        const replyContextButton = messageEl.querySelector(':scope > .flex-1.min-w-0 > .flex.items-center.gap-2.mb-1.text-xs button[type="button"]');
+        const replyActionButton = getMessageReplyActionButton(messageEl);
+        const buttons = Array.from(
+            (actionButtonsContainer || messageEl).querySelectorAll('button')
+        );
+
+        const labeledReactionButton = buttons.find((button) => {
+            if (!(button instanceof HTMLButtonElement)) return false;
+            if (button === usernameButton || button === replyContextButton || button === replyActionButton) return false;
+
+            const label = getButtonSearchLabel(button);
+            return /\b(reaction|reactions|reagir|react|emoji|emojis|emote)\b/.test(label);
+        });
+
+        if (labeledReactionButton instanceof HTMLButtonElement) {
+            return labeledReactionButton;
+        }
+
+        const iconOnlyButtons = buttons.filter((button) => {
+            if (!(button instanceof HTMLButtonElement)) return false;
+            if (button === usernameButton || button === replyContextButton || button === replyActionButton) return false;
+
+            const label = getButtonSearchLabel(button);
+            if (label) return false;
+            return !!button.querySelector('svg');
+        });
+
+        return iconOnlyButtons.length === 1 ? iconOnlyButtons[0] : null;
+    }
+
+    function isReactionPickerElement(element) {
+        if (!(element instanceof HTMLDivElement)) return false;
+        if (!element.classList.contains('absolute')) return false;
+        if (!element.classList.contains('bg-zinc-900')) return false;
+        if (!element.classList.contains('border-zinc-700')) return false;
+        if (!element.classList.contains('rounded-xl')) return false;
+        if (!element.classList.contains('shadow-2xl')) return false;
+        if (!element.classList.contains('z-50')) return false;
+
+        const quickReactionsGrid = element.querySelector(':scope > div.grid.grid-cols-8');
+        const customReactionsGrid = element.querySelector(':scope > div > div.grid.grid-cols-7');
+        return !!quickReactionsGrid && !!customReactionsGrid;
+    }
+
+    function findVisibleReactionPicker() {
+        const candidates = Array.from(document.querySelectorAll('div')).filter(isReactionPickerElement);
+        return candidates.find((element) => {
+            const rect = element.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+        }) || null;
+    }
+
+    function positionReactionPickerNearPointer(clientX, clientY, attempt = 0) {
+        const picker = findVisibleReactionPicker();
+        if (!(picker instanceof HTMLElement)) {
+            if (attempt >= 8) return;
+            window.setTimeout(() => {
+                positionReactionPickerNearPointer(clientX, clientY, attempt + 1);
+            }, 24);
+            return;
+        }
+
+        picker.style.position = 'fixed';
+        picker.style.right = 'auto';
+        picker.style.left = '-9999px';
+        picker.style.top = '-9999px';
+
+        const rect = picker.getBoundingClientRect();
+        const maxLeft = Math.max(8, window.innerWidth - rect.width - 8);
+        const maxTop = Math.max(8, window.innerHeight - rect.height - 8);
+        const nextLeft = clamp(clientX + LONG_PRESS_REACTION_PICKER_OFFSET_X, 8, maxLeft);
+        const nextTop = clamp(clientY + LONG_PRESS_REACTION_PICKER_OFFSET_Y, 8, maxTop);
+
+        picker.style.left = `${nextLeft}px`;
+        picker.style.top = `${nextTop}px`;
+    }
+
     function getMessageTextBlock(messageEl) {
         if (!(messageEl instanceof HTMLElement)) return null;
 
@@ -3476,6 +3630,27 @@
         return null;
     }
 
+    function isExcludedMessageShortcutTarget(target) {
+        if (!(target instanceof Element)) return true;
+
+        return !!target.closest(
+            [
+                `#${PANEL_ID}`,
+                `#${MODAL_ID}`,
+                `#${OVERLAY_ID}`,
+                `#${TOAST_ID}`,
+                'button',
+                'a',
+                'textarea',
+                'input',
+                'select',
+                'option',
+                'label',
+                'img'
+            ].join(', ')
+        );
+    }
+
     function installQuickToggleHandler() {
         document.addEventListener('click', (event) => {
             if (!event.altKey || event.button !== 0 || modalOpen || !isSupportedPage()) return;
@@ -3498,6 +3673,101 @@
             const result = addOrToggleUser(username);
             showToast(result.message, !result.ok);
         }, true);
+    }
+
+    function installNativeReplyShortcutHandler() {
+        document.addEventListener('dblclick', (event) => {
+            if (modalOpen || !isChatPage()) return;
+            if (event.button !== 0) return;
+
+            const target = event.target;
+            if (!(target instanceof Element)) return;
+            if (isExcludedMessageShortcutTarget(target)) return;
+
+            const messageEl = findMessageElementFromTarget(target);
+            if (!messageEl || !messageEl.contains(target)) return;
+
+            const replyButton = getMessageReplyActionButton(messageEl);
+            if (!(replyButton instanceof HTMLButtonElement) || replyButton.disabled) return;
+
+            event.preventDefault();
+            event.stopPropagation();
+            replyButton.click();
+        }, true);
+    }
+
+    function clearLongPressReactionState() {
+        if (!longPressReactionState) return;
+
+        if (longPressReactionState.timerId) {
+            clearTimeout(longPressReactionState.timerId);
+        }
+
+        longPressReactionState = null;
+    }
+
+    function installNativeReactionShortcutHandler() {
+        document.addEventListener('pointerdown', (event) => {
+            clearLongPressReactionState();
+
+            if (modalOpen || !isChatPage()) return;
+            if (!event.isPrimary || event.button !== 0) return;
+
+            const target = event.target;
+            if (!(target instanceof Element)) return;
+            if (isExcludedMessageShortcutTarget(target)) return;
+
+            const messageEl = findMessageElementFromTarget(target);
+            if (!messageEl || !messageEl.contains(target)) return;
+
+            const reactionButton = getMessageReactionActionButton(messageEl);
+            if (!(reactionButton instanceof HTMLButtonElement) || reactionButton.disabled) return;
+
+            const state = {
+                pointerId: event.pointerId,
+                startX: event.clientX,
+                startY: event.clientY,
+                reactionButton,
+                triggered: false,
+                timerId: window.setTimeout(() => {
+                    if (!longPressReactionState || longPressReactionState.pointerId !== event.pointerId) return;
+
+                    longPressReactionState.triggered = true;
+                    reactionButton.click();
+                    positionReactionPickerNearPointer(event.clientX, event.clientY);
+                }, LONG_PRESS_REACTION_DELAY_MS)
+            };
+
+            longPressReactionState = state;
+        }, true);
+
+        document.addEventListener('pointermove', (event) => {
+            if (!longPressReactionState || longPressReactionState.pointerId !== event.pointerId) return;
+
+            const movedX = Math.abs(event.clientX - longPressReactionState.startX);
+            const movedY = Math.abs(event.clientY - longPressReactionState.startY);
+            if (movedX > LONG_PRESS_REACTION_MOVE_THRESHOLD_PX || movedY > LONG_PRESS_REACTION_MOVE_THRESHOLD_PX) {
+                clearLongPressReactionState();
+            }
+        }, true);
+
+        document.addEventListener('pointerup', (event) => {
+            if (!longPressReactionState || longPressReactionState.pointerId !== event.pointerId) return;
+            clearLongPressReactionState();
+        }, true);
+
+        document.addEventListener('pointercancel', (event) => {
+            if (!longPressReactionState || longPressReactionState.pointerId !== event.pointerId) return;
+            clearLongPressReactionState();
+        }, true);
+
+        document.addEventListener('contextmenu', () => {
+            clearLongPressReactionState();
+        }, true);
+
+        window.addEventListener('blur', () => {
+            clearLongPressReactionState();
+        });
     }
 
     function installImagePreviewHandler() {
@@ -3625,6 +3895,8 @@
 
     function init() {
         installQuickToggleHandler();
+        installNativeReplyShortcutHandler();
+        installNativeReactionShortcutHandler();
         installImagePreviewHandler();
         installRouteWatcher();
         document.addEventListener('click', handleStatsBoxActionClick, true);
