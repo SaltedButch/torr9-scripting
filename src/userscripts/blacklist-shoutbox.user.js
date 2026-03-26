@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torr9 Chat - Shoutbox 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.31
+// @version      2.32
 // @description  Blacklist, mise en avant, mentions, stats et réglages live pour la shoutbox Torr9
 // @author       Butchered
 // @match        https://torr9.net/*
@@ -27,6 +27,8 @@
     const STORAGE_KEY_CHAT_FONT_SCALE = 'tm_torr9_chat_font_scale';
     const STORAGE_KEY_LIGHT_THEME_HOME = 'tm_torr9_light_theme_home';
     const STORAGE_KEY_LIGHT_THEME_CHAT = 'tm_torr9_light_theme_chat';
+    const STORAGE_KEY_LINKIFY_URLS = 'tm_torr9_linkify_urls';
+    const STORAGE_KEY_EMBED_URL_IMAGES = 'tm_torr9_embed_url_images';
     const PANEL_ID = 'tm-torr9-chat-stats';
     const MODAL_ID = 'tm-torr9-chat-modal';
     const OVERLAY_ID = 'tm-torr9-chat-overlay';
@@ -57,6 +59,11 @@
     const LONG_PRESS_REACTION_PICKER_OFFSET_Y = 0;
     const MENTION_STYLE_ID = 'tm-torr9-mention-style';
     const LIGHT_THEME_STYLE_ID = 'tm-torr9-light-theme-style';
+    const LINKIFIED_URL_STYLE_ID = 'tm-torr9-linkified-url-style';
+    const EMBEDDED_IMAGE_STYLE_ID = 'tm-torr9-embedded-image-style';
+    const URL_CANDIDATE_RE = /(?:https?:\/\/|www\.)[^\s<>"']+/i;
+    const URL_MATCH_RE = /(?:https?:\/\/|www\.)[^\s<>"']+/gi;
+    const DIRECT_IMAGE_PATH_RE = /\.(?:avif|bmp|gif|jpe?g|png|svg|webp)$/i;
 
     const DEFAULT_POSITION = {
         rightPercent: 2,
@@ -78,6 +85,8 @@
     let mentionSettings = loadMentionSettings();
     let chatFontScale = loadChatFontScale();
     let lightThemeEnabled = loadLightThemeEnabled();
+    let linkifyUrlsEnabled = loadLinkifyUrlsEnabled();
+    let embedUrlImagesEnabled = loadEmbedUrlImagesEnabled();
     let mentionSoundContext = null;
     let mentionSoundElement = null;
     let lastMentionSoundRecord = loadLastMentionSoundRecord();
@@ -400,6 +409,36 @@
         localStorage.setItem(getLightThemeStorageKey(), lightThemeEnabled ? '1' : '0');
     }
 
+    function loadLinkifyUrlsEnabled() {
+        try {
+            const rawValue = localStorage.getItem(STORAGE_KEY_LINKIFY_URLS);
+            if (rawValue === null) return true;
+            return rawValue === '1';
+        } catch (e) {
+            return true;
+        }
+    }
+
+    function saveLinkifyUrlsEnabled(value) {
+        linkifyUrlsEnabled = !!value;
+        localStorage.setItem(STORAGE_KEY_LINKIFY_URLS, linkifyUrlsEnabled ? '1' : '0');
+    }
+
+    function loadEmbedUrlImagesEnabled() {
+        try {
+            const rawValue = localStorage.getItem(STORAGE_KEY_EMBED_URL_IMAGES);
+            if (rawValue === null) return true;
+            return rawValue === '1';
+        } catch (e) {
+            return true;
+        }
+    }
+
+    function saveEmbedUrlImagesEnabled(value) {
+        embedUrlImagesEnabled = !!value;
+        localStorage.setItem(STORAGE_KEY_EMBED_URL_IMAGES, embedUrlImagesEnabled ? '1' : '0');
+    }
+
     function formatChatFontScalePercent(value = chatFontScale) {
         return String(Math.round(clampChatFontScale(value) * 100));
     }
@@ -479,6 +518,55 @@
             [data-tm-chat-surface="light"] .group.relative.flex.items-start > .flex-1.min-w-0 > .flex.items-center span:not(.text-xs.font-bold),
             [data-tm-chat-surface="light"] .group.relative.flex.items-start > .flex-1.min-w-0 > .flex.items-center.gap-2.mb-1.text-xs button[type="button"] {
                 color: #64748b !important;
+            }
+        `;
+
+        document.head.appendChild(style);
+    }
+
+    function ensureLinkifiedUrlStyle() {
+        if (document.getElementById(LINKIFIED_URL_STYLE_ID)) return;
+        if (!document.head) return;
+
+        const style = document.createElement('style');
+        style.id = LINKIFIED_URL_STYLE_ID;
+        style.textContent = `
+            a[data-tm-linkified-url="1"] {
+                color: #67e8f9 !important;
+                text-decoration: underline !important;
+                text-underline-offset: 2px;
+                text-decoration-thickness: 1px;
+                word-break: break-word;
+                cursor: pointer;
+            }
+
+            a[data-tm-linkified-url="1"]:hover {
+                color: #a5f3fc !important;
+            }
+
+            :root[data-tm-torr9-theme="light"] a[data-tm-linkified-url="1"],
+            [data-tm-chat-surface="light"] a[data-tm-linkified-url="1"] {
+                color: #0369a1 !important;
+            }
+
+            :root[data-tm-torr9-theme="light"] a[data-tm-linkified-url="1"]:hover,
+            [data-tm-chat-surface="light"] a[data-tm-linkified-url="1"]:hover {
+                color: #075985 !important;
+            }
+        `;
+
+        document.head.appendChild(style);
+    }
+
+    function ensureEmbeddedImageStyle() {
+        if (document.getElementById(EMBEDDED_IMAGE_STYLE_ID)) return;
+        if (!document.head) return;
+
+        const style = document.createElement('style');
+        style.id = EMBEDDED_IMAGE_STYLE_ID;
+        style.textContent = `
+            a[data-tm-linkified-image="1"] {
+                cursor: zoom-in;
             }
         `;
 
@@ -1419,6 +1507,8 @@
         const accentColor = hexToRgba(color, Math.min(1, baseAlpha * 4.55));
         const blinkSeconds = parseBlinkSecondsInput(mentionSettings.blinkSeconds, DEFAULT_MENTION_BLINK_SECONDS);
         const keepHighlightAfterBlink = mentionSettings.keepHighlightAfterBlink !== false;
+        const highlightedUsername = normalizeName(getLogicalUsername(messageEl) || '');
+        const fallbackHighlightConfig = highlightedUsername ? highlightedUsers[highlightedUsername] : null;
         const signature = `${color}|${opacityPercent}|${blinkSeconds}|${keepHighlightAfterBlink ? 'keep' : 'off'}`;
         const existingState = mentionBlinkStates.get(messageEl);
 
@@ -1471,6 +1561,11 @@
             messageEl.style.removeProperty('--tm-mention-bg-strong');
             messageEl.removeAttribute('title');
             messageEl.removeAttribute('data-tm-mention-highlight');
+
+            if (fallbackHighlightConfig && highlightedUsername) {
+                applyHighlightStyle(messageEl, highlightedUsername, fallbackHighlightConfig);
+            }
+
             mentionBlinkStates.set(messageEl, { signature, timeoutId: null });
         }, blinkSeconds * 1000);
 
@@ -1781,6 +1876,7 @@
         const allowMentionSound = options.allowMentionSound === true;
         const allowMentionAndHighlight = options.allowMentionAndHighlight !== false;
         applyMessageTypography(messageEl);
+        updateMessageTextBlockUrls(messageEl);
 
         const username = getLogicalUsername(messageEl);
 
@@ -2255,6 +2351,51 @@
                 <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
                     Agrandit ou réduit les pseudos et les messages dans la shoutbox. L’aperçu est immédiat sur la vue courante.
                 </div>
+
+                <label style="
+                    display:flex;
+                    align-items:center;
+                    gap:10px;
+                    cursor:pointer;
+                    font-size:12px;
+                    color:#d4d4d8;
+                    margin-top:12px;
+                ">
+                    <input id="tm-linkify-urls-toggle" type="checkbox" ${linkifyUrlsEnabled ? 'checked' : ''} style="
+                        width:16px;
+                        height:16px;
+                        accent-color:#06b6d4;
+                        cursor:pointer;
+                    ">
+                    <span>Rendre les URLs cliquables</span>
+                </label>
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                    Détecte les liens dans les messages et les transforme en liens cliquables.
+                </div>
+
+                <label style="
+                    display:flex;
+                    align-items:center;
+                    gap:10px;
+                    cursor:pointer;
+                    font-size:12px;
+                    color:#d4d4d8;
+                    margin-top:12px;
+                ">
+                    <input id="tm-embed-url-images-toggle" type="checkbox" ${embedUrlImagesEnabled ? 'checked' : ''} style="
+                        width:16px;
+                        height:16px;
+                        accent-color:#22c55e;
+                        cursor:pointer;
+                    ">
+                    <span>Prévisualiser les liens directs d'images au survol</span>
+                </label>
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                    Affiche un aperçu flottant uniquement pour les URLs qui pointent directement vers un fichier image.
+                </div>
+
                 <label style="
                     display:flex;
                     align-items:center;
@@ -2275,6 +2416,49 @@
 
                 <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
                     Eclaircit la zone de chat, les messages, la stats box et les toasts du script. Reglage enregistre separement pour ${currentPageLabel}.
+                </div>
+            </div>
+
+            <div style="${settingsCardStyle}">
+                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Astuces</div>
+
+                <div style="display:grid;gap:10px;">
+                    <div style="padding:10px 12px;border-radius:12px;background:rgba(37,99,235,0.12);border:1px solid rgba(37,99,235,0.24);">
+                        <div style="font-size:12px;font-weight:700;color:#dbeafe;">Ctrl+Alt+C ou Ctrl+Cmd+C</div>
+                        <div style="margin-top:4px;font-size:11px;color:#93c5fd;line-height:1.45;">
+                            Ouvre directement cette page de paramètres.
+                        </div>
+                    </div>
+
+                    <div style="padding:10px 12px;border-radius:12px;background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.24);">
+                        <div style="font-size:12px;font-weight:700;color:#fde68a;">Alt+clic sur un pseudo</div>
+                        <div style="margin-top:4px;font-size:11px;color:#fcd34d;line-height:1.45;">
+                            Ajoute ou retire rapidement un utilisateur de la blacklist.
+                        </div>
+                    </div>
+
+                    ${isChatPage() ? `
+                    <div style="padding:10px 12px;border-radius:12px;background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.24);">
+                        <div style="font-size:12px;font-weight:700;color:#bbf7d0;">Double-clic sur un message</div>
+                        <div style="margin-top:4px;font-size:11px;color:#86efac;line-height:1.45;">
+                            Lance la réponse au message sans passer par le bouton d’action.
+                        </div>
+                    </div>
+
+                    <div style="padding:10px 12px;border-radius:12px;background:rgba(6,182,212,0.12);border:1px solid rgba(6,182,212,0.24);">
+                        <div style="font-size:12px;font-weight:700;color:#a5f3fc;">Click long sur un message</div>
+                        <div style="margin-top:4px;font-size:11px;color:#67e8f9;line-height:1.45;">
+                            Ouvre les réactions, avec le picker repositionné à droite du pointeur.
+                        </div>
+                    </div>
+                    ` : `
+                    <div style="padding:10px 12px;border-radius:12px;background:rgba(63,63,70,0.6);border:1px solid rgba(255,255,255,0.08);">
+                        <div style="font-size:12px;font-weight:700;color:#f4f4f5;">Raccourcis du chat dédié</div>
+                        <div style="margin-top:4px;font-size:11px;color:#a1a1aa;line-height:1.45;">
+                            Les gestes double-clic pour répondre et click long pour réagir ne sont actifs que sur la page Chat, pas sur la shout de l’accueil.
+                        </div>
+                    </div>
+                    `}
                 </div>
             </div>
 
@@ -2709,6 +2893,8 @@
         const fontSizeIncreaseBtn = modal.querySelector('#tm-font-size-increase');
         const fontSizeSaveBtn = modal.querySelector('#tm-font-size-save');
         const fontSizeResetBtn = modal.querySelector('#tm-font-size-reset');
+        const linkifyUrlsToggle = modal.querySelector('#tm-linkify-urls-toggle');
+        const embedUrlImagesToggle = modal.querySelector('#tm-embed-url-images-toggle');
         const lightThemeToggle = modal.querySelector('#tm-light-theme-toggle');
         const rightInput = modal.querySelector('#tm-right-input');
         const rightValue = modal.querySelector('#tm-right-value');
@@ -3117,6 +3303,26 @@
             setFeedback('Taille de police réinitialisée.');
         });
 
+        linkifyUrlsToggle?.addEventListener('change', () => {
+            saveLinkifyUrlsEnabled(linkifyUrlsToggle.checked);
+            processAllMessages();
+            setFeedback(
+                linkifyUrlsEnabled
+                    ? 'URLs cliquables activées.'
+                    : 'URLs cliquables désactivées.'
+            );
+        });
+
+        embedUrlImagesToggle?.addEventListener('change', () => {
+            saveEmbedUrlImagesEnabled(embedUrlImagesToggle.checked);
+            processAllMessages();
+            setFeedback(
+                embedUrlImagesEnabled
+                    ? 'Prévisualisation des images au survol activée.'
+                    : 'Prévisualisation des images au survol désactivée.'
+            );
+        });
+
         lightThemeToggle?.addEventListener('change', () => {
             saveLightThemeEnabled(lightThemeToggle.checked);
             applyLightThemeState();
@@ -3461,6 +3667,230 @@
         picker.style.top = `${nextTop}px`;
     }
 
+    function splitTrailingUrlSuffix(rawUrl) {
+        let url = String(rawUrl || '');
+        let suffix = '';
+
+        while (url) {
+            const lastChar = url.slice(-1);
+
+            if (/[.,!?;:]/.test(lastChar)) {
+                suffix = lastChar + suffix;
+                url = url.slice(0, -1);
+                continue;
+            }
+
+            if (lastChar === ')') {
+                const opens = (url.match(/\(/g) || []).length;
+                const closes = (url.match(/\)/g) || []).length;
+                if (closes > opens) {
+                    suffix = lastChar + suffix;
+                    url = url.slice(0, -1);
+                    continue;
+                }
+            }
+
+            if (lastChar === ']') {
+                const opens = (url.match(/\[/g) || []).length;
+                const closes = (url.match(/\]/g) || []).length;
+                if (closes > opens) {
+                    suffix = lastChar + suffix;
+                    url = url.slice(0, -1);
+                    continue;
+                }
+            }
+
+            if (lastChar === '}') {
+                const opens = (url.match(/\{/g) || []).length;
+                const closes = (url.match(/\}/g) || []).length;
+                if (closes > opens) {
+                    suffix = lastChar + suffix;
+                    url = url.slice(0, -1);
+                    continue;
+                }
+            }
+
+            break;
+        }
+
+        return { url, suffix };
+    }
+
+    function createLinkifiedUrlElement(urlText) {
+        const normalizedUrl = String(urlText || '').trim();
+        if (!normalizedUrl) return null;
+
+        const link = document.createElement('a');
+        link.href = /^https?:\/\//i.test(normalizedUrl) ? normalizedUrl : `https://${normalizedUrl}`;
+        link.textContent = normalizedUrl;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.setAttribute('data-tm-linkified-url', '1');
+        return link;
+    }
+
+    function getEmbeddableImageCandidates(rawUrl) {
+        const normalizedUrl = String(rawUrl || '').trim();
+        if (!normalizedUrl) return [];
+
+        let parsedUrl;
+        try {
+            parsedUrl = new URL(normalizedUrl, location.origin);
+        } catch (e) {
+            return [];
+        }
+
+        if (!/^https?:$/i.test(parsedUrl.protocol)) return [];
+        return DIRECT_IMAGE_PATH_RE.test(parsedUrl.pathname) ? [parsedUrl.href] : [];
+    }
+
+    function linkifyTextNodeUrls(textNode) {
+        if (!(textNode instanceof Text)) return;
+
+        const sourceText = textNode.nodeValue || '';
+        if (!URL_CANDIDATE_RE.test(sourceText)) return;
+
+        URL_MATCH_RE.lastIndex = 0;
+
+        const fragment = document.createDocumentFragment();
+        let lastIndex = 0;
+        let didReplace = false;
+        let match;
+
+        while ((match = URL_MATCH_RE.exec(sourceText)) !== null) {
+            const rawUrl = match[0];
+            const startIndex = match.index;
+            const leadingText = sourceText.slice(lastIndex, startIndex);
+            const { url, suffix } = splitTrailingUrlSuffix(rawUrl);
+
+            if (leadingText) {
+                fragment.appendChild(document.createTextNode(leadingText));
+            }
+
+            if (url) {
+                const link = createLinkifiedUrlElement(url);
+                if (link) {
+                    fragment.appendChild(link);
+                    didReplace = true;
+                } else {
+                    fragment.appendChild(document.createTextNode(rawUrl));
+                }
+            } else {
+                fragment.appendChild(document.createTextNode(rawUrl));
+            }
+
+            if (suffix) {
+                fragment.appendChild(document.createTextNode(suffix));
+            }
+
+            lastIndex = startIndex + rawUrl.length;
+        }
+
+        if (!didReplace) return;
+
+        const trailingText = sourceText.slice(lastIndex);
+        if (trailingText) {
+            fragment.appendChild(document.createTextNode(trailingText));
+        }
+
+        textNode.replaceWith(fragment);
+    }
+
+    function linkifyMessageTextBlock(messageEl) {
+        const textBlock = getMessageTextBlock(messageEl);
+        if (!(textBlock instanceof HTMLElement)) return;
+
+        ensureLinkifiedUrlStyle();
+
+        const walker = document.createTreeWalker(
+            textBlock,
+            NodeFilter.SHOW_TEXT,
+            {
+                acceptNode(node) {
+                    if (!(node instanceof Text)) return NodeFilter.FILTER_REJECT;
+                    if (!URL_CANDIDATE_RE.test(node.nodeValue || '')) return NodeFilter.FILTER_REJECT;
+
+                    const parent = node.parentElement;
+                    if (!(parent instanceof HTMLElement)) return NodeFilter.FILTER_REJECT;
+                    if (parent.closest('a, button, textarea, script, style')) return NodeFilter.FILTER_REJECT;
+
+                    return NodeFilter.FILTER_ACCEPT;
+                }
+            }
+        );
+
+        const textNodes = [];
+        let currentNode = walker.nextNode();
+
+        while (currentNode) {
+            textNodes.push(currentNode);
+            currentNode = walker.nextNode();
+        }
+
+        textNodes.forEach((node) => {
+            linkifyTextNodeUrls(node);
+        });
+    }
+
+    function syncEmbeddedImagePreviews(messageEl) {
+        const textBlock = getMessageTextBlock(messageEl);
+        if (!(textBlock instanceof HTMLElement)) return;
+
+        const staleInlinePreviews = Array.from(textBlock.querySelectorAll('span[data-tm-embedded-image-preview="1"]'));
+        staleInlinePreviews.forEach((preview) => {
+            preview.remove();
+        });
+
+        const linkifiedLinks = Array.from(textBlock.querySelectorAll('a[data-tm-linkified-url="1"]'));
+
+        if (!embedUrlImagesEnabled) {
+            linkifiedLinks.forEach((link) => {
+                link.removeAttribute('data-tm-linkified-image');
+            });
+            return;
+        }
+
+        ensureEmbeddedImageStyle();
+
+        linkifiedLinks.forEach((link) => {
+            if (!(link instanceof HTMLAnchorElement)) return;
+
+            const candidateUrls = getEmbeddableImageCandidates(link.href);
+            if (candidateUrls.length > 0) {
+                link.setAttribute('data-tm-linkified-image', '1');
+            } else {
+                link.removeAttribute('data-tm-linkified-image');
+            }
+        });
+    }
+
+    function unlinkifyMessageTextBlock(messageEl) {
+        const textBlock = getMessageTextBlock(messageEl);
+        if (!(textBlock instanceof HTMLElement)) return;
+
+        const previews = Array.from(textBlock.querySelectorAll('span[data-tm-embedded-image-preview="1"]'));
+        previews.forEach((preview) => {
+            preview.remove();
+        });
+
+        const links = Array.from(textBlock.querySelectorAll('a[data-tm-linkified-url="1"]'));
+        links.forEach((link) => {
+            link.replaceWith(document.createTextNode(link.textContent || ''));
+        });
+
+        textBlock.normalize();
+    }
+
+    function updateMessageTextBlockUrls(messageEl) {
+        if (linkifyUrlsEnabled) {
+            linkifyMessageTextBlock(messageEl);
+            syncEmbeddedImagePreviews(messageEl);
+            return;
+        }
+
+        unlinkifyMessageTextBlock(messageEl);
+    }
+
     function getMessageTextBlock(messageEl) {
         if (!(messageEl instanceof HTMLElement)) return null;
 
@@ -3493,6 +3923,28 @@
         }
 
         return image;
+    }
+
+    function getMessageLinkImagePreviewCandidatesFromTarget(target) {
+        if (!(target instanceof Element) || !embedUrlImagesEnabled) return null;
+
+        const link = target.closest('a[data-tm-linkified-url="1"][data-tm-linkified-image="1"]');
+        if (!(link instanceof HTMLAnchorElement)) return null;
+        if (link.closest(`#${PANEL_ID}, #${MODAL_ID}, #${OVERLAY_ID}, #${TOAST_ID}`)) return null;
+
+        const messageEl = findMessageElementFromTarget(link);
+        if (!messageEl || !messageEl.contains(link)) return null;
+
+        const textBlock = getMessageTextBlock(messageEl);
+        if (!(textBlock instanceof HTMLElement) || !textBlock.contains(link)) return null;
+
+        const candidateUrls = getEmbeddableImageCandidates(link.href);
+        if (candidateUrls.length === 0) return null;
+
+        return {
+            hoverTarget: link,
+            candidateUrls
+        };
     }
 
     function getOrCreateImagePreview() {
@@ -3553,27 +4005,81 @@
 
         const image = preview.firstElementChild;
         if (image instanceof HTMLImageElement) {
+            image.onload = null;
+            image.onerror = null;
             image.removeAttribute('src');
         }
+
+        preview.removeAttribute('data-tm-preview-signature');
     }
 
-    function showImagePreview(imageEl, clientX, clientY) {
+    function showImagePreviewFromCandidates(hoverTarget, candidateUrls, clientX, clientY) {
         const preview = getOrCreateImagePreview();
         if (!(preview instanceof HTMLElement)) return;
+        if (!(hoverTarget instanceof Element)) return;
+        if (!Array.isArray(candidateUrls) || candidateUrls.length === 0) {
+            hideImagePreview();
+            return;
+        }
 
         const previewImage = preview.firstElementChild;
         if (!(previewImage instanceof HTMLImageElement)) return;
 
+        const candidateSignature = hashString(candidateUrls.join('|'));
+        const alreadyLoaded = preview.getAttribute('data-tm-preview-signature') === candidateSignature;
+
+        hoveredMessageImage = hoverTarget;
+
+        if (alreadyLoaded && previewImage.currentSrc) {
+            preview.style.display = 'block';
+            positionImagePreview(clientX, clientY);
+            return;
+        }
+
+        let candidateIndex = 0;
+
+        preview.style.display = 'none';
+        preview.style.left = '-9999px';
+        preview.style.top = '-9999px';
+        preview.setAttribute('data-tm-preview-signature', candidateSignature);
+
+        function tryNextCandidate() {
+            if (preview.getAttribute('data-tm-preview-signature') !== candidateSignature) return;
+
+            if (candidateIndex >= candidateUrls.length) {
+                if (hoveredMessageImage === hoverTarget) {
+                    hideImagePreview();
+                }
+                return;
+            }
+
+            previewImage.src = candidateUrls[candidateIndex];
+            candidateIndex += 1;
+        }
+
+        previewImage.onload = () => {
+            if (preview.getAttribute('data-tm-preview-signature') !== candidateSignature) return;
+
+            preview.style.display = 'block';
+            positionImagePreview(clientX, clientY);
+        };
+
+        previewImage.onerror = () => {
+            if (preview.getAttribute('data-tm-preview-signature') !== candidateSignature) return;
+            tryNextCandidate();
+        };
+
+        tryNextCandidate();
+    }
+
+    function showImagePreview(imageEl, clientX, clientY) {
         const source = imageEl.currentSrc || imageEl.src;
         if (!source) {
             hideImagePreview();
             return;
         }
 
-        hoveredMessageImage = imageEl;
-        previewImage.src = source;
-        preview.style.display = 'block';
-        positionImagePreview(clientX, clientY);
+        showImagePreviewFromCandidates(imageEl, [source], clientX, clientY);
     }
 
     function messageMentionsWatchedUser(messageEl) {
@@ -3774,6 +4280,22 @@
         document.addEventListener('mousemove', (event) => {
             if (modalOpen || !isSupportedPage()) {
                 if (hoveredMessageImage) hideImagePreview();
+                return;
+            }
+
+            const linkPreview = getMessageLinkImagePreviewCandidatesFromTarget(event.target);
+            if (linkPreview) {
+                if (hoveredMessageImage !== linkPreview.hoverTarget) {
+                    showImagePreviewFromCandidates(
+                        linkPreview.hoverTarget,
+                        linkPreview.candidateUrls,
+                        event.clientX,
+                        event.clientY
+                    );
+                    return;
+                }
+
+                positionImagePreview(event.clientX, event.clientY);
                 return;
             }
 
