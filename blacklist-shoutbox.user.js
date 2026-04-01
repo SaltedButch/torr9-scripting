@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torr9 Chat - Shoutbox 2.0
 // @namespace    https://github.com/SaltedButch/torr9-scripting
-// @version      2.40
-// @description  Blacklist, mise en avant, mentions, stats et réponses rapides pour la shoutbox Torr9
+// @version      2.41
+// @description  Blacklist, mise en avant, mentions, réponses rapides contextuelles et confort avancé pour la shoutbox Torr9
 // @author       Butchered
 // @match        https://torr9.net/*
 // @grant        none
@@ -1978,6 +1978,37 @@
         button.setAttribute('aria-pressed', homeChatCollapsed ? 'true' : 'false');
     }
 
+    function needsHomepageCollapseUiRefresh(container = getHomepageChatContainer()) {
+        if (!isHomePage()) return false;
+        if (!(container instanceof HTMLElement)) return false;
+
+        const header = getHomepageChatHeader(container);
+        const rightArea = header?.lastElementChild;
+        const button = document.getElementById(HOME_COLLAPSE_BUTTON_ID);
+        const expectedState = homeChatCollapsed ? '1' : '0';
+
+        return (
+            !(button instanceof HTMLButtonElement) ||
+            !(rightArea instanceof HTMLElement) ||
+            button.parentElement !== rightArea ||
+            container.dataset.tmHomeCollapsed !== expectedState
+        );
+    }
+
+    function syncHomepageCollapseUi(force = false) {
+        if (!isHomePage()) return;
+
+        const container = getHomepageChatContainer();
+        if (!(container instanceof HTMLElement)) return;
+
+        if (!force && !needsHomepageCollapseUiRefresh(container)) {
+            updateHomeCollapseButton();
+            return;
+        }
+
+        applyHomepageChatCollapsedState();
+    }
+
     function ensureHomepageCollapseButton() {
         if (!isHomePage()) return;
 
@@ -2794,7 +2825,7 @@
         hideImagePreview();
         applyChatFontScale(loadChatFontScale());
         applyStatsBoxVisibilityState();
-        applyHomepageChatCollapsedState();
+        syncHomepageCollapseUi(true);
         applyBoxPosition(loadPosition());
         updateStatsBox();
     }
@@ -4469,7 +4500,7 @@
                 </div>
 
                 <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.4;">
-                    Ouvre une fenêtre dédiée pour ajouter, retirer et gérer les réponses rapides sans surcharger les paramètres principaux.
+                    Ouvre une fenêtre dédiée pour ajouter, retirer et gérer les réponses rapides.
                 </div>
             </div>
 
@@ -7015,7 +7046,7 @@
             }
 
             createStatsBox();
-            applyHomepageChatCollapsedState();
+            syncHomepageCollapseUi(true);
             applyBoxPosition();
             applyLightThemeState();
             injectSavedPhrasesToolbar();
@@ -7059,6 +7090,8 @@
             } else if (isHomePage() && !getHomepageChatContainer()) {
                 removeSavedPhrasesToolbar();
                 stopObserver();
+            } else if (isHomePage() && needsHomepageCollapseUiRefresh()) {
+                syncHomepageCollapseUi();
             } else if (isHomePage() && getHomepageChatContainer() && !observer) {
                 refreshForRoute();
             } else if (isSupportedPage()) {
