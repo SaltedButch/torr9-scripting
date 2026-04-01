@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torr9 Chat - Shoutbox 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.32
-// @description  Blacklist, mise en avant, mentions, stats et réglages live pour la shoutbox Torr9
+// @version      2.4
+// @description  Blacklist, mise en avant, mentions, stats et réponses rapides pour la shoutbox Torr9
 // @author       Butchered
 // @match        https://torr9.net/*
 // @grant        none
@@ -29,12 +29,15 @@
     const STORAGE_KEY_LIGHT_THEME_CHAT = 'tm_torr9_light_theme_chat';
     const STORAGE_KEY_LINKIFY_URLS = 'tm_torr9_linkify_urls';
     const STORAGE_KEY_EMBED_URL_IMAGES = 'tm_torr9_embed_url_images';
+    const STORAGE_KEY_SAVED_PHRASES = 'tm_torr9_saved_phrases';
+    const STORAGE_KEY_SAVED_PHRASES_ENABLED = 'tm_torr9_saved_phrases_enabled';
     const PANEL_ID = 'tm-torr9-chat-stats';
     const MODAL_ID = 'tm-torr9-chat-modal';
     const OVERLAY_ID = 'tm-torr9-chat-overlay';
     const TOAST_ID = 'tm-torr9-chat-toast';
     const IMAGE_PREVIEW_ID = 'tm-torr9-image-preview';
     const HOME_COLLAPSE_BUTTON_ID = 'tm-home-chat-collapse-toggle';
+    const PHRASES_MENU_WRAPPER_ID = 'tm-torr9-phrases-menu-wrapper';
     const DEFAULT_HIGHLIGHT_COLOR = '#f59e0b';
     const DEFAULT_HIGHLIGHT_OPACITY = 14;
     const DEFAULT_MENTION_COLOR = '#22c55e';
@@ -53,6 +56,10 @@
     const MAX_STATS_RIGHT_PERCENT = 100;
     const MAX_STATS_BOTTOM_PERCENT = 95;
     const MAX_RECENT_MENTION_SOUND_RECORDS = 40;
+    const MAX_SAVED_PHRASE_LENGTH = 1000;
+    const MAX_VISIBLE_SAVED_PHRASES_IN_MENU = 5;
+    const SAVED_PHRASES_EXPORT_VERSION = 1;
+    const SAVED_PHRASES_REPLY_CONTEXT_MAX_AGE_MS = 5 * 60 * 1000;
     const LONG_PRESS_REACTION_DELAY_MS = 420;
     const LONG_PRESS_REACTION_MOVE_THRESHOLD_PX = 10;
     const LONG_PRESS_REACTION_PICKER_OFFSET_X = 18;
@@ -87,6 +94,7 @@
     let lightThemeEnabled = loadLightThemeEnabled();
     let linkifyUrlsEnabled = loadLinkifyUrlsEnabled();
     let embedUrlImagesEnabled = loadEmbedUrlImagesEnabled();
+    let savedPhrasesEnabled = loadSavedPhrasesEnabled();
     let mentionSoundContext = null;
     let mentionSoundElement = null;
     let lastMentionSoundRecord = loadLastMentionSoundRecord();
@@ -94,7 +102,14 @@
     let lastMentionSoundAt = lastMentionSoundRecord?.notifiedAt || 0;
     let lastChatContextKey = 'other';
     let longPressReactionState = null;
+    let savedPhrasesToolbarEventsInstalled = false;
+    let savedPhrasesStorageNeedsRepair = false;
+    let savedPhrasesReplyContext = null;
 
+    const savedPhrases = loadSavedPhrases();
+    if (savedPhrasesStorageNeedsRepair) {
+        saveSavedPhrases();
+    }
     const hiddenUsers = loadHiddenUsers();
     const highlightedUsers = loadHighlightedUsers();
     const sessionBlockedCounts = {};
@@ -152,6 +167,696 @@
 
     function saveHiddenUsers() {
         localStorage.setItem(STORAGE_KEY_USERS, JSON.stringify([...hiddenUsers]));
+    }
+
+    function extractSavedPhraseStringValue(value, depth = 0) {
+        if (depth > 4 || value === null || value === undefined) return '';
+
+        if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+            return String(value);
+        }
+
+        if (Array.isArray(value)) {
+            for (const entry of value) {
+                const extractedEntry = extractSavedPhraseStringValue(entry, depth + 1);
+                if (extractedEntry) return extractedEntry;
+            }
+
+            return '';
+        }
+
+        if (typeof value === 'object') {
+            return extractSavedPhraseStringValue(
+                value.text ?? value.phrase ?? value.content ?? value.value ?? value.label ?? value.title ?? value.name ?? '',
+                depth + 1
+            );
+        }
+
+        return '';
+    }
+
+    function normalizeSavedPhraseText(value, truncate = false) {
+        const normalized = extractSavedPhraseStringValue(value).replace(/\r\n?/g, '\n').trim();
+        if (!normalized) return '';
+
+        if (truncate) {
+            return normalized.slice(0, MAX_SAVED_PHRASE_LENGTH);
+        }
+
+        return normalized;
+    }
+
+    function normalizeSavedPhraseKeywords(value) {
+        const rawKeywords = Array.isArray(value)
+            ? value.flatMap((entry) => {
+                const extractedEntry = extractSavedPhraseStringValue(entry);
+                return extractedEntry ? extractedEntry.split(/[,;\n]+/) : [];
+            })
+            : normalizeSavedPhraseText(value).split(/[,;\n]+/);
+
+        const seen = new Set();
+        const keywords = [];
+
+        for (const rawKeyword of rawKeywords) {
+            const keyword = normalizeSavedPhraseText(rawKeyword);
+            if (!keyword) continue;
+
+            const normalizedKeyword = keyword.toLocaleLowerCase('fr');
+            if (seen.has(normalizedKeyword)) continue;
+
+            seen.add(normalizedKeyword);
+            keywords.push(keyword);
+        }
+
+        return keywords;
+    }
+
+    function mergeSavedPhraseKeywords(...keywordGroups) {
+        const mergedKeywords = [];
+
+        for (const group of keywordGroups) {
+            if (Array.isArray(group)) {
+                mergedKeywords.push(...group);
+            } else if (group !== undefined && group !== null) {
+                mergedKeywords.push(group);
+            }
+        }
+
+        return normalizeSavedPhraseKeywords(mergedKeywords);
+    }
+
+    function normalizeSavedPhraseRecord(record, truncateText = true) {
+        if (typeof record === 'string' || typeof record === 'number' || typeof record === 'boolean') {
+            const text = normalizeSavedPhraseText(record, truncateText);
+            return text ? { text, keywords: [] } : null;
+        }
+
+        if (!record || typeof record !== 'object' || Array.isArray(record)) {
+            return null;
+        }
+
+        const text = normalizeSavedPhraseText(
+            record.text ?? record.phrase ?? record.content ?? record.value ?? record.label ?? '',
+            truncateText
+        );
+        if (!text) return null;
+
+        return {
+            text,
+            keywords: normalizeSavedPhraseKeywords(record.keywords)
+        };
+    }
+
+    function loadSavedPhrases() {
+        try {
+            const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY_SAVED_PHRASES) || '[]');
+            if (!Array.isArray(parsed)) return [];
+
+            savedPhrasesStorageNeedsRepair = false;
+
+            const normalizedEntries = [];
+            const seenTexts = new Set();
+
+            parsed.forEach((entry) => {
+                const normalizedEntry = normalizeSavedPhraseRecord(entry, true);
+                if (!normalizedEntry) {
+                    savedPhrasesStorageNeedsRepair = true;
+                    return;
+                }
+
+                if (
+                    typeof entry !== 'object' ||
+                    entry === null ||
+                    Array.isArray(entry) ||
+                    typeof entry.text !== 'string' ||
+                    !Array.isArray(entry.keywords)
+                ) {
+                    savedPhrasesStorageNeedsRepair = true;
+                }
+
+                if (seenTexts.has(normalizedEntry.text)) {
+                    savedPhrasesStorageNeedsRepair = true;
+                    return;
+                }
+
+                seenTexts.add(normalizedEntry.text);
+                normalizedEntries.push(normalizedEntry);
+            });
+
+            return normalizedEntries;
+        } catch (e) {
+            savedPhrasesStorageNeedsRepair = false;
+            return [];
+        }
+    }
+
+    function saveSavedPhrases() {
+        const normalizedEntries = savedPhrases
+            .map((phrase) => normalizeSavedPhraseRecord(phrase, true))
+            .filter(Boolean);
+
+        savedPhrases.splice(0, savedPhrases.length, ...normalizedEntries);
+
+        localStorage.setItem(
+            STORAGE_KEY_SAVED_PHRASES,
+            JSON.stringify(normalizedEntries.map((phrase) => ({
+                text: phrase.text,
+                keywords: [...phrase.keywords]
+            })))
+        );
+
+        savedPhrasesStorageNeedsRepair = false;
+    }
+
+    function loadSavedPhrasesEnabled() {
+        try {
+            const rawValue = localStorage.getItem(STORAGE_KEY_SAVED_PHRASES_ENABLED);
+            if (rawValue === null) return false;
+            return rawValue === '1';
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function saveSavedPhrasesEnabled(value) {
+        savedPhrasesEnabled = !!value;
+        localStorage.setItem(STORAGE_KEY_SAVED_PHRASES_ENABLED, savedPhrasesEnabled ? '1' : '0');
+    }
+
+    function formatSavedPhrasesCountLabel(count = savedPhrases.length) {
+        const safeCount = Math.max(0, Number(count) || 0);
+        return `${safeCount} phrase${safeCount > 1 ? 's' : ''}`;
+    }
+
+    function formatSavedPhrasesSummaryLabel() {
+        return `${savedPhrasesEnabled ? 'Fonction active' : 'Fonction désactivée'} · ${formatSavedPhrasesCountLabel()} enregistrée${savedPhrases.length > 1 ? 's' : ''}`;
+    }
+
+    function formatSavedPhraseKeywordsLabel(keywords = []) {
+        const safeKeywords = normalizeSavedPhraseKeywords(keywords);
+        return safeKeywords.length > 0 ? safeKeywords.join(', ') : 'Aucun mot-clé';
+    }
+
+    function formatSavedPhraseLengthLabel(text = '') {
+        return `${String(text ?? '').length}/${MAX_SAVED_PHRASE_LENGTH} caractères`;
+    }
+
+    function formatSavedPhraseKeywordsInputValue(keywords = []) {
+        return normalizeSavedPhraseKeywords(keywords).join(', ');
+    }
+
+    function truncateSavedPhrasePreviewText(text = '', maxLength = 250) {
+        const safeText = String(text ?? '');
+        const safeMaxLength = Math.max(4, Number(maxLength) || 250);
+
+        if (safeText.length <= safeMaxLength) {
+            return safeText;
+        }
+
+        return `${safeText.slice(0, safeMaxLength - 3).trimEnd()}...`;
+    }
+
+    function normalizeSavedPhraseMatchText(value) {
+        return normalizeMentionComparableText(value)
+            .replace(/[^\p{L}\p{N}@#]+/gu, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    function tokenizeSavedPhraseMatchText(value) {
+        const normalizedText = normalizeSavedPhraseMatchText(value);
+        if (!normalizedText) return [];
+
+        return Array.from(new Set(
+            normalizedText
+                .split(' ')
+                .map((token) => token.trim())
+                .filter((token) => token.length >= 3)
+        ));
+    }
+
+    function getChatInputCurrentValue(input = getChatInput()) {
+        if (!(input instanceof HTMLElement)) return '';
+
+        if (input.isContentEditable) {
+            return String(input.textContent || '').trim();
+        }
+
+        if ('value' in input) {
+            return String(input.value || '').trim();
+        }
+
+        return '';
+    }
+
+    function clearSavedPhrasesReplyContext() {
+        savedPhrasesReplyContext = null;
+    }
+
+    function setSavedPhrasesReplyContextFromMessage(messageEl) {
+        if (!(messageEl instanceof HTMLElement) || !isChatPage()) return;
+
+        const username = normalizeName(getLogicalUsername(messageEl) || '');
+        const messageText = getMessageTextContent(messageEl);
+        const replyContextText = getMessageReplyContextText(messageEl);
+
+        if (!username && !messageText && !replyContextText) return;
+
+        savedPhrasesReplyContext = {
+            contextKey: getCurrentChatContextKey(),
+            username,
+            messageText,
+            replyContextText,
+            capturedAt: Date.now()
+        };
+
+        if (savedPhrasesEnabled) {
+            injectSavedPhrasesToolbar();
+        }
+    }
+
+    function getSavedPhrasesRankingContext(input = getChatInput()) {
+        const inputText = getChatInputCurrentValue(input);
+        const replyContextIsUsable =
+            isChatPage() &&
+            savedPhrasesReplyContext &&
+            savedPhrasesReplyContext.contextKey === getCurrentChatContextKey() &&
+            Date.now() - savedPhrasesReplyContext.capturedAt <= SAVED_PHRASES_REPLY_CONTEXT_MAX_AGE_MS;
+
+        const replyText = replyContextIsUsable
+            ? [
+                savedPhrasesReplyContext.username,
+                savedPhrasesReplyContext.replyContextText,
+                savedPhrasesReplyContext.messageText
+            ]
+                .filter(Boolean)
+                .join(' ')
+            : '';
+
+        return {
+            inputText,
+            inputNormalizedText: normalizeSavedPhraseMatchText(inputText),
+            inputTokens: new Set(tokenizeSavedPhraseMatchText(inputText)),
+            replyText,
+            replyNormalizedText: normalizeSavedPhraseMatchText(replyText),
+            replyTokens: new Set(tokenizeSavedPhraseMatchText(replyText))
+        };
+    }
+
+    function getSavedPhraseMatchScore(phrase, context) {
+        const normalizedPhrase = normalizeSavedPhraseRecord(phrase, true);
+        if (!normalizedPhrase) {
+            return {
+                score: 0,
+                matchedKeywords: [],
+                matchedPhraseContent: false,
+                phraseReplyOverlap: 0,
+                phraseInputOverlap: 0
+            };
+        }
+
+        let score = 0;
+        let phraseReplyOverlap = 0;
+        let phraseInputOverlap = 0;
+        let matchedPhraseContent = false;
+        const matchedKeywords = [];
+        const inputText = context?.inputNormalizedText || '';
+        const replyText = context?.replyNormalizedText || '';
+        const inputTokens = context?.inputTokens instanceof Set ? context.inputTokens : new Set();
+        const replyTokens = context?.replyTokens instanceof Set ? context.replyTokens : new Set();
+        const normalizedPhraseText = normalizeSavedPhraseMatchText(normalizedPhrase.text);
+        const phraseTextTokens = tokenizeSavedPhraseMatchText(normalizedPhrase.text);
+
+        normalizedPhrase.keywords.forEach((keyword) => {
+            const normalizedKeyword = normalizeSavedPhraseMatchText(keyword);
+            if (!normalizedKeyword) return;
+
+            const keywordTokens = tokenizeSavedPhraseMatchText(normalizedKeyword);
+            let keywordMatched = false;
+
+            if (replyText) {
+                if (replyText.includes(normalizedKeyword)) {
+                    score += normalizedKeyword.includes(' ') ? 18 : 14;
+                    keywordMatched = true;
+                } else if (keywordTokens.length > 0 && keywordTokens.every((token) => replyTokens.has(token))) {
+                    score += 11 + keywordTokens.length;
+                    keywordMatched = true;
+                }
+            }
+
+            if (!keywordMatched && inputText) {
+                if (inputText.includes(normalizedKeyword)) {
+                    score += normalizedKeyword.includes(' ') ? 10 : 8;
+                    keywordMatched = true;
+                } else if (keywordTokens.length > 0 && keywordTokens.every((token) => inputTokens.has(token))) {
+                    score += 6 + keywordTokens.length;
+                    keywordMatched = true;
+                }
+            }
+
+            if (keywordMatched) {
+                matchedKeywords.push(keyword);
+            }
+        });
+
+        if (normalizedPhraseText) {
+            if (replyText) {
+                if (replyText.includes(normalizedPhraseText)) {
+                    score += normalizedPhraseText.includes(' ') ? 16 : 12;
+                    matchedPhraseContent = true;
+                } else if (phraseTextTokens.length > 1 && phraseTextTokens.every((token) => replyTokens.has(token))) {
+                    score += 8 + phraseTextTokens.length;
+                    matchedPhraseContent = true;
+                }
+            }
+
+            if (!matchedPhraseContent && inputText) {
+                if (inputText.includes(normalizedPhraseText)) {
+                    score += normalizedPhraseText.includes(' ') ? 10 : 7;
+                    matchedPhraseContent = true;
+                } else if (phraseTextTokens.length > 1 && phraseTextTokens.every((token) => inputTokens.has(token))) {
+                    score += 5 + phraseTextTokens.length;
+                    matchedPhraseContent = true;
+                }
+            }
+        }
+
+        phraseTextTokens.forEach((token) => {
+            if (replyTokens.has(token)) {
+                phraseReplyOverlap += 1;
+            }
+            if (inputTokens.has(token)) {
+                phraseInputOverlap += 1;
+            }
+        });
+
+        score += Math.min(phraseReplyOverlap, 6) * 2;
+        score += Math.min(phraseInputOverlap, 6);
+
+        return {
+            score,
+            matchedKeywords,
+            matchedPhraseContent,
+            phraseReplyOverlap,
+            phraseInputOverlap
+        };
+    }
+
+    function computeSavedPhraseMatchPercent(score) {
+        const numericScore = Number(score) || 0;
+        if (numericScore <= 0) return 0;
+
+        return clamp(Math.round((1 - Math.exp(-numericScore / 14)) * 100), 0, 100);
+    }
+
+    function getRankedSavedPhrases(input = getChatInput()) {
+        const rankingContext = getSavedPhrasesRankingContext(input);
+        const rankedPhrases = savedPhrases
+            .map((entry, index) => {
+                const phrase = normalizeSavedPhraseRecord(entry, true);
+                if (!phrase) return null;
+
+                if (phrase !== entry) {
+                    savedPhrases[index] = phrase;
+                }
+
+                const matchData = getSavedPhraseMatchScore(phrase, rankingContext);
+                return {
+                    phrase,
+                    originalIndex: index,
+                    matchPercent: computeSavedPhraseMatchPercent(matchData.score),
+                    ...matchData
+                };
+            })
+            .filter(Boolean);
+
+        const bestScore = rankedPhrases.reduce((maxScore, entry) => Math.max(maxScore, entry.score), 0);
+        if (bestScore <= 0) {
+            return rankedPhrases.sort((a, b) => a.originalIndex - b.originalIndex);
+        }
+
+        return rankedPhrases.sort((a, b) =>
+            b.score - a.score ||
+            Number(b.matchedPhraseContent) - Number(a.matchedPhraseContent) ||
+            b.matchedKeywords.length - a.matchedKeywords.length ||
+            b.phraseReplyOverlap - a.phraseReplyOverlap ||
+            b.phraseInputOverlap - a.phraseInputOverlap ||
+            a.originalIndex - b.originalIndex
+        );
+    }
+
+    function buildSavedPhrasesExportPayload() {
+        return {
+            version: SAVED_PHRASES_EXPORT_VERSION,
+            exportedAt: new Date().toISOString(),
+            source: 'Torr9 Chat - Shoutbox 2.0',
+            phrases: savedPhrases
+                .map((phrase) => normalizeSavedPhraseRecord(phrase, true))
+                .filter(Boolean)
+                .map((phrase) => ({
+                    text: phrase.text,
+                    keywords: [...phrase.keywords]
+                }))
+        };
+    }
+
+    function downloadSavedPhrasesExport() {
+        try {
+            const exportPayload = JSON.stringify(buildSavedPhrasesExportPayload(), null, 2);
+            const blob = new Blob([exportPayload], { type: 'application/json;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            const exportDate = new Date().toISOString().slice(0, 10);
+
+            link.href = url;
+            link.download = `torr9-reponses-rapides-${exportDate}.json`;
+            link.style.display = 'none';
+
+            document.body?.appendChild(link);
+            link.click();
+            link.remove();
+
+            window.setTimeout(() => {
+                URL.revokeObjectURL(url);
+            }, 0);
+
+            return { ok: true, message: 'Export JSON téléchargé.' };
+        } catch (e) {
+            return { ok: false, message: 'Impossible de générer l’export JSON.' };
+        }
+    }
+
+    function extractSavedPhraseImportEntries(payload) {
+        if (Array.isArray(payload)) {
+            return payload;
+        }
+
+        if (!payload || typeof payload !== 'object') {
+            return null;
+        }
+
+        if (Array.isArray(payload.phrases)) {
+            return payload.phrases;
+        }
+
+        if (Array.isArray(payload.savedPhrases)) {
+            return payload.savedPhrases;
+        }
+
+        if (Array.isArray(payload.items)) {
+            return payload.items;
+        }
+
+        return null;
+    }
+
+    function importSavedPhrases(payload) {
+        const importedEntries = extractSavedPhraseImportEntries(payload);
+        if (!Array.isArray(importedEntries)) {
+            return { ok: false, message: 'Format JSON invalide pour les réponses rapides.' };
+        }
+
+        const existingEntriesByText = new Map();
+        savedPhrases.forEach((entry, index) => {
+            const normalizedEntry = normalizeSavedPhraseRecord(entry, true);
+            if (!normalizedEntry) return;
+
+            if (normalizedEntry !== entry) {
+                savedPhrases[index] = normalizedEntry;
+            }
+
+            if (!existingEntriesByText.has(normalizedEntry.text)) {
+                existingEntriesByText.set(normalizedEntry.text, savedPhrases[index]);
+            }
+        });
+
+        let addedCount = 0;
+        let updatedCount = 0;
+        let unchangedCount = 0;
+        let invalidCount = 0;
+
+        importedEntries.forEach((entry) => {
+            const normalizedEntry = normalizeSavedPhraseRecord(entry, true);
+            if (!normalizedEntry) {
+                invalidCount += 1;
+                return;
+            }
+
+            const existingEntry = existingEntriesByText.get(normalizedEntry.text);
+            if (!existingEntry) {
+                const nextEntry = {
+                    text: normalizedEntry.text,
+                    keywords: [...normalizedEntry.keywords]
+                };
+
+                savedPhrases.push(nextEntry);
+                existingEntriesByText.set(nextEntry.text, nextEntry);
+                addedCount += 1;
+                return;
+            }
+
+            const mergedKeywords = mergeSavedPhraseKeywords(existingEntry.keywords, normalizedEntry.keywords);
+            if (mergedKeywords.length === existingEntry.keywords.length) {
+                unchangedCount += 1;
+                return;
+            }
+
+            existingEntry.keywords = mergedKeywords;
+            updatedCount += 1;
+        });
+
+        const validCount = addedCount + updatedCount + unchangedCount;
+        if (validCount === 0) {
+            return { ok: false, message: 'Import impossible : aucune réponse exploitable trouvée.' };
+        }
+
+        if (addedCount > 0 || updatedCount > 0) {
+            saveSavedPhrases();
+            injectSavedPhrasesToolbar();
+        }
+
+        const summaryParts = [];
+        if (addedCount > 0) {
+            summaryParts.push(`${addedCount} ajoutée${addedCount > 1 ? 's' : ''}`);
+        }
+        if (updatedCount > 0) {
+            summaryParts.push(`${updatedCount} enrichie${updatedCount > 1 ? 's' : ''}`);
+        }
+        if (unchangedCount > 0) {
+            summaryParts.push(`${unchangedCount} déjà présente${unchangedCount > 1 ? 's' : ''}`);
+        }
+        if (invalidCount > 0) {
+            summaryParts.push(`${invalidCount} ignorée${invalidCount > 1 ? 's' : ''}`);
+        }
+
+        return {
+            ok: true,
+            message: `Import terminé : ${summaryParts.join(', ')}.`
+        };
+    }
+
+    function addSavedPhrase(phraseRaw, keywordsRaw = []) {
+        const phrase = normalizeSavedPhraseText(phraseRaw);
+        if (!phrase) {
+            return { ok: false, message: 'Phrase vide.' };
+        }
+
+        if (phrase.length > MAX_SAVED_PHRASE_LENGTH) {
+            return { ok: false, message: `Phrase trop longue (${phrase.length}/${MAX_SAVED_PHRASE_LENGTH}).` };
+        }
+
+        const keywords = normalizeSavedPhraseKeywords(keywordsRaw);
+        const existingPhrase = savedPhrases.find((entry) => entry.text === phrase);
+
+        if (existingPhrase) {
+            const mergedKeywords = mergeSavedPhraseKeywords(existingPhrase.keywords, keywords);
+
+            if (mergedKeywords.length === existingPhrase.keywords.length) {
+                return { ok: false, message: 'Cette phrase existe déjà.' };
+            }
+
+            existingPhrase.keywords = mergedKeywords;
+            saveSavedPhrases();
+            injectSavedPhrasesToolbar();
+
+            return { ok: true, message: 'Mots-clés ajoutés à la phrase existante.' };
+        }
+
+        savedPhrases.push({
+            text: phrase,
+            keywords
+        });
+        saveSavedPhrases();
+        injectSavedPhrasesToolbar();
+
+        return {
+            ok: true,
+            message: keywords.length > 0 ? 'Phrase et mots-clés ajoutés.' : 'Phrase ajoutée.'
+        };
+    }
+
+    function removeSavedPhraseAt(index) {
+        const numericIndex = Number(index);
+        if (!Number.isInteger(numericIndex) || numericIndex < 0 || numericIndex >= savedPhrases.length) {
+            return { ok: false, message: 'Phrase introuvable.' };
+        }
+
+        savedPhrases.splice(numericIndex, 1);
+        saveSavedPhrases();
+        injectSavedPhrasesToolbar();
+
+        return { ok: true, message: 'Phrase supprimée.' };
+    }
+
+    function updateSavedPhraseAt(index, phraseRaw, keywordsRaw = []) {
+        const numericIndex = Number(index);
+        if (!Number.isInteger(numericIndex) || numericIndex < 0 || numericIndex >= savedPhrases.length) {
+            return { ok: false, message: 'Phrase introuvable.' };
+        }
+
+        const phrase = normalizeSavedPhraseText(phraseRaw);
+        if (!phrase) {
+            return { ok: false, message: 'Phrase vide.' };
+        }
+
+        if (phrase.length > MAX_SAVED_PHRASE_LENGTH) {
+            return { ok: false, message: `Phrase trop longue (${phrase.length}/${MAX_SAVED_PHRASE_LENGTH}).` };
+        }
+
+        const keywords = normalizeSavedPhraseKeywords(keywordsRaw);
+        const currentEntry = normalizeSavedPhraseRecord(savedPhrases[numericIndex], true);
+        if (!currentEntry) {
+            return { ok: false, message: 'Phrase introuvable.' };
+        }
+
+        const duplicateIndex = savedPhrases.findIndex((entry, entryIndex) => {
+            if (entryIndex === numericIndex) return false;
+
+            const normalizedEntry = normalizeSavedPhraseRecord(entry, true);
+            return normalizedEntry?.text === phrase;
+        });
+
+        if (duplicateIndex !== -1) {
+            return { ok: false, message: 'Une autre phrase utilise déjà ce texte.' };
+        }
+
+        const currentKeywordsValue = formatSavedPhraseKeywordsInputValue(currentEntry.keywords);
+        const nextKeywordsValue = formatSavedPhraseKeywordsInputValue(keywords);
+        if (currentEntry.text === phrase && currentKeywordsValue === nextKeywordsValue) {
+            return { ok: false, message: 'Aucun changement détecté.' };
+        }
+
+        savedPhrases[numericIndex] = {
+            text: phrase,
+            keywords
+        };
+        saveSavedPhrases();
+        injectSavedPhrasesToolbar();
+
+        return {
+            ok: true,
+            message: 'Phrase mise à jour.'
+        };
     }
 
     function loadDebugMode() {
@@ -2091,6 +2796,1307 @@
         updateStatsBox();
     }
 
+    function openSavedPhraseQuickAddModal(initialText = '', sourceInput = null) {
+        if (!isSupportedPage()) return;
+
+        if (modalOpen) {
+            closeSettingsModal();
+        }
+
+        modalOpen = true;
+        hideImagePreview();
+
+        const normalizedInitialText = normalizeSavedPhraseText(initialText, true);
+
+        const overlay = document.createElement('div');
+        overlay.id = OVERLAY_ID;
+        overlay.style.position = 'fixed';
+        overlay.style.inset = '0';
+        overlay.style.zIndex = '1000000';
+        overlay.style.background = 'rgba(0,0,0,0.45)';
+
+        const modal = document.createElement('div');
+        modal.id = MODAL_ID;
+        modal.style.position = 'fixed';
+        modal.style.top = '50%';
+        modal.style.left = '50%';
+        modal.style.transform = 'translate(-50%, -50%)';
+        modal.style.zIndex = '1000001';
+        modal.style.width = 'min(620px, calc(100vw - 24px))';
+        modal.style.maxHeight = 'min(86vh, 720px)';
+        modal.style.overflowY = 'auto';
+        modal.style.background = 'rgba(24,24,27,0.98)';
+        modal.style.border = '1px solid rgba(255,255,255,0.08)';
+        modal.style.borderRadius = '18px';
+        modal.style.boxShadow = '0 20px 50px rgba(0,0,0,0.45)';
+        modal.style.padding = '18px';
+        modal.style.fontFamily = 'Inter, Arial, sans-serif';
+        modal.style.color = '#fff';
+
+        modal.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px;">
+            <div>
+                <div style="font-size:16px;font-weight:700;">Ajouter une réponse rapide</div>
+                <div style="font-size:12px;color:#a1a1aa;margin-top:4px;">
+                    Le texte actuel du champ de chat a été repris ici pour gagner du temps.
+                </div>
+            </div>
+            <button id="tm-close-modal" style="
+                border:none;
+                background:#27272a;
+                color:#fff;
+                width:34px;
+                height:34px;
+                border-radius:10px;
+                cursor:pointer;
+                font-size:18px;
+                line-height:1;
+            ">×</button>
+        </div>
+
+        <div style="
+            padding:12px;
+            border-radius:14px;
+            background:rgba(255,255,255,0.03);
+            border:1px solid rgba(255,255,255,0.06);
+        ">
+            <label for="tm-quick-add-phrase-input" style="display:block;font-size:12px;color:#d4d4d8;margin-bottom:6px;">
+                Texte de la réponse
+            </label>
+
+            <textarea id="tm-quick-add-phrase-input" rows="5" maxlength="${MAX_SAVED_PHRASE_LENGTH}" placeholder="Exemple : Salut, il me faut le lien exact du torrent pour vérifier."
+                style="
+                    width:100%;
+                    min-height:120px;
+                    resize:vertical;
+                    background:#18181b;
+                    color:#fff;
+                    border:1px solid rgba(255,255,255,0.10);
+                    border-radius:10px;
+                    padding:10px 12px;
+                    outline:none;
+                    line-height:1.45;
+                ">${escapeHtml(normalizedInitialText)}</textarea>
+
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:8px;font-size:11px;color:#71717a;">
+                <span>Le texte est prérempli depuis le chat, mais reste modifiable.</span>
+                <span id="tm-quick-add-phrase-length">${formatSavedPhraseLengthLabel(normalizedInitialText)}</span>
+            </div>
+
+            <label for="tm-quick-add-keywords-input" style="display:block;font-size:12px;color:#d4d4d8;margin:12px 0 6px;">
+                Mots-clés
+            </label>
+
+            <input id="tm-quick-add-keywords-input" type="text" placeholder="ratio, reseed, merci, lien"
+                style="
+                    width:100%;
+                    background:#18181b;
+                    color:#fff;
+                    border:1px solid rgba(255,255,255,0.10);
+                    border-radius:10px;
+                    padding:10px 12px;
+                    outline:none;
+                ">
+
+            <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                Optionnel. Sépare les mots-clés par des virgules pour améliorer les suggestions contextuelles.
+            </div>
+
+            <div style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:12px;">
+                <button id="tm-quick-add-cancel" type="button" style="
+                    border:none;
+                    background:#3f3f46;
+                    color:#fff;
+                    border-radius:10px;
+                    padding:10px 12px;
+                    cursor:pointer;
+                    font-weight:600;
+                ">Annuler</button>
+
+                <button id="tm-quick-add-save" type="button" style="
+                    border:none;
+                    background:#2563eb;
+                    color:#fff;
+                    border-radius:10px;
+                    padding:10px 12px;
+                    cursor:pointer;
+                    font-weight:600;
+                ">Enregistrer</button>
+            </div>
+        </div>
+
+        <div id="tm-feedback" style="
+            min-height:20px;
+            margin-top:14px;
+            font-size:12px;
+            color:#93c5fd;
+        "></div>
+        `;
+
+        document.body.appendChild(overlay);
+        document.body.appendChild(modal);
+
+        const closeBtn = modal.querySelector('#tm-close-modal');
+        const cancelBtn = modal.querySelector('#tm-quick-add-cancel');
+        const saveBtn = modal.querySelector('#tm-quick-add-save');
+        const phraseInput = modal.querySelector('#tm-quick-add-phrase-input');
+        const phraseLength = modal.querySelector('#tm-quick-add-phrase-length');
+        const keywordsInput = modal.querySelector('#tm-quick-add-keywords-input');
+        const feedback = modal.querySelector('#tm-feedback');
+
+        function restoreSourceInputFocus() {
+            const nextInput = sourceInput instanceof HTMLElement && document.contains(sourceInput)
+                ? sourceInput
+                : getChatInput();
+
+            if (!(nextInput instanceof HTMLElement)) return;
+
+            window.requestAnimationFrame(() => {
+                nextInput.focus();
+            });
+        }
+
+        function setFeedback(message, isError = false) {
+            if (!(feedback instanceof HTMLElement)) return;
+
+            feedback.textContent = message;
+            feedback.style.color = isError ? '#fca5a5' : '#93c5fd';
+        }
+
+        function syncPhraseLengthIndicator() {
+            if (!(phraseInput instanceof HTMLTextAreaElement) || !(phraseLength instanceof HTMLElement)) return;
+
+            if (phraseInput.value.length > MAX_SAVED_PHRASE_LENGTH) {
+                phraseInput.value = phraseInput.value.slice(0, MAX_SAVED_PHRASE_LENGTH);
+            }
+
+            const currentLength = phraseInput.value.length;
+            phraseLength.textContent = `${currentLength}/${MAX_SAVED_PHRASE_LENGTH} caractères`;
+            phraseLength.style.color = currentLength >= MAX_SAVED_PHRASE_LENGTH
+                ? '#fca5a5'
+                : (currentLength >= Math.floor(MAX_SAVED_PHRASE_LENGTH * 0.9) ? '#facc15' : '#71717a');
+        }
+
+        function submitQuickAdd() {
+            const result = addSavedPhrase(phraseInput?.value, keywordsInput?.value);
+            setFeedback(result.message, !result.ok);
+
+            if (!result.ok) return;
+
+            closeSettingsModal();
+            showToast(result.message);
+            restoreSourceInputFocus();
+        }
+
+        closeBtn?.addEventListener('click', () => {
+            closeSettingsModal();
+            restoreSourceInputFocus();
+        });
+
+        cancelBtn?.addEventListener('click', () => {
+            closeSettingsModal();
+            restoreSourceInputFocus();
+        });
+
+        overlay.addEventListener('click', () => {
+            closeSettingsModal();
+            restoreSourceInputFocus();
+        });
+
+        saveBtn?.addEventListener('click', submitQuickAdd);
+
+        phraseInput?.addEventListener('input', syncPhraseLengthIndicator);
+
+        phraseInput?.addEventListener('keydown', (event) => {
+            if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+                event.preventDefault();
+                submitQuickAdd();
+            }
+        });
+
+        keywordsInput?.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                submitQuickAdd();
+            }
+        });
+
+        modal.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                closeSettingsModal();
+                restoreSourceInputFocus();
+            }
+        });
+
+        syncPhraseLengthIndicator();
+
+        if (phraseInput instanceof HTMLTextAreaElement) {
+            phraseInput.focus();
+            phraseInput.setSelectionRange(phraseInput.value.length, phraseInput.value.length);
+        }
+    }
+
+    function openSavedPhrasesConfigModal() {
+        if (!isSupportedPage()) return;
+
+        if (modalOpen) {
+            closeSettingsModal();
+        }
+
+        modalOpen = true;
+        hideImagePreview();
+
+        const overlay = document.createElement('div');
+        overlay.id = OVERLAY_ID;
+        overlay.style.position = 'fixed';
+        overlay.style.inset = '0';
+        overlay.style.zIndex = '1000000';
+        overlay.style.background = 'rgba(0,0,0,0.45)';
+
+        const modal = document.createElement('div');
+        modal.id = MODAL_ID;
+        modal.style.position = 'fixed';
+        modal.style.top = '50%';
+        modal.style.left = '50%';
+        modal.style.transform = 'translate(-50%, -50%)';
+        modal.style.zIndex = '1000001';
+        modal.style.width = 'min(720px, calc(100vw - 24px))';
+        modal.style.maxHeight = 'min(88vh, 860px)';
+        modal.style.overflowY = 'auto';
+        modal.style.background = 'rgba(24,24,27,0.98)';
+        modal.style.border = '1px solid rgba(255,255,255,0.08)';
+        modal.style.borderRadius = '18px';
+        modal.style.boxShadow = '0 20px 50px rgba(0,0,0,0.45)';
+        modal.style.padding = '18px';
+        modal.style.fontFamily = 'Inter, Arial, sans-serif';
+        modal.style.color = '#fff';
+
+        const cardStyle = `
+            padding:12px;
+            border-radius:14px;
+            background:rgba(255,255,255,0.03);
+            border:1px solid rgba(255,255,255,0.06);
+        `;
+
+        modal.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px;">
+            <div>
+                <div style="font-size:16px;font-weight:700;">Configuration des réponses rapides</div>
+                <div id="tm-saved-phrases-summary" style="font-size:12px;color:#a1a1aa;margin-top:4px;">
+                    ${formatSavedPhrasesSummaryLabel()}
+                </div>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;">
+                <button id="tm-saved-phrases-back" style="
+                    border:none;
+                    background:#3f3f46;
+                    color:#fff;
+                    border-radius:10px;
+                    padding:10px 12px;
+                    cursor:pointer;
+                    font-weight:600;
+                ">Retour</button>
+                <button id="tm-close-modal" style="
+                    border:none;
+                    background:#27272a;
+                    color:#fff;
+                    width:34px;
+                    height:34px;
+                    border-radius:10px;
+                    cursor:pointer;
+                    font-size:18px;
+                    line-height:1;
+                ">×</button>
+            </div>
+        </div>
+
+        <div style="display:grid;gap:14px;">
+            <div style="${cardStyle}">
+                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Ajouter une réponse rapide</div>
+
+                <label for="tm-phrase-input" style="display:block;font-size:12px;color:#d4d4d8;margin-bottom:6px;">
+                    Texte de la réponse
+                </label>
+
+                <textarea id="tm-phrase-input" rows="5" maxlength="${MAX_SAVED_PHRASE_LENGTH}" placeholder="Exemple : Salut, il me faut le lien exact du torrent pour vérifier."
+                    style="
+                        width:100%;
+                        min-height:120px;
+                        resize:vertical;
+                        background:#18181b;
+                        color:#fff;
+                        border:1px solid rgba(255,255,255,0.10);
+                        border-radius:10px;
+                        padding:10px 12px;
+                        outline:none;
+                        line-height:1.45;
+                    "></textarea>
+
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:8px;font-size:11px;color:#71717a;">
+                    <span>Limite alignée sur le champ de chat.</span>
+                    <span id="tm-phrase-length">0/${MAX_SAVED_PHRASE_LENGTH}</span>
+                </div>
+
+                <label for="tm-phrase-keywords-input" style="display:block;font-size:12px;color:#d4d4d8;margin:12px 0 6px;">
+                    Mots-clés
+                </label>
+
+                <input id="tm-phrase-keywords-input" type="text" placeholder="ratio, reseed, merci, lien"
+                    style="
+                        width:100%;
+                        background:#18181b;
+                        color:#fff;
+                        border:1px solid rgba(255,255,255,0.10);
+                        border-radius:10px;
+                        padding:10px 12px;
+                        outline:none;
+                    ">
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                    Optionnel. Sépare les mots-clés par des virgules pour préparer une recherche ou des correspondances automatiques plus tard.
+                </div>
+
+                <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px;">
+                    <button id="tm-phrase-add" style="
+                        border:none;
+                        background:#2563eb;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">Enregistrer</button>
+                </div>
+            </div>
+
+            <div style="${cardStyle}">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:10px;">
+                    <div style="font-size:13px;font-weight:700;">Réponses enregistrées</div>
+                    <div id="tm-phrases-count" style="font-size:12px;color:#a1a1aa;">${formatSavedPhrasesCountLabel()}</div>
+                </div>
+
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+                    <button id="tm-phrases-export" type="button" style="
+                        border:none;
+                        background:#0f766e;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">Exporter JSON</button>
+
+                    <button id="tm-phrases-import" type="button" style="
+                        border:none;
+                        background:#7c3aed;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">Importer JSON</button>
+
+                    <input id="tm-phrases-import-file" type="file" accept="application/json,.json" style="display:none;">
+                </div>
+
+                <div id="tm-phrases-list" style="display:grid;gap:10px;"></div>
+            </div>
+        </div>
+
+        <div id="tm-feedback" style="
+            min-height:20px;
+            margin-top:14px;
+            font-size:12px;
+            color:#93c5fd;
+        "></div>
+        `;
+
+        document.body.appendChild(overlay);
+        document.body.appendChild(modal);
+
+        const closeBtn = modal.querySelector('#tm-close-modal');
+        const backBtn = modal.querySelector('#tm-saved-phrases-back');
+        const phraseInput = modal.querySelector('#tm-phrase-input');
+        const phraseKeywordsInput = modal.querySelector('#tm-phrase-keywords-input');
+        const phraseAddBtn = modal.querySelector('#tm-phrase-add');
+        const phraseLength = modal.querySelector('#tm-phrase-length');
+        const phrasesList = modal.querySelector('#tm-phrases-list');
+        const phrasesCount = modal.querySelector('#tm-phrases-count');
+        const phrasesExportBtn = modal.querySelector('#tm-phrases-export');
+        const phrasesImportBtn = modal.querySelector('#tm-phrases-import');
+        const phrasesImportFileInput = modal.querySelector('#tm-phrases-import-file');
+        const summary = modal.querySelector('#tm-saved-phrases-summary');
+        const feedback = modal.querySelector('#tm-feedback');
+        let editingPhraseIndex = null;
+
+        function setFeedback(message, isError = false) {
+            if (!feedback) return;
+
+            feedback.textContent = message;
+            feedback.style.color = isError ? '#fca5a5' : '#93c5fd';
+        }
+
+        function syncSavedPhrasesHeader() {
+            if (phrasesCount) {
+                phrasesCount.textContent = formatSavedPhrasesCountLabel();
+            }
+
+            if (summary) {
+                summary.textContent = formatSavedPhrasesSummaryLabel();
+            }
+        }
+
+        function syncSavedPhraseLengthIndicator(textarea, lengthLabel) {
+            if (!(textarea instanceof HTMLTextAreaElement) || !(lengthLabel instanceof HTMLElement)) return;
+
+            if (textarea.value.length > MAX_SAVED_PHRASE_LENGTH) {
+                textarea.value = textarea.value.slice(0, MAX_SAVED_PHRASE_LENGTH);
+            }
+
+            const currentLength = textarea.value.length;
+            lengthLabel.textContent = `${currentLength}/${MAX_SAVED_PHRASE_LENGTH}`;
+            lengthLabel.style.color = currentLength >= MAX_SAVED_PHRASE_LENGTH
+                ? '#fca5a5'
+                : (currentLength >= Math.floor(MAX_SAVED_PHRASE_LENGTH * 0.9) ? '#facc15' : '#71717a');
+        }
+
+        function syncPhraseLengthIndicator() {
+            syncSavedPhraseLengthIndicator(phraseInput, phraseLength);
+        }
+
+        function createKeywordChip(keyword) {
+            const chip = document.createElement('span');
+            chip.textContent = keyword;
+            chip.style.display = 'inline-flex';
+            chip.style.alignItems = 'center';
+            chip.style.padding = '4px 8px';
+            chip.style.borderRadius = '999px';
+            chip.style.background = 'rgba(124,58,237,0.18)';
+            chip.style.border = '1px solid rgba(139,92,246,0.22)';
+            chip.style.color = '#ddd6fe';
+            chip.style.fontSize = '11px';
+            chip.style.lineHeight = '1.2';
+            return chip;
+        }
+
+        function stopEditingSavedPhrase(refresh = true) {
+            editingPhraseIndex = null;
+
+            if (refresh) {
+                refreshSavedPhrasesList();
+            }
+        }
+
+        function startEditingSavedPhrase(index) {
+            editingPhraseIndex = index;
+            refreshSavedPhrasesList();
+
+            window.requestAnimationFrame(() => {
+                const editTextarea = modal.querySelector(`[data-tm-saved-phrase-edit-input="${index}"]`);
+                if (editTextarea instanceof HTMLTextAreaElement) {
+                    editTextarea.focus();
+                    editTextarea.setSelectionRange(editTextarea.value.length, editTextarea.value.length);
+                }
+            });
+        }
+
+        function refreshSavedPhrasesList() {
+            if (!phrasesList) return;
+
+            phrasesList.innerHTML = '';
+            syncSavedPhrasesHeader();
+
+            if (editingPhraseIndex !== null && (editingPhraseIndex < 0 || editingPhraseIndex >= savedPhrases.length)) {
+                editingPhraseIndex = null;
+            }
+
+            if (savedPhrases.length === 0) {
+                const empty = document.createElement('div');
+                empty.textContent = 'Aucune réponse rapide enregistrée pour le moment.';
+                empty.style.fontSize = '12px';
+                empty.style.color = '#a1a1aa';
+                empty.style.padding = '6px 2px';
+                phrasesList.appendChild(empty);
+                return;
+            }
+
+            savedPhrases.forEach((entry, index) => {
+                const phrase = normalizeSavedPhraseRecord(entry, true);
+                if (!phrase) return;
+                if (phrase !== entry) {
+                    savedPhrases[index] = phrase;
+                }
+
+                const row = document.createElement('div');
+                row.style.display = 'flex';
+                row.style.alignItems = 'flex-start';
+                row.style.gap = '10px';
+                row.style.padding = '12px';
+                row.style.borderRadius = '12px';
+                row.style.background = 'rgba(59,130,246,0.08)';
+                row.style.border = '1px solid rgba(59,130,246,0.16)';
+
+                const content = document.createElement('div');
+                content.style.flex = '1';
+                content.style.minWidth = '0';
+
+                if (editingPhraseIndex === index) {
+                    const editText = document.createElement('textarea');
+                    editText.value = phrase.text;
+                    editText.rows = 4;
+                    editText.maxLength = MAX_SAVED_PHRASE_LENGTH;
+                    editText.setAttribute('data-tm-saved-phrase-edit-input', String(index));
+                    editText.style.width = '100%';
+                    editText.style.minHeight = '96px';
+                    editText.style.resize = 'vertical';
+                    editText.style.background = '#18181b';
+                    editText.style.color = '#fff';
+                    editText.style.border = '1px solid rgba(255,255,255,0.10)';
+                    editText.style.borderRadius = '10px';
+                    editText.style.padding = '10px 12px';
+                    editText.style.outline = 'none';
+                    editText.style.lineHeight = '1.45';
+
+                    const editLength = document.createElement('div');
+                    editLength.style.marginTop = '8px';
+                    editLength.style.fontSize = '11px';
+                    editLength.style.textAlign = 'right';
+
+                    const editKeywordsLabel = document.createElement('label');
+                    editKeywordsLabel.textContent = 'Mots-clés';
+                    editKeywordsLabel.style.display = 'block';
+                    editKeywordsLabel.style.fontSize = '12px';
+                    editKeywordsLabel.style.color = '#d4d4d8';
+                    editKeywordsLabel.style.margin = '12px 0 6px';
+
+                    const editKeywordsInput = document.createElement('input');
+                    editKeywordsInput.type = 'text';
+                    editKeywordsInput.value = formatSavedPhraseKeywordsInputValue(phrase.keywords);
+                    editKeywordsInput.placeholder = 'ratio, reseed, merci, lien';
+                    editKeywordsInput.style.width = '100%';
+                    editKeywordsInput.style.background = '#18181b';
+                    editKeywordsInput.style.color = '#fff';
+                    editKeywordsInput.style.border = '1px solid rgba(255,255,255,0.10)';
+                    editKeywordsInput.style.borderRadius = '10px';
+                    editKeywordsInput.style.padding = '10px 12px';
+                    editKeywordsInput.style.outline = 'none';
+
+                    const editHint = document.createElement('div');
+                    editHint.textContent = 'Modifie le texte ou les mots-clés, puis enregistre.';
+                    editHint.style.marginTop = '8px';
+                    editHint.style.fontSize = '11px';
+                    editHint.style.color = '#71717a';
+                    editHint.style.lineHeight = '1.45';
+
+                    const editActions = document.createElement('div');
+                    editActions.style.display = 'flex';
+                    editActions.style.justifyContent = 'flex-end';
+                    editActions.style.gap = '8px';
+                    editActions.style.flexWrap = 'wrap';
+                    editActions.style.marginTop = '12px';
+
+                    const cancelEditBtn = document.createElement('button');
+                    cancelEditBtn.type = 'button';
+                    cancelEditBtn.textContent = 'Annuler';
+                    cancelEditBtn.style.border = 'none';
+                    cancelEditBtn.style.background = '#3f3f46';
+                    cancelEditBtn.style.color = '#fff';
+                    cancelEditBtn.style.borderRadius = '10px';
+                    cancelEditBtn.style.padding = '8px 10px';
+                    cancelEditBtn.style.cursor = 'pointer';
+                    cancelEditBtn.style.fontSize = '12px';
+                    cancelEditBtn.style.fontWeight = '600';
+
+                    const saveEditBtn = document.createElement('button');
+                    saveEditBtn.type = 'button';
+                    saveEditBtn.textContent = 'Enregistrer';
+                    saveEditBtn.style.border = 'none';
+                    saveEditBtn.style.background = '#2563eb';
+                    saveEditBtn.style.color = '#fff';
+                    saveEditBtn.style.borderRadius = '10px';
+                    saveEditBtn.style.padding = '8px 10px';
+                    saveEditBtn.style.cursor = 'pointer';
+                    saveEditBtn.style.fontSize = '12px';
+                    saveEditBtn.style.fontWeight = '600';
+
+                    function submitSavedPhraseEdition() {
+                        const result = updateSavedPhraseAt(index, editText.value, editKeywordsInput.value);
+                        setFeedback(result.message, !result.ok);
+
+                        if (!result.ok) return;
+
+                        stopEditingSavedPhrase();
+                    }
+
+                    cancelEditBtn.addEventListener('click', () => {
+                        stopEditingSavedPhrase();
+                    });
+
+                    saveEditBtn.addEventListener('click', submitSavedPhraseEdition);
+
+                    editText.addEventListener('input', () => {
+                        syncSavedPhraseLengthIndicator(editText, editLength);
+                    });
+
+                    editText.addEventListener('keydown', (event) => {
+                        if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+                            event.preventDefault();
+                            submitSavedPhraseEdition();
+                        }
+                    });
+
+                    editKeywordsInput.addEventListener('keydown', (event) => {
+                        if (event.key === 'Enter') {
+                            event.preventDefault();
+                            submitSavedPhraseEdition();
+                        }
+                    });
+
+                    syncSavedPhraseLengthIndicator(editText, editLength);
+
+                    editActions.appendChild(cancelEditBtn);
+                    editActions.appendChild(saveEditBtn);
+
+                    content.appendChild(editText);
+                    content.appendChild(editLength);
+                    content.appendChild(editKeywordsLabel);
+                    content.appendChild(editKeywordsInput);
+                    content.appendChild(editHint);
+                    content.appendChild(editActions);
+
+                    row.appendChild(content);
+                    phrasesList.appendChild(row);
+                    return;
+                }
+
+                const text = document.createElement('div');
+                text.textContent = phrase.text;
+                text.style.fontSize = '12px';
+                text.style.lineHeight = '1.5';
+                text.style.color = '#e4e4e7';
+                text.style.whiteSpace = 'pre-wrap';
+                text.style.wordBreak = 'break-word';
+
+                const meta = document.createElement('div');
+                meta.style.display = 'flex';
+                meta.style.justifyContent = 'space-between';
+                meta.style.alignItems = 'center';
+                meta.style.gap = '10px';
+                meta.style.flexWrap = 'wrap';
+                meta.style.marginTop = '8px';
+
+                const keywordsLabel = document.createElement('div');
+                keywordsLabel.textContent = phrase.keywords.length > 0 ? 'Mots-clés liés' : 'Aucun mot-clé';
+                keywordsLabel.style.fontSize = '11px';
+                keywordsLabel.style.color = phrase.keywords.length > 0 ? '#c4b5fd' : '#71717a';
+
+                const length = document.createElement('div');
+                length.textContent = formatSavedPhraseLengthLabel(phrase.text);
+                length.style.fontSize = '11px';
+                length.style.color = '#71717a';
+
+                meta.appendChild(keywordsLabel);
+                meta.appendChild(length);
+
+                content.appendChild(text);
+                content.appendChild(meta);
+
+                if (phrase.keywords.length > 0) {
+                    const keywordsWrap = document.createElement('div');
+                    keywordsWrap.style.display = 'flex';
+                    keywordsWrap.style.flexWrap = 'wrap';
+                    keywordsWrap.style.gap = '6px';
+                    keywordsWrap.style.marginTop = '8px';
+
+                    phrase.keywords.forEach((keyword) => {
+                        keywordsWrap.appendChild(createKeywordChip(keyword));
+                    });
+
+                    content.appendChild(keywordsWrap);
+                }
+
+                const actions = document.createElement('div');
+                actions.style.display = 'flex';
+                actions.style.flexDirection = 'column';
+                actions.style.gap = '8px';
+                actions.style.flexShrink = '0';
+
+                const editBtn = document.createElement('button');
+                editBtn.type = 'button';
+                editBtn.textContent = '✎';
+                editBtn.title = 'Modifier cette réponse rapide';
+                editBtn.setAttribute('aria-label', 'Modifier cette réponse rapide');
+                editBtn.style.border = 'none';
+                editBtn.style.background = '#1f2937';
+                editBtn.style.color = '#c4b5fd';
+                editBtn.style.borderRadius = '10px';
+                editBtn.style.padding = '8px 10px';
+                editBtn.style.cursor = 'pointer';
+                editBtn.style.fontSize = '14px';
+                editBtn.style.fontWeight = '700';
+                editBtn.style.lineHeight = '1';
+
+                const removeBtn = document.createElement('button');
+                removeBtn.type = 'button';
+                removeBtn.textContent = 'Supprimer';
+                removeBtn.style.border = 'none';
+                removeBtn.style.background = '#3f3f46';
+                removeBtn.style.color = '#fca5a5';
+                removeBtn.style.borderRadius = '10px';
+                removeBtn.style.padding = '8px 10px';
+                removeBtn.style.cursor = 'pointer';
+                removeBtn.style.fontSize = '12px';
+                removeBtn.style.fontWeight = '600';
+                removeBtn.style.flexShrink = '0';
+
+                editBtn.addEventListener('click', () => {
+                    startEditingSavedPhrase(index);
+                });
+
+                removeBtn.addEventListener('click', () => {
+                    const result = removeSavedPhraseAt(index);
+                    setFeedback(result.message, !result.ok);
+
+                    if (editingPhraseIndex !== null) {
+                        if (editingPhraseIndex === index) {
+                            editingPhraseIndex = null;
+                        } else if (index < editingPhraseIndex) {
+                            editingPhraseIndex -= 1;
+                        }
+                    }
+
+                    refreshSavedPhrasesList();
+                });
+
+                actions.appendChild(editBtn);
+                actions.appendChild(removeBtn);
+
+                row.appendChild(content);
+                row.appendChild(actions);
+                phrasesList.appendChild(row);
+            });
+        }
+
+        closeBtn?.addEventListener('click', closeSettingsModal);
+        overlay.addEventListener('click', closeSettingsModal);
+
+        backBtn?.addEventListener('click', () => {
+            closeSettingsModal();
+            openSettingsModal();
+        });
+
+        phraseAddBtn?.addEventListener('click', () => {
+            const result = addSavedPhrase(phraseInput?.value, phraseKeywordsInput?.value);
+            setFeedback(result.message, !result.ok);
+
+            if (!result.ok) return;
+
+            refreshSavedPhrasesList();
+
+            if (phraseInput instanceof HTMLTextAreaElement) {
+                phraseInput.value = '';
+                phraseInput.focus();
+            }
+
+            if (phraseKeywordsInput instanceof HTMLInputElement) {
+                phraseKeywordsInput.value = '';
+            }
+
+            syncPhraseLengthIndicator();
+        });
+
+        phraseInput?.addEventListener('input', syncPhraseLengthIndicator);
+
+        phraseInput?.addEventListener('keydown', (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                e.preventDefault();
+                phraseAddBtn?.click();
+            }
+        });
+
+        phraseKeywordsInput?.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                phraseAddBtn?.click();
+            }
+        });
+
+        phrasesExportBtn?.addEventListener('click', () => {
+            const result = downloadSavedPhrasesExport();
+            setFeedback(result.message, !result.ok);
+        });
+
+        phrasesImportBtn?.addEventListener('click', () => {
+            phrasesImportFileInput?.click();
+        });
+
+        phrasesImportFileInput?.addEventListener('change', async () => {
+            const selectedFile = phrasesImportFileInput instanceof HTMLInputElement
+                ? phrasesImportFileInput.files?.[0]
+                : null;
+
+            if (!selectedFile) return;
+
+            try {
+                const rawContent = await selectedFile.text();
+                const parsedContent = JSON.parse(rawContent);
+                const result = importSavedPhrases(parsedContent);
+
+                setFeedback(result.message, !result.ok);
+                if (result.ok) {
+                    refreshSavedPhrasesList();
+                }
+            } catch (e) {
+                setFeedback('Import impossible : fichier JSON invalide.', true);
+            } finally {
+                if (phrasesImportFileInput instanceof HTMLInputElement) {
+                    phrasesImportFileInput.value = '';
+                }
+            }
+        });
+
+        modal.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                closeSettingsModal();
+            }
+        });
+
+        refreshSavedPhrasesList();
+        syncPhraseLengthIndicator();
+        phraseInput?.focus();
+    }
+
+    function openSavedPhrasesPickerModal() {
+        if (!isSupportedPage()) return;
+        if (savedPhrases.length === 0) return;
+
+        if (modalOpen) {
+            closeSettingsModal();
+        }
+
+        modalOpen = true;
+        hideImagePreview();
+
+        const overlay = document.createElement('div');
+        overlay.id = OVERLAY_ID;
+        overlay.style.position = 'fixed';
+        overlay.style.inset = '0';
+        overlay.style.zIndex = '1000000';
+        overlay.style.background = 'rgba(0,0,0,0.45)';
+
+        const modal = document.createElement('div');
+        modal.id = MODAL_ID;
+        modal.style.position = 'fixed';
+        modal.style.top = '50%';
+        modal.style.left = '50%';
+        modal.style.transform = 'translate(-50%, -50%)';
+        modal.style.zIndex = '1000001';
+        modal.style.width = 'min(760px, calc(100vw - 24px))';
+        modal.style.maxHeight = 'min(88vh, 860px)';
+        modal.style.overflowY = 'auto';
+        modal.style.background = 'rgba(24,24,27,0.98)';
+        modal.style.border = '1px solid rgba(255,255,255,0.08)';
+        modal.style.borderRadius = '18px';
+        modal.style.boxShadow = '0 20px 50px rgba(0,0,0,0.45)';
+        modal.style.padding = '18px';
+        modal.style.fontFamily = 'Inter, Arial, sans-serif';
+        modal.style.color = '#fff';
+
+        const cardStyle = `
+            padding:12px;
+            border-radius:14px;
+            background:rgba(255,255,255,0.03);
+            border:1px solid rgba(255,255,255,0.06);
+        `;
+
+        modal.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px;">
+            <div>
+                <div style="font-size:16px;font-weight:700;">Toutes les réponses rapides</div>
+                <div style="font-size:12px;color:#a1a1aa;margin-top:4px;">
+                    ${formatSavedPhrasesCountLabel()} disponibles. Clique sur une réponse pour l’insérer dans le chat.
+                </div>
+            </div>
+            <button id="tm-close-modal" style="
+                border:none;
+                background:#27272a;
+                color:#fff;
+                width:34px;
+                height:34px;
+                border-radius:10px;
+                cursor:pointer;
+                font-size:18px;
+                line-height:1;
+            ">×</button>
+        </div>
+
+        <div style="${cardStyle};margin-bottom:14px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+                <div style="font-size:13px;font-weight:700;">Filtrer par mot-clé</div>
+                <button id="tm-saved-phrases-picker-clear" type="button" style="
+                    border:none;
+                    background:#3f3f46;
+                    color:#fff;
+                    border-radius:10px;
+                    padding:8px 10px;
+                    cursor:pointer;
+                    font-size:12px;
+                    font-weight:600;
+                ">Réinitialiser</button>
+            </div>
+            <div id="tm-saved-phrases-picker-filter-meta" style="margin-top:8px;font-size:11px;color:#71717a;">
+                Aucun filtre actif.
+            </div>
+            <div id="tm-saved-phrases-picker-filters" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;"></div>
+        </div>
+
+        <div style="${cardStyle}">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px;">
+                <div style="font-size:13px;font-weight:700;">Réponses disponibles</div>
+                <div id="tm-saved-phrases-picker-count" style="font-size:12px;color:#a1a1aa;"></div>
+            </div>
+            <div id="tm-saved-phrases-picker-list" style="display:grid;gap:10px;"></div>
+        </div>
+
+        <div id="tm-feedback" style="
+            min-height:20px;
+            margin-top:14px;
+            font-size:12px;
+            color:#93c5fd;
+        "></div>
+        `;
+
+        document.body.appendChild(overlay);
+        document.body.appendChild(modal);
+
+        const closeBtn = modal.querySelector('#tm-close-modal');
+        const clearFiltersBtn = modal.querySelector('#tm-saved-phrases-picker-clear');
+        const feedback = modal.querySelector('#tm-feedback');
+        const pickerCount = modal.querySelector('#tm-saved-phrases-picker-count');
+        const filtersWrap = modal.querySelector('#tm-saved-phrases-picker-filters');
+        const filterMeta = modal.querySelector('#tm-saved-phrases-picker-filter-meta');
+        const pickerList = modal.querySelector('#tm-saved-phrases-picker-list');
+        const activeKeywordFilters = new Set();
+
+        function setFeedback(message, isError = false) {
+            if (!feedback) return;
+
+            feedback.textContent = message;
+            feedback.style.color = isError ? '#fca5a5' : '#93c5fd';
+        }
+
+        function getRankedPickerEntries() {
+            return getRankedSavedPhrases().map((entry) => ({
+                ...entry,
+                matchPercent: computeSavedPhraseMatchPercent(entry.score)
+            }));
+        }
+
+        function normalizeKeywordFilterKey(keyword) {
+            return normalizeSavedPhraseText(keyword).toLocaleLowerCase('fr');
+        }
+
+        function phraseMatchesActiveFilters(entry) {
+            if (activeKeywordFilters.size === 0) return true;
+
+            const phraseKeywordKeys = new Set(
+                entry.phrase.keywords
+                    .map((keyword) => normalizeKeywordFilterKey(keyword))
+                    .filter(Boolean)
+            );
+
+            for (const activeFilter of activeKeywordFilters) {
+                if (!phraseKeywordKeys.has(activeFilter)) {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        function toggleKeywordFilter(keyword) {
+            const keywordKey = normalizeKeywordFilterKey(keyword);
+            if (!keywordKey) return;
+
+            if (activeKeywordFilters.has(keywordKey)) {
+                activeKeywordFilters.delete(keywordKey);
+            } else {
+                activeKeywordFilters.add(keywordKey);
+            }
+
+            refreshPickerFilters();
+            refreshPickerList();
+        }
+
+        function createKeywordChip(keyword, isSelected = false, onClick = null) {
+            const chip = document.createElement(onClick ? 'button' : 'span');
+            chip.textContent = keyword;
+            chip.style.display = 'inline-flex';
+            chip.style.alignItems = 'center';
+            chip.style.padding = '4px 8px';
+            chip.style.borderRadius = '999px';
+            chip.style.background = isSelected ? 'rgba(139,92,246,0.32)' : 'rgba(124,58,237,0.18)';
+            chip.style.border = isSelected ? '1px solid rgba(167,139,250,0.45)' : '1px solid rgba(139,92,246,0.22)';
+            chip.style.color = isSelected ? '#ffffff' : '#ddd6fe';
+            chip.style.fontSize = '11px';
+            chip.style.lineHeight = '1.2';
+            if (onClick) {
+                chip.type = 'button';
+                chip.style.cursor = 'pointer';
+                chip.style.transition = 'all 0.15s ease';
+                chip.addEventListener('click', onClick);
+            }
+            return chip;
+        }
+
+        function refreshPickerFilters() {
+            if (!filtersWrap || !filterMeta || !clearFiltersBtn) return;
+
+            const entries = getRankedPickerEntries();
+            const availableKeywords = [];
+            const seenKeywordKeys = new Set();
+
+            entries.forEach((entry) => {
+                entry.phrase.keywords.forEach((keyword) => {
+                    const keywordKey = normalizeKeywordFilterKey(keyword);
+                    if (!keywordKey || seenKeywordKeys.has(keywordKey)) return;
+
+                    seenKeywordKeys.add(keywordKey);
+                    availableKeywords.push(keyword);
+                });
+            });
+
+            availableKeywords.sort((a, b) => a.localeCompare(b, 'fr', { sensitivity: 'base' }));
+
+            filtersWrap.innerHTML = '';
+
+            if (availableKeywords.length === 0) {
+                const empty = document.createElement('div');
+                empty.textContent = 'Aucun mot-clé enregistré pour le moment.';
+                empty.style.fontSize = '12px';
+                empty.style.color = '#a1a1aa';
+                filtersWrap.appendChild(empty);
+            } else {
+                availableKeywords.forEach((keyword) => {
+                    const keywordKey = normalizeKeywordFilterKey(keyword);
+                    const chip = createKeywordChip(
+                        keyword,
+                        activeKeywordFilters.has(keywordKey),
+                        (event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            toggleKeywordFilter(keyword);
+                        }
+                    );
+                    filtersWrap.appendChild(chip);
+                });
+            }
+
+            clearFiltersBtn.disabled = activeKeywordFilters.size === 0;
+            clearFiltersBtn.style.opacity = activeKeywordFilters.size === 0 ? '0.55' : '1';
+            clearFiltersBtn.style.cursor = activeKeywordFilters.size === 0 ? 'not-allowed' : 'pointer';
+
+            if (activeKeywordFilters.size === 0) {
+                filterMeta.textContent = 'Aucun filtre actif.';
+                return;
+            }
+
+            filterMeta.textContent = `${activeKeywordFilters.size} filtre${activeKeywordFilters.size > 1 ? 's' : ''} actif${activeKeywordFilters.size > 1 ? 's' : ''}. Clique à nouveau sur un mot-clé pour le retirer.`;
+        }
+
+        function refreshPickerList() {
+            if (!pickerList || !pickerCount) return;
+
+            const entries = getRankedPickerEntries();
+            const filteredEntries = entries.filter((entry) => phraseMatchesActiveFilters(entry));
+            const contextualSortingActive = entries.length > 0 && entries[0].score > 0;
+
+            pickerList.innerHTML = '';
+            pickerCount.textContent = contextualSortingActive
+                ? `${filteredEntries.length}/${entries.length} affichée${filteredEntries.length > 1 ? 's' : ''} · tri contextuel actif`
+                : `${filteredEntries.length}/${entries.length} affichée${filteredEntries.length > 1 ? 's' : ''}`;
+
+            if (entries.length === 0) {
+                const empty = document.createElement('div');
+                empty.textContent = 'Aucune réponse rapide enregistrée pour le moment.';
+                empty.style.fontSize = '12px';
+                empty.style.color = '#a1a1aa';
+                empty.style.padding = '6px 2px';
+                pickerList.appendChild(empty);
+                return;
+            }
+
+            if (filteredEntries.length === 0) {
+                const empty = document.createElement('div');
+                empty.textContent = 'Aucune réponse ne correspond aux mots-clés sélectionnés.';
+                empty.style.fontSize = '12px';
+                empty.style.color = '#a1a1aa';
+                empty.style.padding = '6px 2px';
+                pickerList.appendChild(empty);
+                return;
+            }
+
+            filteredEntries.forEach((entry) => {
+                const phrase = entry.phrase;
+                const previewText = truncateSavedPhrasePreviewText(phrase.text);
+                const row = document.createElement('div');
+                row.style.width = '100%';
+                row.style.textAlign = 'left';
+                row.style.padding = '12px';
+                row.style.borderRadius = '12px';
+                row.style.background = 'rgba(59,130,246,0.08)';
+                row.style.border = '1px solid rgba(59,130,246,0.16)';
+                row.style.cursor = 'pointer';
+                row.style.transition = 'background 0.15s ease, border-color 0.15s ease';
+                row.tabIndex = 0;
+                row.setAttribute('role', 'button');
+
+                row.addEventListener('mouseenter', () => {
+                    row.style.background = 'rgba(99,102,241,0.15)';
+                    row.style.borderColor = 'rgba(129,140,248,0.32)';
+                });
+
+                row.addEventListener('mouseleave', () => {
+                    row.style.background = 'rgba(59,130,246,0.08)';
+                    row.style.borderColor = 'rgba(59,130,246,0.16)';
+                });
+
+                function insertPhrase() {
+                    const input = getChatInput();
+                    const result = insertSavedPhraseIntoChatInput(input, phrase.text);
+
+                    if (!result.ok) {
+                        setFeedback(result.message, true);
+                        return;
+                    }
+
+                    closeSettingsModal();
+                }
+
+                row.addEventListener('click', insertPhrase);
+                row.addEventListener('keydown', (event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        insertPhrase();
+                    }
+                });
+
+                const textRow = document.createElement('div');
+                textRow.style.display = 'flex';
+                textRow.style.alignItems = 'flex-start';
+                textRow.style.gap = '8px';
+
+                if (contextualSortingActive && entry.matchPercent > 0) {
+                    const percentBadge = document.createElement('span');
+                    percentBadge.textContent = `${entry.matchPercent}%`;
+                    percentBadge.title = 'Taux de correspondance estimé';
+                    percentBadge.style.display = 'inline-flex';
+                    percentBadge.style.alignItems = 'center';
+                    percentBadge.style.justifyContent = 'center';
+                    percentBadge.style.padding = '3px 7px';
+                    percentBadge.style.borderRadius = '999px';
+                    percentBadge.style.background = 'rgba(34,197,94,0.18)';
+                    percentBadge.style.border = '1px solid rgba(74,222,128,0.28)';
+                    percentBadge.style.color = '#bbf7d0';
+                    percentBadge.style.fontSize = '10px';
+                    percentBadge.style.fontWeight = '700';
+                    percentBadge.style.flexShrink = '0';
+                    percentBadge.style.marginTop = '1px';
+                    textRow.appendChild(percentBadge);
+                }
+
+                const text = document.createElement('div');
+                text.textContent = previewText;
+                text.style.fontSize = '12px';
+                text.style.lineHeight = '1.5';
+                text.style.color = '#e4e4e7';
+                text.style.whiteSpace = 'pre-wrap';
+                text.style.wordBreak = 'break-word';
+                text.style.flex = '1';
+                text.style.minWidth = '0';
+
+                const meta = document.createElement('div');
+                meta.style.display = 'flex';
+                meta.style.justifyContent = 'space-between';
+                meta.style.alignItems = 'center';
+                meta.style.gap = '10px';
+                meta.style.flexWrap = 'wrap';
+                meta.style.marginTop = '8px';
+
+                const keywordsLabel = document.createElement('div');
+                keywordsLabel.textContent = phrase.keywords.length > 0 ? 'Mots-clés liés' : 'Aucun mot-clé';
+                keywordsLabel.style.fontSize = '11px';
+                keywordsLabel.style.color = phrase.keywords.length > 0 ? '#c4b5fd' : '#71717a';
+
+                const length = document.createElement('div');
+                length.textContent = formatSavedPhraseLengthLabel(phrase.text);
+                length.style.fontSize = '11px';
+                length.style.color = '#71717a';
+
+                const metaLeft = document.createElement('div');
+                metaLeft.style.display = 'flex';
+                metaLeft.style.alignItems = 'center';
+                metaLeft.style.gap = '8px';
+                metaLeft.style.flexWrap = 'wrap';
+                metaLeft.appendChild(keywordsLabel);
+
+                meta.appendChild(metaLeft);
+                meta.appendChild(length);
+
+                textRow.appendChild(text);
+                row.appendChild(textRow);
+                row.appendChild(meta);
+
+                if (phrase.keywords.length > 0) {
+                    const keywordsWrap = document.createElement('div');
+                    keywordsWrap.style.display = 'flex';
+                    keywordsWrap.style.flexWrap = 'wrap';
+                    keywordsWrap.style.gap = '6px';
+                    keywordsWrap.style.marginTop = '8px';
+
+                    phrase.keywords.forEach((keyword) => {
+                        const keywordKey = normalizeKeywordFilterKey(keyword);
+                        const chip = createKeywordChip(
+                            keyword,
+                            activeKeywordFilters.has(keywordKey),
+                            (event) => {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                toggleKeywordFilter(keyword);
+                            }
+                        );
+                        keywordsWrap.appendChild(chip);
+                    });
+
+                    row.appendChild(keywordsWrap);
+                }
+
+                pickerList.appendChild(row);
+            });
+        }
+
+        closeBtn?.addEventListener('click', closeSettingsModal);
+        overlay.addEventListener('click', closeSettingsModal);
+        clearFiltersBtn?.addEventListener('click', () => {
+            if (activeKeywordFilters.size === 0) return;
+            activeKeywordFilters.clear();
+            refreshPickerFilters();
+            refreshPickerList();
+        });
+
+        modal.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                closeSettingsModal();
+            }
+        });
+
+        refreshPickerFilters();
+        refreshPickerList();
+    }
+
     function toggleStatsCollapsed(forceValue = !statsCollapsed) {
         saveStatsCollapsed(forceValue);
         applyStatsBoxCollapsedState();
@@ -2420,6 +4426,47 @@
 
                 <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
                     Eclaircit la zone de chat, les messages, la stats box et les toasts du script. Reglage enregistre separement pour ${currentPageLabel}.
+                </div>
+            </div>
+
+            <div style="${settingsCardStyle}">
+                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Phrases Sauvegardées</div>
+
+                <label style="
+                    display:flex;
+                    align-items:center;
+                    gap:10px;
+                    cursor:pointer;
+                    font-size:12px;
+                    color:#d4d4d8;
+                ">
+                    <input id="tm-phrases-enabled-toggle" type="checkbox" ${savedPhrasesEnabled ? 'checked' : ''} style="
+                        width:16px;
+                        height:16px;
+                        accent-color:#8b5cf6;
+                        cursor:pointer;
+                    ">
+                    <span>Activer les réponses rapides</span>
+                </label>
+
+                <div id="tm-phrases-summary" style="margin-top:10px;font-size:12px;color:#a1a1aa;line-height:1.5;">
+                    ${formatSavedPhrasesSummaryLabel()}
+                </div>
+
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
+                    <button id="tm-phrases-configure" style="
+                        border:none;
+                        background:#7c3aed;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">Configurer</button>
+                </div>
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.4;">
+                    Ouvre une fenêtre dédiée pour ajouter, retirer et gérer les réponses rapides sans surcharger les paramètres principaux.
                 </div>
             </div>
 
@@ -2862,7 +4909,10 @@
 
         const closeBtn = modal.querySelector('#tm-close-modal');
         const userInput = modal.querySelector('#tm-user-input');
+        const phrasesConfigureBtn = modal.querySelector('#tm-phrases-configure');
+        const phrasesSummary = modal.querySelector('#tm-phrases-summary');
         const toggleBtn = modal.querySelector('#tm-user-toggle');
+        const phrasesEnabledToggle = modal.querySelector('#tm-phrases-enabled-toggle');
         const hiddenUsersList = modal.querySelector('#tm-hidden-users-list');
         const highlightUserInput = modal.querySelector('#tm-highlight-user-input');
         const highlightColorInput = modal.querySelector('#tm-highlight-color-input');
@@ -2913,6 +4963,12 @@
         function setFeedback(message, isError = false) {
             feedback.textContent = message;
             feedback.style.color = isError ? '#fca5a5' : '#93c5fd';
+        }
+
+        function syncSavedPhrasesMainSummary() {
+            if (phrasesSummary) {
+                phrasesSummary.textContent = formatSavedPhrasesSummaryLabel();
+            }
         }
 
         function syncMentionSoundControlsState() {
@@ -3300,6 +5356,23 @@
             setFeedback(`Taille de police enregistrée : ${formatChatFontScalePercent()}%.`);
         });
 
+        phrasesConfigureBtn?.addEventListener('click', () => {
+            openSavedPhrasesConfigModal();
+        });
+
+        phrasesEnabledToggle?.addEventListener('change', () => {
+            saveSavedPhrasesEnabled(phrasesEnabledToggle.checked);
+            syncSavedPhrasesMainSummary();
+
+            if (savedPhrasesEnabled) {
+                injectSavedPhrasesToolbar();
+                setFeedback('Réponses rapides activées.');
+            } else {
+                removeSavedPhrasesToolbar();
+                setFeedback('Réponses rapides désactivées.');
+            }
+        });
+
         fontSizeResetBtn?.addEventListener('click', () => {
             saveChatFontScale(DEFAULT_CHAT_FONT_SCALE);
             applyChatFontScale();
@@ -3385,6 +5458,572 @@
         syncMentionOpacityPreview();
         syncFontSizeValueLabel();
         previewPosition();
+    }
+
+    function isScriptUiElement(element) {
+        if (!(element instanceof Element)) return true;
+
+        return !!element.closest(
+            [
+                `#${PANEL_ID}`,
+                `#${MODAL_ID}`,
+                `#${OVERLAY_ID}`,
+                `#${TOAST_ID}`,
+                `#${PHRASES_MENU_WRAPPER_ID}`
+            ].join(', ')
+        );
+    }
+
+    function isChatInputCandidate(element) {
+        if (!(element instanceof HTMLElement)) return false;
+        if (isScriptUiElement(element)) return false;
+        if (element.getAttribute('aria-hidden') === 'true') return false;
+
+        if (element instanceof HTMLInputElement) {
+            if (String(element.type || '').toLowerCase() !== 'text') return false;
+            if (element.disabled) return false;
+        }
+
+        if (element instanceof HTMLTextAreaElement && element.disabled) {
+            return false;
+        }
+
+        return true;
+    }
+
+    function findChatInputWithin(root) {
+        if (!(root instanceof Element) && !(root instanceof Document)) return null;
+
+        if (
+            root instanceof HTMLElement &&
+            root.matches('input[type="text"], textarea, [contenteditable="true"]') &&
+            isChatInputCandidate(root)
+        ) {
+            return root;
+        }
+
+        const candidates = Array.from(root.querySelectorAll('input[type="text"], textarea, [contenteditable="true"]'));
+        return candidates.find((element) => isChatInputCandidate(element)) || null;
+    }
+
+    function getSavedPhrasesMenu() {
+        const wrapper = document.getElementById(PHRASES_MENU_WRAPPER_ID);
+        if (!(wrapper instanceof HTMLElement)) return null;
+
+        const menu = wrapper.querySelector('[data-tm-saved-phrases-menu="1"]');
+        return menu instanceof HTMLElement ? menu : null;
+    }
+
+    function clearSavedPhrasesMenuHideTimer(menu) {
+        if (!(menu instanceof HTMLElement)) return;
+
+        const timerId = Number(menu.dataset.tmHideTimerId || 0);
+        if (timerId > 0) {
+            clearTimeout(timerId);
+            delete menu.dataset.tmHideTimerId;
+        }
+    }
+
+    function showSavedPhrasesMenu(menu) {
+        if (!(menu instanceof HTMLElement)) return;
+
+        clearSavedPhrasesMenuHideTimer(menu);
+        menu.style.display = 'flex';
+        menu.dataset.tmOpen = '1';
+        void menu.offsetWidth;
+        menu.style.opacity = '1';
+        menu.style.transform = 'translateY(0) scale(1)';
+    }
+
+    function hideSavedPhrasesMenu(menu) {
+        if (!(menu instanceof HTMLElement)) return;
+
+        clearSavedPhrasesMenuHideTimer(menu);
+        menu.dataset.tmOpen = '0';
+        menu.style.opacity = '0';
+        menu.style.transform = 'translateY(10px) scale(0.95)';
+
+        const timerId = window.setTimeout(() => {
+            if (menu.dataset.tmOpen === '1') return;
+
+            menu.style.display = 'none';
+            delete menu.dataset.tmHideTimerId;
+        }, 200);
+
+        menu.dataset.tmHideTimerId = String(timerId);
+    }
+
+    function closeSavedPhrasesMenu() {
+        const menu = getSavedPhrasesMenu();
+        if (menu) {
+            hideSavedPhrasesMenu(menu);
+        }
+    }
+
+    function removeSavedPhrasesToolbar() {
+        const menu = getSavedPhrasesMenu();
+        if (menu) {
+            clearSavedPhrasesMenuHideTimer(menu);
+        }
+
+        const wrapper = document.getElementById(PHRASES_MENU_WRAPPER_ID);
+        if (wrapper) {
+            wrapper.remove();
+        }
+    }
+
+    function installSavedPhrasesToolbarGlobalHandlers() {
+        if (savedPhrasesToolbarEventsInstalled) return;
+
+        savedPhrasesToolbarEventsInstalled = true;
+
+        document.addEventListener('click', (event) => {
+            const wrapper = document.getElementById(PHRASES_MENU_WRAPPER_ID);
+            if (!(wrapper instanceof HTMLElement)) return;
+            if (event.target instanceof Node && wrapper.contains(event.target)) return;
+
+            closeSavedPhrasesMenu();
+        });
+
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') {
+                closeSavedPhrasesMenu();
+            }
+        }, true);
+
+        window.addEventListener('blur', () => {
+            closeSavedPhrasesMenu();
+        });
+    }
+
+    function getChatInput() {
+        let input = null;
+
+        if (isChatPage()) {
+            const header = getChatPageHeaderElement();
+            if (header && header.parentElement) {
+                input = findChatInputWithin(header.parentElement);
+            }
+            if (!input) {
+                const scroller = getChatPageMessagesRoot();
+                if (scroller && scroller.parentElement && scroller.parentElement.nextElementSibling) {
+                    input = findChatInputWithin(scroller.parentElement.nextElementSibling);
+                }
+            }
+        } else if (isHomePage()) {
+            const homeContainer = getHomepageChatContainer();
+            if (homeContainer) {
+                input = findChatInputWithin(homeContainer);
+            }
+        }
+
+        if (!input) {
+            const darkContainers = Array.from(document.querySelectorAll('.bg-zinc-950'));
+            input = darkContainers
+                .map((container) => findChatInputWithin(container))
+                .find(Boolean) || null;
+        }
+
+        if (!input) {
+            const allInputs = Array.from(document.querySelectorAll('input[type="text"], textarea, [contenteditable="true"]'));
+            const validInputs = allInputs
+                .filter((element) => isChatInputCandidate(element))
+                .filter((element) => !element.closest('nav, header, [role="navigation"], .navbar'));
+
+            input = validInputs.find((element) => /message|ecrire|écrire|repondre|répondre/i.test(element.getAttribute('placeholder') || ''))
+                || validInputs.find((element) => element.closest('form'))
+                || validInputs.pop()
+                || null;
+        }
+
+        return input;
+    }
+
+    function getChatInputMaxLength(input) {
+        if (input instanceof HTMLInputElement || input instanceof HTMLTextAreaElement) {
+            const attributeMaxLength = Number(input.getAttribute('maxlength'));
+            if (Number.isFinite(attributeMaxLength) && attributeMaxLength > 0) {
+                return attributeMaxLength;
+            }
+
+            if (input.maxLength > 0) {
+                return input.maxLength;
+            }
+        }
+
+        return MAX_SAVED_PHRASE_LENGTH;
+    }
+
+    function insertSavedPhraseIntoChatInput(input, phraseText) {
+        if (!(input instanceof HTMLElement)) {
+            return { ok: false, message: 'Champ de texte non trouvé.' };
+        }
+
+        const phrase = normalizeSavedPhraseText(phraseText);
+        if (!phrase) {
+            return { ok: false, message: 'Phrase vide.' };
+        }
+
+        input.focus();
+
+        const currentValue = input.isContentEditable
+            ? (input.textContent || '')
+            : ('value' in input ? (input.value || '') : '');
+        const prefix = currentValue.length > 0 && !/\s$/.test(currentValue) ? ' ' : '';
+        const nextValue = currentValue + prefix + phrase;
+        const maxLength = getChatInputMaxLength(input);
+
+        if (maxLength > 0 && nextValue.length > maxLength) {
+            return {
+                ok: false,
+                message: `Le message dépasserait la limite du chat (${nextValue.length}/${maxLength}).`
+            };
+        }
+
+        if (input.isContentEditable) {
+            input.textContent = nextValue;
+        } else if ('value' in input) {
+            const nativeSetter = Object.getOwnPropertyDescriptor(
+                window[input.tagName === 'TEXTAREA' ? 'HTMLTextAreaElement' : 'HTMLInputElement'].prototype,
+                'value'
+            )?.set;
+
+            if (nativeSetter) {
+                nativeSetter.call(input, nextValue);
+            } else {
+                input.value = nextValue;
+            }
+        } else {
+            return { ok: false, message: 'Champ de texte non compatible.' };
+        }
+
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        return { ok: true, message: 'Phrase insérée.' };
+    }
+
+    function buildSavedPhrasesMenuContent(menu, input = getChatInput()) {
+        if (!(menu instanceof HTMLElement)) return;
+
+        menu.innerHTML = '';
+
+        const rankedPhrases = getRankedSavedPhrases(input);
+        const visiblePhraseCount = Math.min(rankedPhrases.length, MAX_VISIBLE_SAVED_PHRASES_IN_MENU);
+        const contextualSortingActive = rankedPhrases.length > 0 && rankedPhrases[0].score > 0;
+
+        if (contextualSortingActive) {
+            const helperLabel = document.createElement('div');
+            helperLabel.textContent = 'Suggestions contextuelles';
+            helperLabel.style.padding = '6px 10px 8px';
+            helperLabel.style.fontSize = '11px';
+            helperLabel.style.fontWeight = '700';
+            helperLabel.style.color = '#c4b5fd';
+            helperLabel.style.opacity = '0.95';
+            menu.appendChild(helperLabel);
+        }
+
+        for (let i = 0; i < visiblePhraseCount; i++) {
+            const rankedPhrase = rankedPhrases[i];
+            if (!rankedPhrase?.phrase) continue;
+
+            const phraseText = rankedPhrase.phrase.text;
+            const previewText = truncateSavedPhrasePreviewText(phraseText);
+            const keywordsLabel = formatSavedPhraseKeywordsLabel(rankedPhrase.phrase.keywords);
+            const item = document.createElement('button');
+            item.type = 'button';
+
+            const titleParts = [phraseText];
+            if (rankedPhrase.phrase.keywords.length > 0) {
+                titleParts.push(`Mots-clés : ${keywordsLabel}`);
+            }
+            if (rankedPhrase.matchedKeywords.length > 0) {
+                titleParts.push(`Correspondance : ${rankedPhrase.matchedKeywords.join(', ')}`);
+            }
+            if (contextualSortingActive && rankedPhrase.matchPercent > 0) {
+                titleParts.push(`Match estimé : ${rankedPhrase.matchPercent}%`);
+            }
+            item.title = titleParts.join('\n');
+            item.style.background = 'transparent';
+            item.style.border = 'none';
+            item.style.color = '#e4e4e7';
+            item.style.padding = '8px 12px';
+            item.style.borderRadius = '8px';
+            item.style.fontSize = '12px';
+            item.style.cursor = 'pointer';
+            item.style.width = '100%';
+            item.style.display = 'flex';
+            item.style.alignItems = 'center';
+            item.style.justifyContent = 'space-between';
+            item.style.gap = '10px';
+            item.style.transition = 'all 0.15s ease';
+
+            if (contextualSortingActive && rankedPhrase.matchPercent > 0) {
+                const percentBadge = document.createElement('span');
+                percentBadge.textContent = `${rankedPhrase.matchPercent}%`;
+                percentBadge.style.display = 'inline-flex';
+                percentBadge.style.alignItems = 'center';
+                percentBadge.style.justifyContent = 'center';
+                percentBadge.style.padding = '3px 7px';
+                percentBadge.style.borderRadius = '999px';
+                percentBadge.style.background = 'rgba(34,197,94,0.18)';
+                percentBadge.style.border = '1px solid rgba(74,222,128,0.28)';
+                percentBadge.style.color = '#bbf7d0';
+                percentBadge.style.fontSize = '10px';
+                percentBadge.style.fontWeight = '700';
+                percentBadge.style.flexShrink = '0';
+                item.appendChild(percentBadge);
+            }
+
+            const textLabel = document.createElement('span');
+            textLabel.textContent = previewText;
+            textLabel.style.flex = '1';
+            textLabel.style.minWidth = '0';
+            textLabel.style.textAlign = 'left';
+            textLabel.style.whiteSpace = 'nowrap';
+            textLabel.style.overflow = 'hidden';
+            textLabel.style.textOverflow = 'ellipsis';
+            item.appendChild(textLabel);
+
+            item.addEventListener('mouseenter', () => {
+                item.style.background = 'rgba(139, 92, 246, 0.15)';
+                item.style.color = '#fff';
+            });
+            item.addEventListener('mouseleave', () => {
+                item.style.background = 'transparent';
+                item.style.color = '#e4e4e7';
+            });
+
+            item.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+
+                const nextInput = getChatInput();
+
+                if (!nextInput) {
+                    if (typeof showToast === 'function') showToast('Champ de texte non trouvé.', true);
+                    return;
+                }
+
+                const result = insertSavedPhraseIntoChatInput(nextInput, phraseText);
+                if (!result.ok) {
+                    if (typeof showToast === 'function') showToast(result.message, true);
+                    return;
+                }
+
+                hideSavedPhrasesMenu(menu);
+            });
+
+            menu.appendChild(item);
+        }
+
+        if (rankedPhrases.length > MAX_VISIBLE_SAVED_PHRASES_IN_MENU) {
+            const divider = document.createElement('div');
+            divider.style.height = '1px';
+            divider.style.margin = '6px 4px';
+            divider.style.background = 'rgba(255,255,255,0.08)';
+            menu.appendChild(divider);
+
+            const moreBtn = document.createElement('button');
+            moreBtn.type = 'button';
+            moreBtn.textContent = `Autres (${rankedPhrases.length - MAX_VISIBLE_SAVED_PHRASES_IN_MENU})`;
+            moreBtn.style.background = 'rgba(124,58,237,0.16)';
+            moreBtn.style.border = '1px solid rgba(139,92,246,0.22)';
+            moreBtn.style.color = '#ddd6fe';
+            moreBtn.style.padding = '9px 12px';
+            moreBtn.style.borderRadius = '10px';
+            moreBtn.style.fontSize = '12px';
+            moreBtn.style.fontWeight = '600';
+            moreBtn.style.textAlign = 'left';
+            moreBtn.style.cursor = 'pointer';
+            moreBtn.style.width = '100%';
+            moreBtn.style.transition = 'all 0.15s ease';
+
+            moreBtn.addEventListener('mouseenter', () => {
+                moreBtn.style.background = 'rgba(124,58,237,0.24)';
+                moreBtn.style.borderColor = 'rgba(139,92,246,0.34)';
+            });
+
+            moreBtn.addEventListener('mouseleave', () => {
+                moreBtn.style.background = 'rgba(124,58,237,0.16)';
+                moreBtn.style.borderColor = 'rgba(139,92,246,0.22)';
+            });
+
+            moreBtn.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                hideSavedPhrasesMenu(menu);
+                openSavedPhrasesPickerModal();
+            });
+
+            menu.appendChild(moreBtn);
+        }
+    }
+
+    function injectSavedPhrasesToolbar() {
+        if (!isSupportedPage()) return;
+        if (!savedPhrasesEnabled) {
+            removeSavedPhrasesToolbar();
+            return;
+        }
+
+        installSavedPhrasesToolbarGlobalHandlers();
+
+        const textInput = getChatInput();
+        if (!textInput) return;
+
+        const inputArea = textInput.closest('form') || textInput.parentElement;
+        if (!inputArea || !inputArea.parentNode) return;
+
+        let wrapper = document.getElementById(PHRASES_MENU_WRAPPER_ID);
+        if (!wrapper) {
+            wrapper = document.createElement('div');
+            wrapper.id = PHRASES_MENU_WRAPPER_ID;
+            wrapper.style.display = 'flex';
+            wrapper.style.alignItems = 'center';
+            wrapper.style.gap = '8px';
+            wrapper.style.justifyContent = 'flex-end';
+            wrapper.style.position = 'absolute';
+            wrapper.style.right = '0';
+            wrapper.style.bottom = '100%';
+            wrapper.style.marginBottom = '8px';
+            wrapper.style.zIndex = '50';
+            wrapper.style.overflow = 'visible';
+        }
+
+        if (getComputedStyle(inputArea).position === 'static') {
+            inputArea.style.position = 'relative';
+        }
+
+        if (wrapper.parentNode !== inputArea) {
+            inputArea.appendChild(wrapper);
+        }
+
+        inputArea.style.overflow = 'visible';
+        if (inputArea.parentNode && inputArea.parentNode instanceof HTMLElement) {
+            const computed = window.getComputedStyle(inputArea.parentNode);
+            if (computed.overflow === 'hidden' || computed.overflowY === 'hidden') {
+                inputArea.parentNode.style.overflow = 'visible';
+            }
+        }
+
+        wrapper.innerHTML = '';
+        if (savedPhrases.length === 0) {
+            wrapper.style.display = 'none';
+            return;
+        }
+
+        wrapper.style.display = 'flex';
+
+        // Bouton Flottant
+        const toggleBtn = document.createElement('button');
+        toggleBtn.type = 'button';
+        toggleBtn.innerHTML = '<span style="margin-right:4px;">✨</span> Réponses rapides';
+        toggleBtn.style.background = 'linear-gradient(135deg, rgba(88,28,135,0.7) 0%, rgba(30,58,138,0.7) 100%)';
+        toggleBtn.style.border = '1px solid rgba(139,92,246,0.25)';
+        toggleBtn.style.color = '#e0e7ff';
+        toggleBtn.style.fontSize = '12px';
+        toggleBtn.style.fontWeight = '600';
+        toggleBtn.style.padding = '6px 14px';
+        toggleBtn.style.borderRadius = '999px';
+        toggleBtn.style.cursor = 'pointer';
+        toggleBtn.style.backdropFilter = 'blur(10px)';
+        toggleBtn.style.boxShadow = '0 4px 12px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.1)';
+        toggleBtn.style.transition = 'all 0.2s cubic-bezier(0.16, 1, 0.3, 1)';
+
+        toggleBtn.addEventListener('mouseenter', () => {
+            toggleBtn.style.filter = 'brightness(1.15)';
+            toggleBtn.style.transform = 'scale(1.02)';
+            toggleBtn.style.boxShadow = '0 6px 16px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.2)';
+            toggleBtn.style.border = '1px solid rgba(139,92,246,0.4)';
+        });
+        toggleBtn.addEventListener('mouseleave', () => {
+            toggleBtn.style.filter = 'brightness(1)';
+            toggleBtn.style.transform = 'scale(1)';
+            toggleBtn.style.boxShadow = '0 4px 12px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.1)';
+            toggleBtn.style.border = '1px solid rgba(139,92,246,0.25)';
+        });
+
+        const quickAddBtn = document.createElement('button');
+        quickAddBtn.type = 'button';
+        quickAddBtn.textContent = '+';
+        quickAddBtn.title = 'Ajouter une réponse rapide depuis le texte du chat';
+        quickAddBtn.setAttribute('aria-label', 'Ajouter une réponse rapide depuis le texte du chat');
+        quickAddBtn.style.width = '34px';
+        quickAddBtn.style.height = '34px';
+        quickAddBtn.style.border = '1px solid rgba(59,130,246,0.28)';
+        quickAddBtn.style.background = 'linear-gradient(135deg, rgba(30,64,175,0.7) 0%, rgba(8,145,178,0.7) 100%)';
+        quickAddBtn.style.color = '#eff6ff';
+        quickAddBtn.style.fontSize = '18px';
+        quickAddBtn.style.fontWeight = '700';
+        quickAddBtn.style.lineHeight = '1';
+        quickAddBtn.style.borderRadius = '999px';
+        quickAddBtn.style.cursor = 'pointer';
+        quickAddBtn.style.backdropFilter = 'blur(10px)';
+        quickAddBtn.style.boxShadow = '0 4px 12px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.12)';
+        quickAddBtn.style.transition = 'all 0.2s cubic-bezier(0.16, 1, 0.3, 1)';
+
+        quickAddBtn.addEventListener('mouseenter', () => {
+            quickAddBtn.style.filter = 'brightness(1.12)';
+            quickAddBtn.style.transform = 'scale(1.03)';
+            quickAddBtn.style.boxShadow = '0 6px 16px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.2)';
+            quickAddBtn.style.border = '1px solid rgba(96,165,250,0.42)';
+        });
+
+        quickAddBtn.addEventListener('mouseleave', () => {
+            quickAddBtn.style.filter = 'brightness(1)';
+            quickAddBtn.style.transform = 'scale(1)';
+            quickAddBtn.style.boxShadow = '0 4px 12px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.12)';
+            quickAddBtn.style.border = '1px solid rgba(59,130,246,0.28)';
+        });
+
+        // Menu Pop-up Modern
+        const menu = document.createElement('div');
+        menu.setAttribute('data-tm-saved-phrases-menu', '1');
+        menu.style.display = 'none';
+        menu.style.position = 'absolute';
+        menu.style.bottom = 'calc(100% + 8px)';
+        menu.style.right = '0';
+        menu.style.background = 'rgba(24, 24, 27, 0.75)';
+        menu.style.backdropFilter = 'blur(16px)';
+        menu.style.border = '1px solid rgba(255,255,255,0.08)';
+        menu.style.borderRadius = '14px';
+        menu.style.padding = '6px';
+        menu.style.minWidth = '220px';
+        menu.style.maxWidth = '300px';
+        menu.style.maxHeight = '280px';
+        menu.style.overflowY = 'auto'; // custom scrollbar si possible, sinon normal
+        menu.style.boxShadow = '0 10px 40px rgba(0,0,0,0.6)';
+        menu.style.flexDirection = 'column';
+        menu.style.gap = '2px';
+        menu.style.zIndex = '1000';
+        menu.style.opacity = '0';
+        menu.style.transform = 'translateY(10px) scale(0.95)';
+        menu.style.transformOrigin = 'bottom right';
+        menu.style.transition = 'opacity 0.2s cubic-bezier(0.16, 1, 0.3, 1), transform 0.2s cubic-bezier(0.16, 1, 0.3, 1)';
+
+        toggleBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+
+            if (menu.dataset.tmOpen === '1') {
+                hideSavedPhrasesMenu(menu);
+            } else {
+                buildSavedPhrasesMenuContent(menu, getChatInput());
+                closeSavedPhrasesMenu();
+                showSavedPhrasesMenu(menu);
+            }
+        });
+
+        menu.addEventListener('click', (e) => e.stopPropagation());
+
+        quickAddBtn.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            closeSavedPhrasesMenu();
+            openSavedPhraseQuickAddModal(getChatInputCurrentValue(textInput), textInput);
+        });
+
+        wrapper.appendChild(toggleBtn);
+        wrapper.appendChild(quickAddBtn);
+        wrapper.appendChild(menu);
     }
 
     function startObserver() {
@@ -4206,6 +6845,27 @@
         }, true);
     }
 
+    function installSavedPhrasesReplyContextTracker() {
+        document.addEventListener('click', (event) => {
+            if (modalOpen || !isChatPage()) return;
+
+            const target = event.target;
+            if (!(target instanceof Element)) return;
+
+            const clickedButton = target.closest('button');
+            if (!(clickedButton instanceof HTMLButtonElement)) return;
+
+            const messageEl = findMessageElementFromTarget(clickedButton);
+            if (!messageEl || !messageEl.contains(clickedButton)) return;
+
+            const replyButton = getMessageReplyActionButton(messageEl);
+            if (!(replyButton instanceof HTMLButtonElement) || replyButton.disabled) return;
+            if (clickedButton !== replyButton && !replyButton.contains(clickedButton)) return;
+
+            setSavedPhrasesReplyContextFromMessage(messageEl);
+        }, true);
+    }
+
     function clearLongPressReactionState() {
         if (!longPressReactionState) return;
 
@@ -4330,7 +6990,15 @@
     }
 
     function refreshForRoute() {
-        lastChatContextKey = getCurrentChatContextKey();
+        const currentChatContextKey = getCurrentChatContextKey();
+
+        if (!isChatPage()) {
+            clearSavedPhrasesReplyContext();
+        } else if (savedPhrasesReplyContext && savedPhrasesReplyContext.contextKey !== currentChatContextKey) {
+            clearSavedPhrasesReplyContext();
+        }
+
+        lastChatContextKey = currentChatContextKey;
 
         if (isSupportedPage()) {
             statsCollapsed = loadStatsCollapsed();
@@ -4338,6 +7006,7 @@
             lightThemeEnabled = loadLightThemeEnabled();
 
             if (isHomePage() && !getHomepageChatContainer()) {
+                removeSavedPhrasesToolbar();
                 stopObserver();
                 return;
             }
@@ -4346,6 +7015,7 @@
             applyHomepageChatCollapsedState();
             applyBoxPosition();
             applyLightThemeState();
+            injectSavedPhrasesToolbar();
 
             if (isHomePage() && homeChatCollapsed) {
                 stopObserver();
@@ -4357,6 +7027,7 @@
             lightThemeEnabled = false;
             applyLightThemeState();
             stopObserver();
+            removeSavedPhrasesToolbar();
             removeStatsBox();
             closeSettingsModal();
             hideImagePreview();
@@ -4379,11 +7050,28 @@
                 refreshForRoute();
             } else if (isChatPage() && getCurrentChatContextKey() !== lastChatContextKey) {
                 lastChatContextKey = getCurrentChatContextKey();
+                clearSavedPhrasesReplyContext();
+                injectSavedPhrasesToolbar();
                 processAllMessages();
             } else if (isHomePage() && !getHomepageChatContainer()) {
+                removeSavedPhrasesToolbar();
                 stopObserver();
             } else if (isHomePage() && getHomepageChatContainer() && !observer) {
                 refreshForRoute();
+            } else if (isSupportedPage()) {
+                if (!savedPhrasesEnabled) {
+                    removeSavedPhrasesToolbar();
+                    return;
+                }
+
+                const textInput = getChatInput();
+                if (textInput) {
+                    const inputArea = textInput.closest('form') || textInput.parentElement;
+                    const wrapper = document.getElementById(PHRASES_MENU_WRAPPER_ID);
+                    if (inputArea && inputArea.parentNode && (!wrapper || wrapper.parentNode !== inputArea)) {
+                        injectSavedPhrasesToolbar();
+                    }
+                }
             }
         }, 500);
 
@@ -4422,6 +7110,7 @@
     function init() {
         installQuickToggleHandler();
         installNativeReplyShortcutHandler();
+        installSavedPhrasesReplyContextTracker();
         installNativeReactionShortcutHandler();
         installImagePreviewHandler();
         installRouteWatcher();
