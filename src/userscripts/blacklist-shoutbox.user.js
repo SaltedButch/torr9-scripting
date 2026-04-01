@@ -1514,6 +1514,10 @@
 
         ensureMentionAnimationStyle();
 
+        if (existingState?.signature === signature && existingState.timeoutId === null && existingState.persistHighlight !== true) {
+            return;
+        }
+
         messageEl.style.removeProperty('display');
         messageEl.style.background = hexToRgba(color, baseAlpha);
         messageEl.style.outline = `1px solid ${accentColor}`;
@@ -1529,7 +1533,7 @@
         if (blinkSeconds <= 0) {
             messageEl.style.removeProperty('animation');
             if (existingState?.timeoutId) clearTimeout(existingState.timeoutId);
-            mentionBlinkStates.set(messageEl, { signature, timeoutId: null });
+            mentionBlinkStates.set(messageEl, { signature, timeoutId: null, persistHighlight: true });
             return;
         }
 
@@ -1546,7 +1550,7 @@
                 messageEl.style.outline = `1px solid ${accentColor}`;
                 messageEl.style.boxShadow = `inset 3px 0 0 ${accentColor}`;
                 messageEl.style.removeProperty('filter');
-                mentionBlinkStates.set(messageEl, { signature, timeoutId: null });
+                mentionBlinkStates.set(messageEl, { signature, timeoutId: null, persistHighlight: true });
                 return;
             }
 
@@ -1566,10 +1570,10 @@
                 applyHighlightStyle(messageEl, highlightedUsername, fallbackHighlightConfig);
             }
 
-            mentionBlinkStates.set(messageEl, { signature, timeoutId: null });
+            mentionBlinkStates.set(messageEl, { signature, timeoutId: null, persistHighlight: false });
         }, blinkSeconds * 1000);
 
-        mentionBlinkStates.set(messageEl, { signature, timeoutId });
+        mentionBlinkStates.set(messageEl, { signature, timeoutId, persistHighlight: true });
     }
 
     async function playMentionNotificationSound(
