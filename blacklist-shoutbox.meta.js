@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torr9 Chat - Shoutbox 2.0
 // @namespace    https://github.com/SaltedButch/torr9-scripting
-// @version      2.41
+// @version      2.43
 // @description  Blacklist, mise en avant, mentions, réponses rapides contextuelles et confort avancé pour la shoutbox Torr9
 // @author       Butchered
 // @match        https://torr9.net/*

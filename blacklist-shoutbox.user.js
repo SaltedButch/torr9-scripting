@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torr9 Chat - Shoutbox 2.0
 // @namespace    https://github.com/SaltedButch/torr9-scripting
-// @version      2.41
+// @version      2.43
 // @description  Blacklist, mise en avant, mentions, réponses rapides contextuelles et confort avancé pour la shoutbox Torr9
 // @author       Butchered
 // @match        https://torr9.net/*
@@ -28,6 +28,7 @@
     const STORAGE_KEY_LAST_MENTION_SOUND_NOTIFICATION = 'tm_torr9_last_mention_sound_notification';
     const STORAGE_KEY_RECENT_MENTION_SOUND_NOTIFICATIONS = 'tm_torr9_recent_mention_sound_notifications';
     const STORAGE_KEY_CHAT_FONT_SCALE = 'tm_torr9_chat_font_scale';
+    const STORAGE_KEY_CHAT_SCROLLBAR_ENABLED = 'tm_torr9_chat_scrollbar_enabled';
     const STORAGE_KEY_LIGHT_THEME_HOME = 'tm_torr9_light_theme_home';
     const STORAGE_KEY_LIGHT_THEME_CHAT = 'tm_torr9_light_theme_chat';
     const STORAGE_KEY_LINKIFY_URLS = 'tm_torr9_linkify_urls';
@@ -41,6 +42,8 @@
     const IMAGE_PREVIEW_ID = 'tm-torr9-image-preview';
     const HOME_COLLAPSE_BUTTON_ID = 'tm-home-chat-collapse-toggle';
     const PHRASES_MENU_WRAPPER_ID = 'tm-torr9-phrases-menu-wrapper';
+    const MODAL_SCROLLBAR_STYLE_ID = 'tm-torr9-modal-scrollbar-style';
+    const CHAT_SCROLLBAR_STYLE_ID = 'tm-torr9-chat-scrollbar-style';
     const DEFAULT_HIGHLIGHT_COLOR = '#f59e0b';
     const DEFAULT_HIGHLIGHT_OPACITY = 14;
     const DEFAULT_MENTION_COLOR = '#22c55e';
@@ -56,6 +59,8 @@
     const DEFAULT_CHAT_FONT_SCALE = 1;
     const MIN_CHAT_FONT_SCALE = 0.85;
     const MAX_CHAT_FONT_SCALE = 1.7;
+    const DEFAULT_CHAT_SCROLLBAR_THICKNESS = 18;
+    const DEFAULT_CHAT_SCROLLBAR_THUMB_BORDER = 4;
     const MAX_STATS_RIGHT_PERCENT = 100;
     const MAX_STATS_BOTTOM_PERCENT = 95;
     const MAX_RECENT_MENTION_SOUND_RECORDS = 40;
@@ -94,6 +99,7 @@
     let toastHideTimer = null;
     let mentionSettings = loadMentionSettings();
     let chatFontScale = loadChatFontScale();
+    let chatScrollbarEnabled = loadChatScrollbarEnabled();
     let lightThemeEnabled = loadLightThemeEnabled();
     let linkifyUrlsEnabled = loadLinkifyUrlsEnabled();
     let embedUrlImagesEnabled = loadEmbedUrlImagesEnabled();
@@ -1112,6 +1118,19 @@
         }
     }
 
+    function loadChatScrollbarEnabled() {
+        try {
+            return localStorage.getItem(STORAGE_KEY_CHAT_SCROLLBAR_ENABLED) === '1';
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function saveChatScrollbarEnabled(value) {
+        chatScrollbarEnabled = !!value;
+        localStorage.setItem(STORAGE_KEY_CHAT_SCROLLBAR_ENABLED, chatScrollbarEnabled ? '1' : '0');
+    }
+
     function saveLightThemeEnabled(value) {
         lightThemeEnabled = !!value;
         localStorage.setItem(getLightThemeStorageKey(), lightThemeEnabled ? '1' : '0');
@@ -1279,6 +1298,101 @@
         `;
 
         document.head.appendChild(style);
+    }
+
+    function ensureChatScrollbarStyle() {
+        if (document.getElementById(CHAT_SCROLLBAR_STYLE_ID)) return;
+        if (!document.head) return;
+
+        const style = document.createElement('style');
+        style.id = CHAT_SCROLLBAR_STYLE_ID;
+        style.textContent = `
+            [data-tm-chat-scrollbar="1"] {
+                scrollbar-width: auto !important;
+                scrollbar-color: rgba(255,255,255,0.96) rgba(255,255,255,0.08) !important;
+                scrollbar-gutter: stable both-edges !important;
+                -ms-overflow-style: auto !important;
+            }
+
+            [data-tm-chat-scrollbar="1"]::-webkit-scrollbar {
+                display: block !important;
+                width: ${DEFAULT_CHAT_SCROLLBAR_THICKNESS}px !important;
+                height: ${DEFAULT_CHAT_SCROLLBAR_THICKNESS}px !important;
+                background: transparent !important;
+            }
+
+            [data-tm-chat-scrollbar="1"]::-webkit-scrollbar-track {
+                background: rgba(255,255,255,0.08) !important;
+                border-radius: 999px !important;
+            }
+
+            [data-tm-chat-scrollbar="1"]::-webkit-scrollbar-thumb {
+                background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(226,232,240,0.9)) !important;
+                border-radius: 999px !important;
+                border: ${DEFAULT_CHAT_SCROLLBAR_THUMB_BORDER}px solid rgba(24,24,27,0.96) !important;
+                box-shadow: 0 0 10px rgba(255,255,255,0.22) !important;
+            }
+
+            [data-tm-chat-scrollbar="1"]::-webkit-scrollbar-thumb:hover {
+                background: linear-gradient(180deg, rgba(255,255,255,1), rgba(248,250,252,0.98)) !important;
+            }
+
+            :root[data-tm-torr9-theme="light"] [data-tm-chat-scrollbar="1"],
+            [data-tm-chat-surface="light"][data-tm-chat-scrollbar="1"] {
+                scrollbar-color: rgba(30,41,59,0.82) rgba(226,232,240,0.96) !important;
+            }
+
+            :root[data-tm-torr9-theme="light"] [data-tm-chat-scrollbar="1"]::-webkit-scrollbar-track,
+            [data-tm-chat-surface="light"][data-tm-chat-scrollbar="1"]::-webkit-scrollbar-track {
+                background: rgba(226,232,240,0.96) !important;
+            }
+
+            :root[data-tm-torr9-theme="light"] [data-tm-chat-scrollbar="1"]::-webkit-scrollbar-thumb,
+            [data-tm-chat-surface="light"][data-tm-chat-scrollbar="1"]::-webkit-scrollbar-thumb {
+                background: linear-gradient(180deg, rgba(51,65,85,0.92), rgba(15,23,42,0.82)) !important;
+                border-color: rgba(248,250,252,0.96) !important;
+                box-shadow: none !important;
+            }
+        `;
+
+        document.head.appendChild(style);
+    }
+
+    function clearChatPageScrollbarState(scroller) {
+        if (!(scroller instanceof HTMLElement)) return;
+
+        scroller.removeAttribute('data-tm-chat-scrollbar');
+        scroller.style.removeProperty('overflow-y');
+        scroller.style.removeProperty('overflow-x');
+        scroller.style.removeProperty('scrollbar-width');
+        scroller.style.removeProperty('-ms-overflow-style');
+        scroller.style.removeProperty('scrollbar-gutter');
+    }
+
+    function applyChatPageScrollbarState() {
+        ensureChatScrollbarStyle();
+
+        const currentScroller = isChatPage() ? getChatPageMessagesRoot() : null;
+        const activeScrollbars = Array.from(document.querySelectorAll('[data-tm-chat-scrollbar="1"]'));
+        activeScrollbars.forEach((element) => {
+            if (element !== currentScroller) {
+                clearChatPageScrollbarState(element);
+            }
+        });
+
+        if (!(currentScroller instanceof HTMLElement)) return;
+
+        if (!chatScrollbarEnabled) {
+            clearChatPageScrollbarState(currentScroller);
+            return;
+        }
+
+        currentScroller.setAttribute('data-tm-chat-scrollbar', '1');
+        currentScroller.style.setProperty('overflow-y', 'scroll', 'important');
+        currentScroller.style.setProperty('overflow-x', 'hidden', 'important');
+        currentScroller.style.setProperty('scrollbar-width', 'auto', 'important');
+        currentScroller.style.setProperty('-ms-overflow-style', 'auto', 'important');
+        currentScroller.style.setProperty('scrollbar-gutter', 'stable both-edges', 'important');
     }
 
     function applyLightThemeState() {
@@ -1520,22 +1634,51 @@
         if (!isChatPage()) return null;
 
         const header = getChatPageHeaderElement();
-        if (!(header instanceof HTMLElement)) return null;
+        const getDirectMessageCount = (scroller) => {
+            if (!(scroller instanceof HTMLElement)) return 0;
+            return scroller.querySelectorAll(':scope > .group.relative.flex.items-start').length;
+        };
 
-        const container = header.parentElement;
-        if (!(container instanceof HTMLElement)) return null;
+        const getScrollerCandidates = (scope) => {
+            if (!scope || typeof scope.querySelectorAll !== 'function') return [];
 
-        const scrollers = Array.from(container.querySelectorAll('.custom-scrollbar'));
-        for (const scroller of scrollers) {
-            if (
-                scroller instanceof HTMLElement &&
-                scroller.querySelector('.group.relative.flex.items-start')
-            ) {
-                return scroller;
+            return Array.from(scope.querySelectorAll('div.flex-1.overflow-y-auto.py-2, .overflow-y-auto')).filter((scroller) => {
+                if (!(scroller instanceof HTMLElement)) return false;
+                if (scroller.closest(`#${PANEL_ID}, #${MODAL_ID}, #${OVERLAY_ID}, #${TOAST_ID}`)) return false;
+                if (!scroller.classList.contains('overflow-y-auto')) return false;
+                return getDirectMessageCount(scroller) > 0;
+            });
+        };
+
+        const pickBestScroller = (scrollers) => {
+            if (!Array.isArray(scrollers) || scrollers.length === 0) return null;
+
+            return scrollers
+                .slice()
+                .sort((a, b) =>
+                    Number(b.matches('div.flex-1.overflow-y-auto.py-2')) -
+                    Number(a.matches('div.flex-1.overflow-y-auto.py-2')) ||
+                    getDirectMessageCount(b) - getDirectMessageCount(a)
+                )[0] || null;
+        };
+
+        if (header instanceof HTMLElement) {
+            const directContainer = header.parentElement;
+            const directMatch = pickBestScroller(getScrollerCandidates(directContainer));
+            if (directMatch) return directMatch;
+
+            const panelContainer = header.closest('.bg-zinc-950');
+            const panelMatch = pickBestScroller(getScrollerCandidates(panelContainer));
+            if (panelMatch) return panelMatch;
+
+            let ancestor = directContainer?.parentElement || null;
+            for (let depth = 0; ancestor && depth < 4; depth += 1, ancestor = ancestor.parentElement) {
+                const ancestorMatch = pickBestScroller(getScrollerCandidates(ancestor));
+                if (ancestorMatch) return ancestorMatch;
             }
         }
 
-        return null;
+        return pickBestScroller(getScrollerCandidates(document));
     }
 
     function logMentionDebug(message, details = null) {
@@ -1965,6 +2108,51 @@
         `;
 
         document.head.appendChild(style);
+    }
+
+    function ensureModalScrollbarStyle() {
+        if (document.getElementById(MODAL_SCROLLBAR_STYLE_ID)) return;
+        if (!document.head) return;
+
+        const style = document.createElement('style');
+        style.id = MODAL_SCROLLBAR_STYLE_ID;
+        style.textContent = `
+            #${MODAL_ID}[data-tm-scrollable-modal="1"] {
+                scrollbar-width: thin;
+                scrollbar-color: rgba(148,163,184,0.62) rgba(255,255,255,0.06);
+                scrollbar-gutter: stable both-edges;
+            }
+
+            #${MODAL_ID}[data-tm-scrollable-modal="1"]::-webkit-scrollbar {
+                width: 12px;
+            }
+
+            #${MODAL_ID}[data-tm-scrollable-modal="1"]::-webkit-scrollbar-track {
+                background: rgba(255,255,255,0.05);
+                border-radius: 999px;
+            }
+
+            #${MODAL_ID}[data-tm-scrollable-modal="1"]::-webkit-scrollbar-thumb {
+                background: linear-gradient(180deg, rgba(96,165,250,0.78), rgba(129,140,248,0.78));
+                border-radius: 999px;
+                border: 2px solid rgba(24,24,27,0.98);
+            }
+
+            #${MODAL_ID}[data-tm-scrollable-modal="1"]::-webkit-scrollbar-thumb:hover {
+                background: linear-gradient(180deg, rgba(125,211,252,0.88), rgba(167,139,250,0.88));
+            }
+        `;
+
+        document.head.appendChild(style);
+    }
+
+    function applyScrollableModalStyle(modal) {
+        if (!(modal instanceof HTMLElement)) return;
+
+        ensureModalScrollbarStyle();
+        modal.setAttribute('data-tm-scrollable-modal', '1');
+        modal.style.overflowY = 'scroll';
+        modal.style.overflowX = 'hidden';
     }
 
     function updateHomeCollapseButton() {
@@ -2664,6 +2852,8 @@
     function processAllMessages() {
         if (isHomePage() && homeChatCollapsed) return;
 
+        applyChatPageScrollbarState();
+
         const root = getActiveChatRoot();
         if (!root) return;
         const allowMentionAndHighlight = isMentionAndHighlightContextAllowed();
@@ -2866,6 +3056,7 @@
         modal.style.padding = '18px';
         modal.style.fontFamily = 'Inter, Arial, sans-serif';
         modal.style.color = '#fff';
+        applyScrollableModalStyle(modal);
 
         modal.innerHTML = `
         <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px;">
@@ -3105,6 +3296,7 @@
         modal.style.padding = '18px';
         modal.style.fontFamily = 'Inter, Arial, sans-serif';
         modal.style.color = '#fff';
+        applyScrollableModalStyle(modal);
 
         const cardStyle = `
             padding:12px;
@@ -3737,6 +3929,7 @@
         modal.style.padding = '18px';
         modal.style.fontFamily = 'Inter, Arial, sans-serif';
         modal.style.color = '#fff';
+        applyScrollableModalStyle(modal);
 
         const cardStyle = `
             padding:12px;
@@ -4212,6 +4405,7 @@
         modal.style.padding = '18px';
         modal.style.fontFamily = 'Inter, Arial, sans-serif';
         modal.style.color = '#fff';
+        applyScrollableModalStyle(modal);
 
         modal.innerHTML = `
         <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px;">
@@ -4417,6 +4611,30 @@
                 <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
                     Détecte les liens dans les messages et les transforme en liens cliquables.
                 </div>
+
+                ${isChatPage() ? `
+                <label style="
+                    display:flex;
+                    align-items:center;
+                    gap:10px;
+                    cursor:pointer;
+                    font-size:12px;
+                    color:#d4d4d8;
+                    margin-top:12px;
+                ">
+                    <input id="tm-chat-scrollbar-toggle" type="checkbox" ${chatScrollbarEnabled ? 'checked' : ''} style="
+                        width:16px;
+                        height:16px;
+                        accent-color:#38bdf8;
+                        cursor:pointer;
+                    ">
+                    <span>Afficher l’ascenseur du chat</span>
+                </label>
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                    Ajoute une scrollbar visible uniquement sur la zone de messages de la page chat.
+                </div>
+                ` : ''}
 
                 <label style="
                     display:flex;
@@ -4982,6 +5200,7 @@
         const fontSizeSaveBtn = modal.querySelector('#tm-font-size-save');
         const fontSizeResetBtn = modal.querySelector('#tm-font-size-reset');
         const linkifyUrlsToggle = modal.querySelector('#tm-linkify-urls-toggle');
+        const chatScrollbarToggle = modal.querySelector('#tm-chat-scrollbar-toggle');
         const embedUrlImagesToggle = modal.querySelector('#tm-embed-url-images-toggle');
         const lightThemeToggle = modal.querySelector('#tm-light-theme-toggle');
         const rightInput = modal.querySelector('#tm-right-input');
@@ -5422,6 +5641,12 @@
                     ? 'URLs cliquables activées.'
                     : 'URLs cliquables désactivées.'
             );
+        });
+
+        chatScrollbarToggle?.addEventListener('change', () => {
+            saveChatScrollbarEnabled(chatScrollbarToggle.checked);
+            applyChatPageScrollbarState();
+            setFeedback(chatScrollbarEnabled ? 'Ascenseur du chat activé.' : 'Ascenseur du chat désactivé.');
         });
 
         embedUrlImagesToggle?.addEventListener('change', () => {
@@ -7037,6 +7262,7 @@
         if (isSupportedPage()) {
             statsCollapsed = loadStatsCollapsed();
             statsHidden = loadStatsHidden();
+            chatScrollbarEnabled = loadChatScrollbarEnabled();
             lightThemeEnabled = loadLightThemeEnabled();
 
             if (isHomePage() && !getHomepageChatContainer()) {
@@ -7049,6 +7275,7 @@
             syncHomepageCollapseUi(true);
             applyBoxPosition();
             applyLightThemeState();
+            applyChatPageScrollbarState();
             injectSavedPhrasesToolbar();
 
             if (isHomePage() && homeChatCollapsed) {
@@ -7077,6 +7304,10 @@
 
         routeWatcher = setInterval(() => {
             const currentPageType = getCurrentPageType();
+
+            if (isChatPage()) {
+                applyChatPageScrollbarState();
+            }
 
             if (location.href !== lastUrl || currentPageType !== lastPageType) {
                 lastUrl = location.href;
