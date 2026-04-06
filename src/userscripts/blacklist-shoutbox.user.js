@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torr9 Chat - Shoutbox 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.43
-// @description  Blacklist, mise en avant, mentions, réponses rapides contextuelles et confort avancé pour la shoutbox Torr9
+// @version      2.50
+// @description  Blacklist, mise en avant, mentions, réponses rapides contextuelles, Gif et confort avancé pour la shoutbox Torr9
 // @author       Butchered
 // @match        https://torr9.net/*
 // @grant        none
@@ -26,12 +26,16 @@
     const STORAGE_KEY_RECENT_MENTION_SOUND_NOTIFICATIONS = 'tm_torr9_recent_mention_sound_notifications';
     const STORAGE_KEY_CHAT_FONT_SCALE = 'tm_torr9_chat_font_scale';
     const STORAGE_KEY_CHAT_SCROLLBAR_ENABLED = 'tm_torr9_chat_scrollbar_enabled';
+    const STORAGE_KEY_MESSAGE_ACTIONS_LEFT_ENABLED = 'tm_torr9_message_actions_left_enabled';
+    const STORAGE_KEY_HIDE_CHAT_FOOTER_ENABLED = 'tm_torr9_hide_chat_footer_enabled';
     const STORAGE_KEY_LIGHT_THEME_HOME = 'tm_torr9_light_theme_home';
     const STORAGE_KEY_LIGHT_THEME_CHAT = 'tm_torr9_light_theme_chat';
     const STORAGE_KEY_LINKIFY_URLS = 'tm_torr9_linkify_urls';
     const STORAGE_KEY_EMBED_URL_IMAGES = 'tm_torr9_embed_url_images';
     const STORAGE_KEY_SAVED_PHRASES = 'tm_torr9_saved_phrases';
     const STORAGE_KEY_SAVED_PHRASES_ENABLED = 'tm_torr9_saved_phrases_enabled';
+    const STORAGE_KEY_KLIPY_GIFS_ENABLED = 'tm_torr9_klipy_gifs_enabled';
+    const STORAGE_KEY_CHAT_INPUT_TOOLBAR_ALIGN_RIGHT = 'tm_torr9_chat_input_toolbar_align_right';
     const PANEL_ID = 'tm-torr9-chat-stats';
     const MODAL_ID = 'tm-torr9-chat-modal';
     const OVERLAY_ID = 'tm-torr9-chat-overlay';
@@ -39,6 +43,7 @@
     const IMAGE_PREVIEW_ID = 'tm-torr9-image-preview';
     const HOME_COLLAPSE_BUTTON_ID = 'tm-home-chat-collapse-toggle';
     const PHRASES_MENU_WRAPPER_ID = 'tm-torr9-phrases-menu-wrapper';
+    const GIF_MENU_WRAPPER_ID = 'tm-torr9-klipy-gif-wrapper';
     const MODAL_SCROLLBAR_STYLE_ID = 'tm-torr9-modal-scrollbar-style';
     const CHAT_SCROLLBAR_STYLE_ID = 'tm-torr9-chat-scrollbar-style';
     const DEFAULT_HIGHLIGHT_COLOR = '#f59e0b';
@@ -65,6 +70,15 @@
     const MAX_VISIBLE_SAVED_PHRASES_IN_MENU = 5;
     const SAVED_PHRASES_EXPORT_VERSION = 1;
     const SAVED_PHRASES_REPLY_CONTEXT_MAX_AGE_MS = 5 * 60 * 1000;
+    const DEFAULT_KLIPY_GIFS_ENABLED = true;
+    const KLIPY_API_BASE_URL = 'https://api.klipy.com/v2';
+    // Test key provided locally for development. Replace it before any public rollout.
+    const KLIPY_API_KEY = 'msjEFIejxUS9DvPCk5NAvbnF4HK1hfVEz8zpgFAoo5kpjkSGGIqIJYJ4WGx2cRhJ';
+    const KLIPY_CLIENT_KEY = 'torr9-shoutbox-userscript';
+    const KLIPY_MAX_RESULTS_PER_PAGE = 10;
+    const KLIPY_SEARCH_MIN_LENGTH = 2;
+    const KLIPY_SEARCH_DEBOUNCE_MS = 280;
+    const KLIPY_CACHE_MAX_ENTRIES = 24;
     const LONG_PRESS_REACTION_DELAY_MS = 420;
     const LONG_PRESS_REACTION_MOVE_THRESHOLD_PX = 10;
     const LONG_PRESS_REACTION_PICKER_OFFSET_X = 18;
@@ -73,6 +87,20 @@
     const LIGHT_THEME_STYLE_ID = 'tm-torr9-light-theme-style';
     const LINKIFIED_URL_STYLE_ID = 'tm-torr9-linkified-url-style';
     const EMBEDDED_IMAGE_STYLE_ID = 'tm-torr9-embedded-image-style';
+    const MESSAGE_ACTIONS_POSITION_STYLE_ID = 'tm-torr9-message-actions-position-style';
+    const HIDE_CHAT_FOOTER_STYLE_ID = 'tm-torr9-hide-chat-footer-style';
+    const HOME_CHAT_POPOVER_STYLE_ID = 'tm-torr9-home-chat-popover-style';
+    const NATIVE_CHAT_INPUT_POPOVER_STYLE_ID = 'tm-torr9-native-chat-input-popover-style';
+    const CHAT_INPUT_TOOLBAR_RAIL_ATTR = 'data-tm-chat-input-toolbar-rail';
+    const CHAT_INPUT_TOOLBAR_SPACE_ATTR = 'data-tm-chat-input-toolbar-space';
+    const CHAT_INPUT_TOOLBAR_RESERVED_HEIGHT_PX = 46;
+    const HOME_CHAT_POPOVER_SURFACE_ATTR = 'data-tm-home-chat-popover-surface';
+    const HOME_CHAT_POPOVER_PARENT_ATTR = 'data-tm-home-chat-popover-parent';
+    const NATIVE_CHAT_INPUT_ACTION_HOST_ATTR = 'data-tm-native-chat-input-action-host';
+    const NATIVE_CHAT_INPUT_ACTION_SOURCE_ATTR = 'data-tm-native-chat-input-action-source';
+    const NATIVE_CHAT_INPUT_ACTION_PLACEHOLDER_ATTR = 'data-tm-native-chat-input-action-placeholder';
+    const NATIVE_CHAT_INPUT_ACTION_POPOVER_SYNC_BOUND_ATTR = 'data-tm-native-chat-input-action-popover-sync-bound';
+    const NATIVE_CHAT_INPUT_POPOVER_LIFTED_ATTR = 'data-tm-native-chat-input-popovers-lifted';
     const URL_CANDIDATE_RE = /(?:https?:\/\/|www\.)[^\s<>"']+/i;
     const URL_MATCH_RE = /(?:https?:\/\/|www\.)[^\s<>"']+/gi;
     const DIRECT_IMAGE_PATH_RE = /\.(?:avif|bmp|gif|jpe?g|png|svg|webp)$/i;
@@ -97,10 +125,14 @@
     let mentionSettings = loadMentionSettings();
     let chatFontScale = loadChatFontScale();
     let chatScrollbarEnabled = loadChatScrollbarEnabled();
+    let messageActionsLeftEnabled = loadMessageActionsLeftEnabled();
+    let hideChatFooterEnabled = loadHideChatFooterEnabled();
     let lightThemeEnabled = loadLightThemeEnabled();
     let linkifyUrlsEnabled = loadLinkifyUrlsEnabled();
     let embedUrlImagesEnabled = loadEmbedUrlImagesEnabled();
     let savedPhrasesEnabled = loadSavedPhrasesEnabled();
+    let klipyGifsEnabled = loadKlipyGifsEnabled();
+    let chatInputToolbarAlignRight = loadChatInputToolbarAlignRight();
     let mentionSoundContext = null;
     let mentionSoundElement = null;
     let lastMentionSoundRecord = loadLastMentionSoundRecord();
@@ -109,6 +141,9 @@
     let lastChatContextKey = 'other';
     let longPressReactionState = null;
     let savedPhrasesToolbarEventsInstalled = false;
+    let klipyGifToolbarEventsInstalled = false;
+    let klipyGifSearchDebounceTimer = null;
+    let klipyGifRequestSerial = 0;
     let savedPhrasesStorageNeedsRepair = false;
     let savedPhrasesReplyContext = null;
 
@@ -122,6 +157,7 @@
     const alreadyCountedMessages = new WeakSet();
     const mentionBlinkStates = new WeakMap();
     const mentionSoundNotifiedMessages = new WeakSet();
+    const klipyGifResponseCache = new Map();
 
     function isChatPage() {
         return location.pathname.startsWith('/chat');
@@ -347,6 +383,34 @@
     function saveSavedPhrasesEnabled(value) {
         savedPhrasesEnabled = !!value;
         localStorage.setItem(STORAGE_KEY_SAVED_PHRASES_ENABLED, savedPhrasesEnabled ? '1' : '0');
+    }
+
+    function loadKlipyGifsEnabled() {
+        try {
+            const rawValue = localStorage.getItem(STORAGE_KEY_KLIPY_GIFS_ENABLED);
+            if (rawValue === null) return DEFAULT_KLIPY_GIFS_ENABLED;
+            return rawValue === '1';
+        } catch (e) {
+            return DEFAULT_KLIPY_GIFS_ENABLED;
+        }
+    }
+
+    function saveKlipyGifsEnabled(value) {
+        klipyGifsEnabled = !!value;
+        localStorage.setItem(STORAGE_KEY_KLIPY_GIFS_ENABLED, klipyGifsEnabled ? '1' : '0');
+    }
+
+    function loadChatInputToolbarAlignRight() {
+        try {
+            return localStorage.getItem(STORAGE_KEY_CHAT_INPUT_TOOLBAR_ALIGN_RIGHT) === '1';
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function saveChatInputToolbarAlignRight(value) {
+        chatInputToolbarAlignRight = !!value;
+        localStorage.setItem(STORAGE_KEY_CHAT_INPUT_TOOLBAR_ALIGN_RIGHT, chatInputToolbarAlignRight ? '1' : '0');
     }
 
     function formatSavedPhrasesCountLabel(count = savedPhrases.length) {
@@ -1128,6 +1192,32 @@
         localStorage.setItem(STORAGE_KEY_CHAT_SCROLLBAR_ENABLED, chatScrollbarEnabled ? '1' : '0');
     }
 
+    function loadMessageActionsLeftEnabled() {
+        try {
+            return localStorage.getItem(STORAGE_KEY_MESSAGE_ACTIONS_LEFT_ENABLED) === '1';
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function saveMessageActionsLeftEnabled(value) {
+        messageActionsLeftEnabled = !!value;
+        localStorage.setItem(STORAGE_KEY_MESSAGE_ACTIONS_LEFT_ENABLED, messageActionsLeftEnabled ? '1' : '0');
+    }
+
+    function loadHideChatFooterEnabled() {
+        try {
+            return localStorage.getItem(STORAGE_KEY_HIDE_CHAT_FOOTER_ENABLED) === '1';
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function saveHideChatFooterEnabled(value) {
+        hideChatFooterEnabled = !!value;
+        localStorage.setItem(STORAGE_KEY_HIDE_CHAT_FOOTER_ENABLED, hideChatFooterEnabled ? '1' : '0');
+    }
+
     function saveLightThemeEnabled(value) {
         lightThemeEnabled = !!value;
         localStorage.setItem(getLightThemeStorageKey(), lightThemeEnabled ? '1' : '0');
@@ -1295,6 +1385,169 @@
         `;
 
         document.head.appendChild(style);
+    }
+
+    function ensureMessageActionsPositionStyle() {
+        if (document.getElementById(MESSAGE_ACTIONS_POSITION_STYLE_ID)) return;
+        if (!document.head) return;
+
+        const style = document.createElement('style');
+        style.id = MESSAGE_ACTIONS_POSITION_STYLE_ID;
+        style.textContent = `
+            [data-tm-message-actions-left="1"] .group.relative.flex.items-start > .absolute.right-2.-top-3.flex.items-center.gap-0\\.5.bg-zinc-900.border.border-zinc-700.rounded-lg.shadow-lg.px-1.py-0\\.5.z-10 {
+                right: auto !important;
+                left: min(var(--tm-message-actions-inline-left, calc(0.5rem + 2.4rem)), calc(100% - 4.75rem)) !important;
+                top: var(--tm-message-actions-inline-top, 0px) !important;
+            }
+        `;
+
+        document.head.appendChild(style);
+    }
+
+    function applyMessageActionsPositionState() {
+        ensureMessageActionsPositionStyle();
+
+        if (messageActionsLeftEnabled && isChatPage()) {
+            document.documentElement.setAttribute('data-tm-message-actions-left', '1');
+            return;
+        }
+
+        document.documentElement.removeAttribute('data-tm-message-actions-left');
+    }
+
+    function ensureHideChatFooterStyle() {
+        if (document.getElementById(HIDE_CHAT_FOOTER_STYLE_ID)) return;
+        if (!document.head) return;
+
+        const style = document.createElement('style');
+        style.id = HIDE_CHAT_FOOTER_STYLE_ID;
+        style.textContent = `
+            :root[data-tm-hide-chat-footer="1"] footer.bg-black\\/95.border-t.border-zinc-800\\/50.mt-auto {
+                display: none !important;
+            }
+            :root[data-tm-hide-chat-footer="1"] main div[class*="h-[100dvh]"] {
+                @media (min-width: 768px) {
+                    height: calc(100vh - 20px) !important;
+                }
+            }
+        `;
+
+        document.head.appendChild(style);
+    }
+
+    function applyChatFooterVisibilityState() {
+        ensureHideChatFooterStyle();
+
+        if (hideChatFooterEnabled && isChatPage()) {
+            document.documentElement.setAttribute('data-tm-hide-chat-footer', '1');
+            return;
+        }
+
+        document.documentElement.removeAttribute('data-tm-hide-chat-footer');
+    }
+
+    function ensureHomeChatPopoverStyle() {
+        if (document.getElementById(HOME_CHAT_POPOVER_STYLE_ID)) return;
+        if (!document.head) return;
+
+        const style = document.createElement('style');
+        style.id = HOME_CHAT_POPOVER_STYLE_ID;
+        style.textContent = `
+            [${HOME_CHAT_POPOVER_SURFACE_ATTR}="1"] {
+                position: relative !important;
+                overflow: visible !important;
+                z-index: 90 !important;
+                isolation: isolate;
+            }
+
+            [${HOME_CHAT_POPOVER_PARENT_ATTR}="1"] {
+                overflow: visible !important;
+            }
+
+            [${HOME_CHAT_POPOVER_SURFACE_ATTR}="1"] [${CHAT_INPUT_TOOLBAR_RAIL_ATTR}="1"] {
+                z-index: 180 !important;
+                overflow: visible !important;
+            }
+
+            [${HOME_CHAT_POPOVER_SURFACE_ATTR}="1"] #${PHRASES_MENU_WRAPPER_ID},
+            [${HOME_CHAT_POPOVER_SURFACE_ATTR}="1"] #${GIF_MENU_WRAPPER_ID},
+            [${HOME_CHAT_POPOVER_SURFACE_ATTR}="1"] [${NATIVE_CHAT_INPUT_ACTION_HOST_ATTR}="1"],
+            [${HOME_CHAT_POPOVER_SURFACE_ATTR}="1"] [${NATIVE_CHAT_INPUT_ACTION_SOURCE_ATTR}="1"] {
+                z-index: 220 !important;
+                overflow: visible !important;
+            }
+
+            [${HOME_CHAT_POPOVER_SURFACE_ATTR}="1"] #${PHRASES_MENU_WRAPPER_ID} [data-tm-saved-phrases-menu="1"],
+            [${HOME_CHAT_POPOVER_SURFACE_ATTR}="1"] #${GIF_MENU_WRAPPER_ID} [data-tm-klipy-gif-menu="1"],
+            [${HOME_CHAT_POPOVER_SURFACE_ATTR}="1"] [${NATIVE_CHAT_INPUT_ACTION_SOURCE_ATTR}="1"] > .absolute.bottom-12,
+            [${HOME_CHAT_POPOVER_SURFACE_ATTR}="1"] [${NATIVE_CHAT_INPUT_ACTION_SOURCE_ATTR}="1"] > .fixed.bottom-12,
+            [${HOME_CHAT_POPOVER_SURFACE_ATTR}="1"] [${NATIVE_CHAT_INPUT_ACTION_SOURCE_ATTR}="1"] > .absolute.bottom-24,
+            [${HOME_CHAT_POPOVER_SURFACE_ATTR}="1"] [${NATIVE_CHAT_INPUT_ACTION_SOURCE_ATTR}="1"] > .fixed.bottom-24 {
+                z-index: 1400 !important;
+            }
+        `;
+
+        document.head.appendChild(style);
+    }
+
+    function applyHomeChatPopoverState() {
+        ensureHomeChatPopoverStyle();
+
+        document.querySelectorAll(`[${HOME_CHAT_POPOVER_SURFACE_ATTR}="1"]`).forEach((element) => {
+            if (element instanceof HTMLElement) {
+                element.removeAttribute(HOME_CHAT_POPOVER_SURFACE_ATTR);
+            }
+        });
+
+        document.querySelectorAll(`[${HOME_CHAT_POPOVER_PARENT_ATTR}="1"]`).forEach((element) => {
+            if (element instanceof HTMLElement) {
+                element.removeAttribute(HOME_CHAT_POPOVER_PARENT_ATTR);
+            }
+        });
+
+        if (!isHomePage() || homeChatCollapsed) return;
+
+        const homeContainer = getHomepageChatContainer();
+        if (!(homeContainer instanceof HTMLElement)) return;
+
+        homeContainer.setAttribute(HOME_CHAT_POPOVER_SURFACE_ATTR, '1');
+
+        let ancestor = homeContainer.parentElement;
+        for (let depth = 0; ancestor && depth < 3; depth += 1, ancestor = ancestor.parentElement) {
+            ancestor.setAttribute(HOME_CHAT_POPOVER_PARENT_ATTR, '1');
+        }
+    }
+
+    function ensureNativeChatInputPopoverStyle() {
+        if (document.getElementById(NATIVE_CHAT_INPUT_POPOVER_STYLE_ID)) return;
+        if (!document.head) return;
+
+        const style = document.createElement('style');
+        style.id = NATIVE_CHAT_INPUT_POPOVER_STYLE_ID;
+        style.textContent = `
+            :root[${NATIVE_CHAT_INPUT_POPOVER_LIFTED_ATTR}="1"] [${NATIVE_CHAT_INPUT_ACTION_SOURCE_ATTR}="1"] .bottom-24 {
+                bottom: calc(var(--spacing, 0.25rem) * 24) !important;
+            }
+
+            :root[${NATIVE_CHAT_INPUT_POPOVER_LIFTED_ATTR}="1"] [${NATIVE_CHAT_INPUT_ACTION_SOURCE_ATTR}="1"] > .absolute.bottom-24,
+            :root[${NATIVE_CHAT_INPUT_POPOVER_LIFTED_ATTR}="1"] [${NATIVE_CHAT_INPUT_ACTION_SOURCE_ATTR}="1"] > .fixed.bottom-24 {
+                top: auto !important;
+                z-index: 120 !important;
+            }
+        `;
+
+        document.head.appendChild(style);
+    }
+
+    function applyNativeChatInputPopoverState() {
+        ensureNativeChatInputPopoverStyle();
+
+        if (isChatPage()) {
+            document.documentElement.setAttribute(NATIVE_CHAT_INPUT_POPOVER_LIFTED_ATTR, '1');
+            return;
+        }
+
+        document.documentElement.removeAttribute(NATIVE_CHAT_INPUT_POPOVER_LIFTED_ATTR);
     }
 
     function ensureChatScrollbarStyle() {
@@ -1558,6 +1811,139 @@
         return (hash >>> 0).toString(36);
     }
 
+    function normalizeUrlForChatInsertion(value) {
+        const raw = String(value || '').trim();
+        if (!/^https?:\/\/\S+$/i.test(raw)) return '';
+        return raw;
+    }
+
+    function buildKlipyGifEmbedMarkup(gifUrl) {
+        const normalizedGifUrl = normalizeUrlForChatInsertion(gifUrl);
+        if (!normalizedGifUrl) return '';
+        return `[img]${normalizedGifUrl}[/img]`;
+    }
+
+    function getKlipyApiLocale() {
+        const rawLocale = String(navigator.language || navigator.userLanguage || 'fr-FR').trim();
+        if (!rawLocale) return 'fr_FR';
+
+        const normalizedParts = rawLocale.replace('_', '-').split('-').filter(Boolean);
+        const language = String(normalizedParts[0] || 'fr')
+            .toLowerCase()
+            .replace(/[^a-z]/g, '')
+            .slice(0, 2);
+        const region = String(normalizedParts[1] || 'FR')
+            .toUpperCase()
+            .replace(/[^A-Z]/g, '')
+            .slice(0, 2);
+
+        if (!language || !region) {
+            return 'fr_FR';
+        }
+
+        return `${language}_${region}`;
+    }
+
+    function buildKlipyApiUrl(endpoint, params = {}) {
+        const url = new URL(`${KLIPY_API_BASE_URL}/${String(endpoint || '').replace(/^\/+/, '')}`);
+        url.searchParams.set('key', KLIPY_API_KEY);
+        url.searchParams.set('client_key', KLIPY_CLIENT_KEY);
+
+        Object.entries(params).forEach(([paramName, paramValue]) => {
+            if (paramValue === undefined || paramValue === null || paramValue === '') return;
+            url.searchParams.set(paramName, String(paramValue));
+        });
+
+        return url.toString();
+    }
+
+    function setKlipyGifCacheEntry(cacheKey, value) {
+        if (!cacheKey) return;
+
+        if (klipyGifResponseCache.has(cacheKey)) {
+            klipyGifResponseCache.delete(cacheKey);
+        }
+
+        klipyGifResponseCache.set(cacheKey, value);
+
+        while (klipyGifResponseCache.size > KLIPY_CACHE_MAX_ENTRIES) {
+            const oldestCacheKey = klipyGifResponseCache.keys().next().value;
+            if (!oldestCacheKey) break;
+            klipyGifResponseCache.delete(oldestCacheKey);
+        }
+    }
+
+    function normalizeKlipyGifResult(result) {
+        const gifUrl = normalizeUrlForChatInsertion(result?.media_formats?.gif?.url || result?.url);
+        const previewUrl = normalizeUrlForChatInsertion(result?.media_formats?.tinygif?.url || gifUrl);
+
+        if (!gifUrl || !previewUrl) return null;
+
+        const previewDims = Array.isArray(result?.media_formats?.tinygif?.dims)
+            ? result.media_formats.tinygif.dims
+            : Array.isArray(result?.media_formats?.gif?.dims)
+                ? result.media_formats.gif.dims
+                : [];
+
+        return {
+            id: String(result?.id || hashString(gifUrl)),
+            title: String(result?.title || result?.content_description || result?.tags?.[0] || 'GIF Klipy').trim(),
+            gifUrl,
+            previewUrl,
+            itemUrl: normalizeUrlForChatInsertion(result?.itemurl) || 'https://klipy.com',
+            width: Number(previewDims[0]) || 0,
+            height: Number(previewDims[1]) || 0,
+            tags: Array.isArray(result?.tags)
+                ? result.tags.filter((tag) => typeof tag === 'string' && tag.trim()).slice(0, 3)
+                : []
+        };
+    }
+
+    async function fetchKlipyGifFeed({ query = '', pos = '' } = {}) {
+        const normalizedQuery = String(query || '').trim();
+        const endpoint = normalizedQuery ? 'search' : 'featured';
+        const locale = getKlipyApiLocale();
+        const cacheKey = JSON.stringify([endpoint, normalizedQuery.toLocaleLowerCase('fr'), String(pos || ''), locale]);
+
+        if (klipyGifResponseCache.has(cacheKey)) {
+            return klipyGifResponseCache.get(cacheKey);
+        }
+
+        const response = await fetch(buildKlipyApiUrl(endpoint, {
+            q: normalizedQuery,
+            pos,
+            limit: KLIPY_MAX_RESULTS_PER_PAGE,
+            media_filter: 'gif,tinygif',
+            locale
+        }), {
+            method: 'GET',
+            headers: {
+                Accept: 'application/json'
+            },
+            credentials: 'omit'
+        });
+
+        let payload = null;
+        try {
+            payload = await response.json();
+        } catch (e) {}
+
+        if (!response.ok) {
+            const errorMessage = payload?.error?.message || payload?.message || `HTTP ${response.status}`;
+            throw new Error(errorMessage);
+        }
+
+        const normalizedPayload = {
+            results: Array.isArray(payload?.results)
+                ? payload.results.map(normalizeKlipyGifResult).filter(Boolean)
+                : [],
+            next: typeof payload?.next === 'string' ? payload.next : ''
+        };
+
+        setKlipyGifCacheEntry(cacheKey, normalizedPayload);
+        return normalizedPayload;
+    }
+
     function escapeHtml(str) {
         return String(str).replace(/[&<>"']/g, function (m) {
             return ({
@@ -1807,6 +2193,76 @@
         }
     }
 
+    function getMessageMetaRow(messageEl) {
+        if (!(messageEl instanceof HTMLElement) || !isChatPage()) return null;
+
+        const exactMetaRow = messageEl.querySelector(':scope > .flex-1.min-w-0 > .flex.items-baseline.gap-2.mb-0\\.5');
+        if (exactMetaRow instanceof HTMLElement) {
+            return exactMetaRow;
+        }
+
+        const fallbackMetaRow = messageEl.querySelector(':scope > .flex-1.min-w-0 > .flex.items-baseline');
+        return fallbackMetaRow instanceof HTMLElement ? fallbackMetaRow : null;
+    }
+
+    function getMessageMetaAnchorElement(messageEl) {
+        const metaRow = getMessageMetaRow(messageEl);
+        if (!(metaRow instanceof HTMLElement)) return null;
+
+        const directChildren = Array.from(metaRow.children).filter((child) => child instanceof HTMLElement);
+        if (directChildren.length === 0) {
+            return metaRow;
+        }
+
+        const timestampChild = directChildren.find((child) =>
+            parseMessageTimestampKey(child.textContent || '') > 0
+        );
+        if (timestampChild instanceof HTMLElement) {
+            return timestampChild;
+        }
+
+        const trailingMetaChild = directChildren
+            .slice()
+            .reverse()
+            .find((child) => {
+                const text = String(child.textContent || '').trim();
+                return text && child.getClientRects().length > 0;
+            });
+
+        return trailingMetaChild instanceof HTMLElement
+            ? trailingMetaChild
+            : directChildren[directChildren.length - 1];
+    }
+
+    function syncMessageActionsAnchorVars(messageEl) {
+        if (!(messageEl instanceof HTMLElement)) return;
+
+        if (!isChatPage()) {
+            messageEl.style.removeProperty('--tm-message-actions-inline-left');
+            messageEl.style.removeProperty('--tm-message-actions-inline-top');
+            return;
+        }
+
+        const metaRow = getMessageMetaRow(messageEl);
+        const anchorEl = getMessageMetaAnchorElement(messageEl);
+        if (!(metaRow instanceof HTMLElement) || !(anchorEl instanceof HTMLElement)) {
+            messageEl.style.removeProperty('--tm-message-actions-inline-left');
+            messageEl.style.removeProperty('--tm-message-actions-inline-top');
+            return;
+        }
+
+        const messageRect = messageEl.getBoundingClientRect();
+        const metaRowRect = metaRow.getBoundingClientRect();
+        const anchorRect = anchorEl.getBoundingClientRect();
+        if (messageRect.width <= 0 || metaRowRect.width <= 0 || anchorRect.width <= 0) return;
+
+        const inlineLeft = Math.max(8, Math.round(anchorRect.right - messageRect.left + 8));
+        const inlineTop = Math.max(0, Math.round(metaRowRect.top - messageRect.top));
+
+        messageEl.style.setProperty('--tm-message-actions-inline-left', `${inlineLeft}px`);
+        messageEl.style.setProperty('--tm-message-actions-inline-top', `${inlineTop}px`);
+    }
+
     function applyChatFontScale(scale = chatFontScale) {
         const root = getActiveChatRoot();
         if (!root) return;
@@ -1814,6 +2270,7 @@
         root.querySelectorAll('div').forEach((el) => {
             if (isChatMessage(el)) {
                 applyMessageTypography(el, scale);
+                syncMessageActionsAnchorVars(el);
             }
         });
     }
@@ -2273,6 +2730,7 @@
         }
 
         updateHomeCollapseButton();
+        applyHomeChatPopoverState();
     }
 
     function toggleHomepageChatCollapsed(forceValue = !homeChatCollapsed) {
@@ -2804,6 +3262,7 @@
         const allowMentionSound = options.allowMentionSound === true;
         const allowMentionAndHighlight = options.allowMentionAndHighlight !== false;
         applyMessageTypography(messageEl);
+        syncMessageActionsAnchorVars(messageEl);
         updateMessageTextBlockUrls(messageEl);
 
         const username = getLogicalUsername(messageEl);
@@ -4377,6 +4836,26 @@
             break-inside:avoid;
             vertical-align:top;
         `;
+        const settingsCheckboxLabelStyle = `
+            display:flex;
+            align-items:center;
+            gap:10px;
+            cursor:pointer;
+            font-size:12px;
+            color:#d4d4d8;
+        `;
+        const settingsCheckboxLabelWithMarginStyle = `
+            ${settingsCheckboxLabelStyle}
+            margin-top:12px;
+        `;
+        const settingsCheckboxInputStyle = (accentColor) => `
+            width:16px;
+            height:16px;
+            accent-color:${accentColor};
+            cursor:pointer;
+            flex-shrink:0;
+        `;
+        const accessibilityCheckboxAccentColor = '#06b6d4';
 
         const overlay = document.createElement('div');
         overlay.id = OVERLAY_ID;
@@ -4431,20 +4910,8 @@
             <div style="${settingsCardStyle}">
                 <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Page d’accueil</div>
 
-                <label style="
-                    display:flex;
-                    align-items:center;
-                    gap:10px;
-                    cursor:pointer;
-                    font-size:13px;
-                    color:#e4e4e7;
-                ">
-                    <input id="tm-home-collapse-toggle-setting" type="checkbox" ${homeChatCollapsed ? 'checked' : ''} style="
-                        width:16px;
-                        height:16px;
-                        accent-color:#22c55e;
-                        cursor:pointer;
-                    ">
+                <label style="${settingsCheckboxLabelStyle}">
+                    <input id="tm-home-collapse-toggle-setting" type="checkbox" ${homeChatCollapsed ? 'checked' : ''} style="${settingsCheckboxInputStyle('#22c55e')}">
                     <span>Masquer la shoutbox</span>
                 </label>
 
@@ -4485,21 +4952,8 @@
                     </label>
                 </div>
 
-                <label style="
-                    display:flex;
-                    align-items:center;
-                    gap:10px;
-                    cursor:pointer;
-                    font-size:12px;
-                    color:#d4d4d8;
-                    margin-top:12px;
-                ">
-                    <input id="tm-hide-stats-toggle" type="checkbox" ${statsHidden ? 'checked' : ''} style="
-                        width:16px;
-                        height:16px;
-                        accent-color:#f59e0b;
-                        cursor:pointer;
-                    ">
+                <label style="${settingsCheckboxLabelWithMarginStyle}">
+                    <input id="tm-hide-stats-toggle" type="checkbox" ${statsHidden ? 'checked' : ''} style="${settingsCheckboxInputStyle('#f59e0b')}">
                     <span>Masquer complètement la stats box</span>
                 </label>
 
@@ -4584,24 +5038,11 @@
                 </div>
 
                 <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
-                    Agrandit ou réduit les pseudos et les messages dans la shoutbox. L’aperçu est immédiat sur la vue courante.
+                    Agrandit ou réduit les pseudos et les messages dans la shoutbox.
                 </div>
 
-                <label style="
-                    display:flex;
-                    align-items:center;
-                    gap:10px;
-                    cursor:pointer;
-                    font-size:12px;
-                    color:#d4d4d8;
-                    margin-top:12px;
-                ">
-                    <input id="tm-linkify-urls-toggle" type="checkbox" ${linkifyUrlsEnabled ? 'checked' : ''} style="
-                        width:16px;
-                        height:16px;
-                        accent-color:#06b6d4;
-                        cursor:pointer;
-                    ">
+                <label style="${settingsCheckboxLabelWithMarginStyle}">
+                    <input id="tm-linkify-urls-toggle" type="checkbox" ${linkifyUrlsEnabled ? 'checked' : ''} style="${settingsCheckboxInputStyle(accessibilityCheckboxAccentColor)}">
                     <span>Rendre les URLs cliquables</span>
                 </label>
 
@@ -4610,21 +5051,8 @@
                 </div>
 
                 ${isChatPage() ? `
-                <label style="
-                    display:flex;
-                    align-items:center;
-                    gap:10px;
-                    cursor:pointer;
-                    font-size:12px;
-                    color:#d4d4d8;
-                    margin-top:12px;
-                ">
-                    <input id="tm-chat-scrollbar-toggle" type="checkbox" ${chatScrollbarEnabled ? 'checked' : ''} style="
-                        width:16px;
-                        height:16px;
-                        accent-color:#38bdf8;
-                        cursor:pointer;
-                    ">
+                <label style="${settingsCheckboxLabelWithMarginStyle}">
+                    <input id="tm-chat-scrollbar-toggle" type="checkbox" ${chatScrollbarEnabled ? 'checked' : ''} style="${settingsCheckboxInputStyle(accessibilityCheckboxAccentColor)}">
                     <span>Afficher l’ascenseur du chat</span>
                 </label>
 
@@ -4633,21 +5061,37 @@
                 </div>
                 ` : ''}
 
-                <label style="
-                    display:flex;
-                    align-items:center;
-                    gap:10px;
-                    cursor:pointer;
-                    font-size:12px;
-                    color:#d4d4d8;
-                    margin-top:12px;
-                ">
-                    <input id="tm-embed-url-images-toggle" type="checkbox" ${embedUrlImagesEnabled ? 'checked' : ''} style="
-                        width:16px;
-                        height:16px;
-                        accent-color:#22c55e;
-                        cursor:pointer;
-                    ">
+                <label style="${settingsCheckboxLabelWithMarginStyle}">
+                    <input id="tm-message-actions-left-toggle" type="checkbox" ${messageActionsLeftEnabled ? 'checked' : ''} style="${settingsCheckboxInputStyle(accessibilityCheckboxAccentColor)}">
+                    <span>Actions des messages à gauche</span>
+                </label>
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                    Déplace les boutons Réagir / Répondre qui apparaissent au survol vers la gauche du bloc message. Utile seulement sur la page Chat.
+                </div>
+
+                <label style="${settingsCheckboxLabelWithMarginStyle}">
+                    <input id="tm-chat-input-toolbar-align-right-toggle" type="checkbox" ${chatInputToolbarAlignRight ? 'checked' : ''} style="${settingsCheckboxInputStyle(accessibilityCheckboxAccentColor)}">
+                    <span>Aligner les boutons du chat à droite</span>
+                </label>
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                    Par défaut, les boutons au-dessus de l'input du chat sont alignés à gauche. Active cette option pour les pousser à droite.
+                </div>
+
+                ${isChatPage() ? `
+                <label style="${settingsCheckboxLabelWithMarginStyle}">
+                    <input id="tm-hide-chat-footer-toggle" type="checkbox" ${hideChatFooterEnabled ? 'checked' : ''} style="${settingsCheckboxInputStyle(accessibilityCheckboxAccentColor)}">
+                    <span>Masquer le footer sur la page Chat</span>
+                </label>
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                    Retire le footer du site sur la page de chat dédiée pour libérer de la hauteur utile.
+                </div>
+                ` : ''}
+
+                <label style="${settingsCheckboxLabelWithMarginStyle}">
+                    <input id="tm-embed-url-images-toggle" type="checkbox" ${embedUrlImagesEnabled ? 'checked' : ''} style="${settingsCheckboxInputStyle(accessibilityCheckboxAccentColor)}">
                     <span>Prévisualiser les liens directs d'images au survol</span>
                 </label>
 
@@ -4655,21 +5099,8 @@
                     Affiche un aperçu flottant uniquement pour les URLs qui pointent directement vers un fichier image.
                 </div>
 
-                <label style="
-                    display:flex;
-                    align-items:center;
-                    gap:10px;
-                    cursor:pointer;
-                    font-size:12px;
-                    color:#d4d4d8;
-                    margin-top:12px;
-                ">
-                    <input id="tm-light-theme-toggle" type="checkbox" ${lightThemeEnabled ? 'checked' : ''} style="
-                        width:16px;
-                        height:16px;
-                        accent-color:#f59e0b;
-                        cursor:pointer;
-                    ">
+                <label style="${settingsCheckboxLabelWithMarginStyle}">
+                    <input id="tm-light-theme-toggle" type="checkbox" ${lightThemeEnabled ? 'checked' : ''} style="${settingsCheckboxInputStyle(accessibilityCheckboxAccentColor)}">
                     <span>Theme clair <span style="font-weight:700;text-decoration:underline;">BETA</span> pour la shoutbox</span>
                 </label>
 
@@ -4681,20 +5112,8 @@
             <div style="${settingsCardStyle}">
                 <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Phrases Sauvegardées</div>
 
-                <label style="
-                    display:flex;
-                    align-items:center;
-                    gap:10px;
-                    cursor:pointer;
-                    font-size:12px;
-                    color:#d4d4d8;
-                ">
-                    <input id="tm-phrases-enabled-toggle" type="checkbox" ${savedPhrasesEnabled ? 'checked' : ''} style="
-                        width:16px;
-                        height:16px;
-                        accent-color:#8b5cf6;
-                        cursor:pointer;
-                    ">
+                <label style="${settingsCheckboxLabelStyle}">
+                    <input id="tm-phrases-enabled-toggle" type="checkbox" ${savedPhrasesEnabled ? 'checked' : ''} style="${settingsCheckboxInputStyle('#8b5cf6')}">
                     <span>Activer les réponses rapides</span>
                 </label>
 
@@ -4716,6 +5135,19 @@
 
                 <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.4;">
                     Ouvre une fenêtre dédiée pour ajouter, retirer et gérer les réponses rapides.
+                </div>
+            </div>
+
+            <div style="${settingsCardStyle}">
+                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">GIF Klipy</div>
+
+                <label style="${settingsCheckboxLabelStyle}">
+                    <input id="tm-klipy-gifs-toggle" type="checkbox" ${klipyGifsEnabled ? 'checked' : ''} style="${settingsCheckboxInputStyle('#22c55e')}">
+                    <span>Activer le bouton GIF Klipy</span>
+                </label>
+
+                <div style="margin-top:10px;font-size:12px;color:#a1a1aa;line-height:1.5;">
+                    Permet d'utiliser un gif picker directement depuis le chat.
                 </div>
             </div>
 
@@ -4983,58 +5415,24 @@
                 </div>
 
                 <label style="
-                    display:flex;
-                    align-items:center;
-                    flex-wrap:wrap;
-                    gap:10px;
-                    cursor:pointer;
-                    font-size:12px;
-                    color:#d4d4d8;
+                    ${settingsCheckboxLabelStyle}
                     margin-top:10px;
                 ">
-                    <input id="tm-mention-keep-highlight-toggle" type="checkbox" ${mentionSettings.keepHighlightAfterBlink ? 'checked' : ''} style="
-                        width:16px;
-                        height:16px;
-                        accent-color:#22c55e;
-                        cursor:pointer;
-                    ">
+                    <input id="tm-mention-keep-highlight-toggle" type="checkbox" ${mentionSettings.keepHighlightAfterBlink ? 'checked' : ''} style="${settingsCheckboxInputStyle('#22c55e')}">
                     <span>Garder la couleur après le clignotement</span>
                 </label>
 
                 <label style="
-                    display:flex;
-                    align-items:center;
-                    flex-wrap:wrap;
-                    gap:10px;
-                    cursor:pointer;
-                    font-size:12px;
-                    color:#d4d4d8;
+                    ${settingsCheckboxLabelStyle}
                     margin-top:10px;
                 ">
-                    <input id="tm-mention-include-reply-toggle" type="checkbox" ${mentionSettings.includeReplyContext ? 'checked' : ''} style="
-                        width:16px;
-                        height:16px;
-                        accent-color:#06b6d4;
-                        cursor:pointer;
-                    ">
+                    <input id="tm-mention-include-reply-toggle" type="checkbox" ${mentionSettings.includeReplyContext ? 'checked' : ''} style="${settingsCheckboxInputStyle('#22c55e')}">
                     <span>Considérer aussi les réponses citées vers @moi</span>
                 </label>
 
                 <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:10px;">
-                    <label style="
-                        display:flex;
-                        align-items:center;
-                        gap:10px;
-                        cursor:pointer;
-                        font-size:12px;
-                        color:#d4d4d8;
-                    ">
-                        <input id="tm-mention-sound-toggle" type="checkbox" ${mentionSettings.soundEnabled ? 'checked' : ''} style="
-                            width:16px;
-                            height:16px;
-                            accent-color:#38bdf8;
-                            cursor:pointer;
-                        ">
+                    <label style="${settingsCheckboxLabelStyle}">
+                        <input id="tm-mention-sound-toggle" type="checkbox" ${mentionSettings.soundEnabled ? 'checked' : ''} style="${settingsCheckboxInputStyle('#22c55e')}">
                         <span>Son de notification</span>
                     </label>
                 </div>
@@ -5121,20 +5519,8 @@
             <div style="${settingsCardStyle}">
                 <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Debug</div>
 
-                <label style="
-                    display:flex;
-                    align-items:center;
-                    gap:10px;
-                    cursor:pointer;
-                    font-size:13px;
-                    color:#e4e4e7;
-                ">
-                    <input id="tm-debug-toggle" type="checkbox" ${debugMode ? 'checked' : ''} style="
-                        width:16px;
-                        height:16px;
-                        accent-color:#ef4444;
-                        cursor:pointer;
-                    ">
+                <label style="${settingsCheckboxLabelStyle}">
+                    <input id="tm-debug-toggle" type="checkbox" ${debugMode ? 'checked' : ''} style="${settingsCheckboxInputStyle('#ef4444')}">
                     <span>Mode debug</span>
                 </label>
 
@@ -5162,6 +5548,7 @@
         const phrasesSummary = modal.querySelector('#tm-phrases-summary');
         const toggleBtn = modal.querySelector('#tm-user-toggle');
         const phrasesEnabledToggle = modal.querySelector('#tm-phrases-enabled-toggle');
+        const klipyGifsToggle = modal.querySelector('#tm-klipy-gifs-toggle');
         const hiddenUsersList = modal.querySelector('#tm-hidden-users-list');
         const highlightUserInput = modal.querySelector('#tm-highlight-user-input');
         const highlightColorInput = modal.querySelector('#tm-highlight-color-input');
@@ -5198,6 +5585,9 @@
         const fontSizeResetBtn = modal.querySelector('#tm-font-size-reset');
         const linkifyUrlsToggle = modal.querySelector('#tm-linkify-urls-toggle');
         const chatScrollbarToggle = modal.querySelector('#tm-chat-scrollbar-toggle');
+        const messageActionsLeftToggle = modal.querySelector('#tm-message-actions-left-toggle');
+        const chatInputToolbarAlignRightToggle = modal.querySelector('#tm-chat-input-toolbar-align-right-toggle');
+        const hideChatFooterToggle = modal.querySelector('#tm-hide-chat-footer-toggle');
         const embedUrlImagesToggle = modal.querySelector('#tm-embed-url-images-toggle');
         const lightThemeToggle = modal.querySelector('#tm-light-theme-toggle');
         const rightInput = modal.querySelector('#tm-right-input');
@@ -5623,6 +6013,18 @@
             }
         });
 
+        klipyGifsToggle?.addEventListener('change', () => {
+            saveKlipyGifsEnabled(klipyGifsToggle.checked);
+
+            if (klipyGifsEnabled) {
+                injectKlipyGifToolbar();
+                setFeedback('Bouton GIF Klipy activé.');
+            } else {
+                removeKlipyGifToolbar();
+                setFeedback('Bouton GIF Klipy désactivé.');
+            }
+        });
+
         fontSizeResetBtn?.addEventListener('click', () => {
             saveChatFontScale(DEFAULT_CHAT_FONT_SCALE);
             applyChatFontScale();
@@ -5644,6 +6046,37 @@
             saveChatScrollbarEnabled(chatScrollbarToggle.checked);
             applyChatPageScrollbarState();
             setFeedback(chatScrollbarEnabled ? 'Ascenseur du chat activé.' : 'Ascenseur du chat désactivé.');
+        });
+
+        messageActionsLeftToggle?.addEventListener('change', () => {
+            saveMessageActionsLeftEnabled(messageActionsLeftToggle.checked);
+            applyMessageActionsPositionState();
+            processAllMessages();
+            setFeedback(
+                messageActionsLeftEnabled
+                    ? 'Actions natives des messages déplacées à gauche.'
+                    : 'Actions natives des messages replacées à droite.'
+            );
+        });
+
+        chatInputToolbarAlignRightToggle?.addEventListener('change', () => {
+            saveChatInputToolbarAlignRight(chatInputToolbarAlignRightToggle.checked);
+            applyChatInputToolbarAlignmentState();
+            setFeedback(
+                chatInputToolbarAlignRight
+                    ? 'Barre d’outils du chat alignée à droite.'
+                    : 'Barre d’outils du chat alignée à gauche.'
+            );
+        });
+
+        hideChatFooterToggle?.addEventListener('change', () => {
+            saveHideChatFooterEnabled(hideChatFooterToggle.checked);
+            applyChatFooterVisibilityState();
+            setFeedback(
+                hideChatFooterEnabled
+                    ? 'Footer masqué sur la page Chat.'
+                    : 'Footer réaffiché sur la page Chat.'
+            );
         });
 
         embedUrlImagesToggle?.addEventListener('change', () => {
@@ -5725,7 +6158,8 @@
                 `#${MODAL_ID}`,
                 `#${OVERLAY_ID}`,
                 `#${TOAST_ID}`,
-                `#${PHRASES_MENU_WRAPPER_ID}`
+                `#${PHRASES_MENU_WRAPPER_ID}`,
+                `#${GIF_MENU_WRAPPER_ID}`
             ].join(', ')
         );
     }
@@ -5747,6 +6181,88 @@
         return true;
     }
 
+    function getChatInputCandidateLabel(element) {
+        if (!(element instanceof HTMLElement)) return '';
+
+        return normalizeMentionComparableText(
+            [
+                element.getAttribute('placeholder'),
+                element.getAttribute('aria-label'),
+                element.getAttribute('title'),
+                element.getAttribute('name')
+            ]
+                .filter(Boolean)
+                .join(' ')
+        );
+    }
+
+    function isNativeChatInputSendButton(button) {
+        if (!(button instanceof HTMLButtonElement)) return false;
+
+        const label = getNativeChatInputActionLabel(button);
+        const className = String(button.getAttribute('class') || '');
+
+        return (
+            /\b(envoyer|send)\b/.test(label) ||
+            className.includes('bg-cyan-500/10') ||
+            className.includes('text-cyan-400')
+        );
+    }
+
+    function looksLikeNativeChatInputUtilityButton(button) {
+        if (!(button instanceof HTMLButtonElement)) return false;
+
+        const className = String(button.getAttribute('class') || '');
+        return (
+            className.includes('bg-zinc-900') &&
+            className.includes('border-zinc-800') &&
+            className.includes('rounded-lg') &&
+            className.includes('text-gray-400')
+        );
+    }
+
+    function getChatInputCandidateScore(element) {
+        if (!(element instanceof HTMLElement)) return Number.NEGATIVE_INFINITY;
+
+        let score = 0;
+        const label = getChatInputCandidateLabel(element);
+        const controlsRow = getChatInputControlsRow(element);
+
+        if (/\b(message|messages|ecrire|écrire|repondre|répondre|chat|shout)\b/.test(label)) {
+            score += 160;
+        }
+
+        if (/\b(url|lien|image|gif|emoji|recherche|search|upload|joindre|galerie)\b/.test(label)) {
+            score -= 140;
+        }
+
+        if (element instanceof HTMLTextAreaElement) {
+            score += 40;
+        }
+
+        if (element.closest('.relative.flex-1')) {
+            score += 35;
+        }
+
+        if (element.closest('form')) {
+            score += 15;
+        }
+
+        if (controlsRow instanceof HTMLElement) {
+            const rowButtons = Array.from(controlsRow.querySelectorAll('button[type="button"]'));
+
+            if (rowButtons.some((button) => isNativeChatInputSendButton(button))) {
+                score += 90;
+            }
+
+            if (rowButtons.some((button) => looksLikeNativeChatInputUtilityButton(button))) {
+                score += 35;
+            }
+        }
+
+        return score;
+    }
+
     function findChatInputWithin(root) {
         if (!(root instanceof Element) && !(root instanceof Document)) return null;
 
@@ -5759,7 +6275,11 @@
         }
 
         const candidates = Array.from(root.querySelectorAll('input[type="text"], textarea, [contenteditable="true"]'));
-        return candidates.find((element) => isChatInputCandidate(element)) || null;
+        const validCandidates = candidates.filter((element) => isChatInputCandidate(element));
+
+        return validCandidates
+            .slice()
+            .sort((a, b) => getChatInputCandidateScore(b) - getChatInputCandidateScore(a))[0] || null;
     }
 
     function getSavedPhrasesMenu() {
@@ -5826,6 +6346,9 @@
         if (wrapper) {
             wrapper.remove();
         }
+
+        syncNativeChatInputActionButtons();
+        syncChatInputToolbarReservedSpace();
     }
 
     function installSavedPhrasesToolbarGlobalHandlers() {
@@ -5886,13 +6409,412 @@
                 .filter((element) => isChatInputCandidate(element))
                 .filter((element) => !element.closest('nav, header, [role="navigation"], .navbar'));
 
-            input = validInputs.find((element) => /message|ecrire|écrire|repondre|répondre/i.test(element.getAttribute('placeholder') || ''))
-                || validInputs.find((element) => element.closest('form'))
-                || validInputs.pop()
-                || null;
+            input = validInputs
+                .slice()
+                .sort((a, b) => getChatInputCandidateScore(b) - getChatInputCandidateScore(a))[0] || null;
         }
 
         return input;
+    }
+
+    function getChatInputToolbarMountContext(input = getChatInput()) {
+        if (!(input instanceof HTMLElement)) {
+            return {
+                mountParent: null,
+                inputWrapper: null,
+                directWrapper: null,
+                fallbackArea: null
+            };
+        }
+
+        const inputWrapper = input.closest('.relative.flex-1');
+        const directWrapper = input.parentElement instanceof HTMLElement ? input.parentElement : null;
+        const fallbackArea = input.closest('form');
+        const mountParent =
+            (inputWrapper instanceof HTMLElement && inputWrapper) ||
+            directWrapper ||
+            (fallbackArea instanceof HTMLElement ? fallbackArea : null);
+
+        return {
+            mountParent,
+            inputWrapper: inputWrapper instanceof HTMLElement ? inputWrapper : null,
+            directWrapper,
+            fallbackArea: fallbackArea instanceof HTMLElement ? fallbackArea : null
+        };
+    }
+
+    function ensureChatInputToolbarMountVisibility(context) {
+        const mountParent = context?.mountParent;
+        if (mountParent instanceof HTMLElement) {
+            if (window.getComputedStyle(mountParent).position === 'static') {
+                mountParent.style.position = 'relative';
+            }
+            mountParent.style.overflow = 'visible';
+        }
+
+        if (mountParent?.parentElement instanceof HTMLElement) {
+            const computed = window.getComputedStyle(mountParent.parentElement);
+            if (computed.overflow === 'hidden' || computed.overflowY === 'hidden') {
+                mountParent.parentElement.style.overflow = 'visible';
+            }
+        }
+    }
+
+    function getChatInputToolbarRail(mountParent) {
+        if (!(mountParent instanceof HTMLElement)) return null;
+
+        const rail = Array.from(mountParent.children).find((child) =>
+            child instanceof HTMLElement && child.getAttribute(CHAT_INPUT_TOOLBAR_RAIL_ATTR) === '1'
+        );
+
+        return rail instanceof HTMLElement ? rail : null;
+    }
+
+    function hasVisibleChatInputToolbar(rail) {
+        if (!(rail instanceof HTMLElement)) return false;
+
+        return Array.from(rail.children).some((child) =>
+            child instanceof HTMLElement && child.style.display !== 'none'
+        );
+    }
+
+    function syncChatInputToolbarReservedSpace(input = getChatInput()) {
+        document.querySelectorAll(`[${CHAT_INPUT_TOOLBAR_SPACE_ATTR}="1"]`).forEach((element) => {
+            if (!(element instanceof HTMLElement)) return;
+
+            const rail = getChatInputToolbarRail(element);
+            if (hasVisibleChatInputToolbar(rail)) {
+                element.style.paddingTop = `${CHAT_INPUT_TOOLBAR_RESERVED_HEIGHT_PX}px`;
+                return;
+            }
+
+            if (rail instanceof HTMLElement && rail.children.length === 0) {
+                rail.remove();
+            }
+            element.style.removeProperty('padding-top');
+            element.removeAttribute(CHAT_INPUT_TOOLBAR_SPACE_ATTR);
+        });
+
+        const context = getChatInputToolbarMountContext(input);
+        if (!(context.mountParent instanceof HTMLElement)) return;
+
+        const rail = getChatInputToolbarRail(context.mountParent);
+        if (hasVisibleChatInputToolbar(rail)) {
+            context.mountParent.style.paddingTop = `${CHAT_INPUT_TOOLBAR_RESERVED_HEIGHT_PX}px`;
+            context.mountParent.setAttribute(CHAT_INPUT_TOOLBAR_SPACE_ATTR, '1');
+            return;
+        }
+
+        if (rail instanceof HTMLElement && rail.children.length === 0) {
+            rail.remove();
+        }
+        context.mountParent.style.removeProperty('padding-top');
+        context.mountParent.removeAttribute(CHAT_INPUT_TOOLBAR_SPACE_ATTR);
+    }
+
+    function getOrCreateChatInputToolbarRail(context) {
+        if (!(context?.mountParent instanceof HTMLElement)) return null;
+
+        ensureChatInputToolbarMountVisibility(context);
+
+        let rail = getChatInputToolbarRail(context.mountParent);
+        if (!rail) {
+            rail = document.createElement('div');
+            rail.setAttribute(CHAT_INPUT_TOOLBAR_RAIL_ATTR, '1');
+            rail.style.position = 'absolute';
+            rail.style.top = '0';
+            rail.style.left = '0';
+            rail.style.right = '0';
+            rail.style.display = 'flex';
+            rail.style.alignItems = 'center';
+            rail.style.justifyContent = chatInputToolbarAlignRight ? 'flex-end' : 'flex-start';
+            rail.style.gap = '8px';
+            rail.style.pointerEvents = 'none';
+            rail.style.zIndex = '50';
+            rail.style.overflow = 'visible';
+            context.mountParent.appendChild(rail);
+        }
+
+        return rail;
+    }
+
+    function applyChatInputToolbarAlignmentState() {
+        document.querySelectorAll(`[${CHAT_INPUT_TOOLBAR_RAIL_ATTR}="1"]`).forEach((rail) => {
+            if (!(rail instanceof HTMLElement)) return;
+            rail.style.justifyContent = chatInputToolbarAlignRight ? 'flex-end' : 'flex-start';
+        });
+    }
+
+    function shouldUseChatInputToolbarRail() {
+        return isSupportedPage() && (
+            klipyGifsEnabled ||
+            (savedPhrasesEnabled && savedPhrases.length > 0)
+        );
+    }
+
+    function getChatInputControlsRow(input = getChatInput()) {
+        if (!(input instanceof HTMLElement)) return null;
+
+        const inputWrapper = input.closest('.relative.flex-1');
+        if (inputWrapper instanceof HTMLElement && inputWrapper.parentElement instanceof HTMLElement) {
+            return inputWrapper.parentElement;
+        }
+
+        const directWrapper = input.parentElement;
+        if (directWrapper instanceof HTMLElement && directWrapper.parentElement instanceof HTMLElement) {
+            return directWrapper.parentElement;
+        }
+
+        return null;
+    }
+
+    function getNativeChatInputActionSearchRoot(input = getChatInput()) {
+        const context = getChatInputToolbarMountContext(input);
+        const controlsRow = getChatInputControlsRow(input);
+
+        return controlsRow
+            || context.fallbackArea
+            || (context.mountParent?.parentElement instanceof HTMLElement ? context.mountParent.parentElement : null)
+            || context.mountParent
+            || null;
+    }
+
+    function getNativeChatInputActionLabel(button) {
+        if (!(button instanceof HTMLButtonElement)) return '';
+
+        return normalizeMentionComparableText(
+            [
+                button.getAttribute('title'),
+                button.getAttribute('aria-label'),
+                button.textContent
+            ]
+                .filter(Boolean)
+                .join(' ')
+        );
+    }
+
+    function isNativeChatInputUtilityButton(button) {
+        if (!(button instanceof HTMLButtonElement)) return false;
+        if (button.hasAttribute('data-tm-native-chat-input-action-moved')) return false;
+        if (button.closest(`#${PHRASES_MENU_WRAPPER_ID}, #${GIF_MENU_WRAPPER_ID}`)) return false;
+        if (button.closest(`[${NATIVE_CHAT_INPUT_ACTION_HOST_ATTR}="1"]`)) return false;
+
+        const label = getNativeChatInputActionLabel(button);
+        const isEmojiButton = /\b(emoji|emojis|smile|smiley|sticker)\b/.test(label);
+        const isImageButton = /\b(image|images|img|photo|picture|upload|insere|insérer|inserer|joindre|galerie)\b/.test(label);
+        const looksNativeUtilityButton = looksLikeNativeChatInputUtilityButton(button);
+
+        if (isNativeChatInputSendButton(button)) return false;
+        if (!looksNativeUtilityButton) return false;
+        return isEmojiButton || isImageButton || !!button.querySelector('svg');
+    }
+
+    function getChatInputActionContainers(input = getChatInput()) {
+        const controlsRow = getChatInputControlsRow(input);
+        if (!(controlsRow instanceof HTMLElement)) return [];
+
+        const inputWrapper =
+            (input instanceof HTMLElement && input.closest('.relative.flex-1')) ||
+            (input instanceof HTMLElement && input.parentElement instanceof HTMLElement ? input.parentElement : null);
+
+        return Array.from(controlsRow.children).filter((child) => {
+            if (!(child instanceof HTMLElement)) return false;
+            if (child.getAttribute(CHAT_INPUT_TOOLBAR_RAIL_ATTR) === '1') return false;
+            if (child.getAttribute(NATIVE_CHAT_INPUT_ACTION_HOST_ATTR) === '1') return false;
+            if (child.id === PHRASES_MENU_WRAPPER_ID || child.id === GIF_MENU_WRAPPER_ID) return false;
+            if (child === inputWrapper) return false;
+            if (inputWrapper instanceof HTMLElement && child.contains(inputWrapper)) return false;
+            return true;
+        });
+    }
+
+    function getNativeChatInputActionButtons(input = getChatInput()) {
+        const actionContainers = getChatInputActionContainers(input);
+        if (actionContainers.length === 0) return [];
+
+        const candidateButtons = [];
+
+        actionContainers.forEach((container) => {
+            if (container instanceof HTMLButtonElement && String(container.type || '').toLowerCase() === 'button') {
+                candidateButtons.push(container);
+            }
+
+            container
+                .querySelectorAll(':scope > button[type="button"], :scope > * > button[type="button"]')
+                .forEach((button) => {
+                    if (button instanceof HTMLButtonElement) {
+                        candidateButtons.push(button);
+                    }
+                });
+        });
+
+        const explicitMatches = [];
+        const fallbackMatches = [];
+
+        Array.from(new Set(candidateButtons))
+            .filter((button) => isNativeChatInputUtilityButton(button))
+            .forEach((button) => {
+            const label = getNativeChatInputActionLabel(button);
+            if (/\b(emoji|emojis|image|images|img|photo|picture|upload|insere|insérer|inserer|joindre|galerie)\b/.test(label)) {
+                explicitMatches.push(button);
+                return;
+            }
+
+            fallbackMatches.push(button);
+            });
+
+        return Array.from(new Set([...explicitMatches, ...fallbackMatches])).slice(0, 2);
+    }
+
+    function restoreNativeChatInputActionButtons() {
+        const movedButtons = Array.from(document.querySelectorAll('[data-tm-native-chat-input-action-moved="1"]'));
+
+        movedButtons.forEach((button) => {
+            if (!(button instanceof HTMLButtonElement)) return;
+
+            const placeholderId = button.getAttribute('data-tm-native-chat-input-action-placeholder-id') || '';
+            const placeholder = placeholderId
+                ? document.querySelector(`[${NATIVE_CHAT_INPUT_ACTION_PLACEHOLDER_ATTR}="${placeholderId}"]`)
+                : null;
+            const source = placeholder?.parentElement instanceof HTMLElement ? placeholder.parentElement : null;
+            const host = button.closest(`[${NATIVE_CHAT_INPUT_ACTION_HOST_ATTR}="1"]`);
+
+            if (placeholder instanceof HTMLElement) {
+                placeholder.replaceWith(button);
+            } else if (host instanceof HTMLElement && host.parentElement instanceof HTMLElement) {
+                host.parentElement.insertBefore(button, host);
+            }
+
+            if (host instanceof HTMLElement && host.childElementCount === 0) {
+                host.remove();
+            }
+
+            button.removeAttribute('data-tm-native-chat-input-action-moved');
+            button.removeAttribute('data-tm-native-chat-input-action-placeholder-id');
+
+            if (source instanceof HTMLElement) {
+                source.removeAttribute(NATIVE_CHAT_INPUT_ACTION_SOURCE_ATTR);
+
+                Array.from(source.children).forEach((child) => {
+                    if (!(child instanceof HTMLElement)) return;
+                    if (!child.classList.contains('bottom-24')) return;
+
+                    child.classList.remove('bottom-24');
+                    child.classList.add('bottom-12');
+                    child.style.removeProperty('top');
+                    child.style.removeProperty('z-index');
+                    child.style.removeProperty('bottom');
+                });
+            }
+        });
+
+        document.querySelectorAll(`[${NATIVE_CHAT_INPUT_ACTION_HOST_ATTR}="1"]`).forEach((host) => {
+            if (!(host instanceof HTMLElement)) return;
+            if (host.childElementCount === 0) {
+                host.remove();
+            }
+        });
+    }
+
+    function syncMovedNativeChatInputActionPopovers() {
+        applyNativeChatInputPopoverState();
+        if (!isChatPage()) return;
+
+        document.querySelectorAll(`[${NATIVE_CHAT_INPUT_ACTION_PLACEHOLDER_ATTR}]`).forEach((placeholder) => {
+            if (!(placeholder instanceof HTMLElement)) return;
+
+            const source = placeholder.parentElement;
+            if (!(source instanceof HTMLElement)) return;
+
+            source.setAttribute(NATIVE_CHAT_INPUT_ACTION_SOURCE_ATTR, '1');
+            source.style.overflow = 'visible';
+
+            const popupCandidates = source.querySelectorAll(':scope > .absolute.bottom-12, :scope > .fixed.bottom-12, :scope > .absolute.bottom-24, :scope > .fixed.bottom-24');
+
+            Array.from(popupCandidates).forEach((child) => {
+                if (!(child instanceof HTMLElement)) return;
+
+                const computedStyle = window.getComputedStyle(child);
+                if (computedStyle.position !== 'absolute' && computedStyle.position !== 'fixed') return;
+
+                child.classList.remove('bottom-12');
+                child.classList.add('bottom-24');
+                child.style.top = 'auto';
+                child.style.removeProperty('bottom');
+                child.style.zIndex = '120';
+            });
+        });
+    }
+
+    function scheduleMovedNativeChatInputActionPopoversSync() {
+        window.requestAnimationFrame(() => {
+            syncMovedNativeChatInputActionPopovers();
+
+            window.requestAnimationFrame(() => {
+                syncMovedNativeChatInputActionPopovers();
+            });
+        });
+    }
+
+    function syncNativeChatInputActionButtons(input = getChatInput()) {
+        if (!shouldUseChatInputToolbarRail()) {
+            restoreNativeChatInputActionButtons();
+            return;
+        }
+
+        const context = getChatInputToolbarMountContext(input);
+        const rail = getChatInputToolbarRail(context.mountParent);
+        if (!(rail instanceof HTMLElement)) {
+            restoreNativeChatInputActionButtons();
+            return;
+        }
+
+        const gifWrapper = document.getElementById(GIF_MENU_WRAPPER_ID);
+        const phrasesWrapper = document.getElementById(PHRASES_MENU_WRAPPER_ID);
+        const candidateButtons = getNativeChatInputActionButtons(input);
+
+        candidateButtons.forEach((button, index) => {
+            const placeholderId = `native-action-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`;
+            const placeholder = document.createElement('span');
+            placeholder.setAttribute(NATIVE_CHAT_INPUT_ACTION_PLACEHOLDER_ATTR, placeholderId);
+            placeholder.style.display = 'none';
+
+            const host = document.createElement('div');
+            host.setAttribute(NATIVE_CHAT_INPUT_ACTION_HOST_ATTR, '1');
+            host.style.display = 'flex';
+            host.style.alignItems = 'center';
+            host.style.position = 'relative';
+            host.style.overflow = 'visible';
+            host.style.flexShrink = '0';
+            host.style.pointerEvents = 'auto';
+            host.style.zIndex = '80';
+
+            if (button.getAttribute(NATIVE_CHAT_INPUT_ACTION_POPOVER_SYNC_BOUND_ATTR) !== '1') {
+                button.setAttribute(NATIVE_CHAT_INPUT_ACTION_POPOVER_SYNC_BOUND_ATTR, '1');
+                button.addEventListener('click', () => {
+                    scheduleMovedNativeChatInputActionPopoversSync();
+                });
+            }
+
+            button.before(placeholder);
+            if (placeholder.parentElement instanceof HTMLElement) {
+                placeholder.parentElement.setAttribute(NATIVE_CHAT_INPUT_ACTION_SOURCE_ATTR, '1');
+                placeholder.parentElement.style.overflow = 'visible';
+            }
+            button.setAttribute('data-tm-native-chat-input-action-moved', '1');
+            button.setAttribute('data-tm-native-chat-input-action-placeholder-id', placeholderId);
+            host.appendChild(button);
+
+            if (gifWrapper instanceof HTMLElement && gifWrapper.parentElement === rail) {
+                rail.insertBefore(host, gifWrapper);
+            } else if (phrasesWrapper instanceof HTMLElement && phrasesWrapper.parentElement === rail) {
+                rail.insertBefore(host, phrasesWrapper);
+            } else {
+                rail.appendChild(host);
+            }
+        });
+
+        syncMovedNativeChatInputActionPopovers();
     }
 
     function getChatInputMaxLength(input) {
@@ -5910,14 +6832,14 @@
         return MAX_SAVED_PHRASE_LENGTH;
     }
 
-    function insertSavedPhraseIntoChatInput(input, phraseText) {
+    function insertTextIntoChatInput(input, textToInsert, successMessage = 'Texte inséré.') {
         if (!(input instanceof HTMLElement)) {
             return { ok: false, message: 'Champ de texte non trouvé.' };
         }
 
-        const phrase = normalizeSavedPhraseText(phraseText);
-        if (!phrase) {
-            return { ok: false, message: 'Phrase vide.' };
+        const text = String(textToInsert || '').trim();
+        if (!text) {
+            return { ok: false, message: 'Texte vide.' };
         }
 
         input.focus();
@@ -5926,7 +6848,7 @@
             ? (input.textContent || '')
             : ('value' in input ? (input.value || '') : '');
         const prefix = currentValue.length > 0 && !/\s$/.test(currentValue) ? ' ' : '';
-        const nextValue = currentValue + prefix + phrase;
+        const nextValue = currentValue + prefix + text;
         const maxLength = getChatInputMaxLength(input);
 
         if (maxLength > 0 && nextValue.length > maxLength) {
@@ -5954,7 +6876,25 @@
         }
 
         input.dispatchEvent(new Event('input', { bubbles: true }));
-        return { ok: true, message: 'Phrase insérée.' };
+        return { ok: true, message: successMessage };
+    }
+
+    function insertSavedPhraseIntoChatInput(input, phraseText) {
+        const phrase = normalizeSavedPhraseText(phraseText);
+        if (!phrase) {
+            return { ok: false, message: 'Phrase vide.' };
+        }
+
+        return insertTextIntoChatInput(input, phrase, 'Phrase insérée.');
+    }
+
+    function insertGifIntoChatInput(input, gifUrl) {
+        const embedMarkup = buildKlipyGifEmbedMarkup(gifUrl);
+        if (!embedMarkup) {
+            return { ok: false, message: 'GIF Klipy invalide.' };
+        }
+
+        return insertTextIntoChatInput(input, embedMarkup, 'Balise BBCode GIF insérée.');
     }
 
     function buildSavedPhrasesMenuContent(menu, input = getChatInput()) {
@@ -6125,9 +7065,9 @@
 
         const textInput = getChatInput();
         if (!textInput) return;
-
-        const inputArea = textInput.closest('form') || textInput.parentElement;
-        if (!inputArea || !inputArea.parentNode) return;
+        const mountContext = getChatInputToolbarMountContext(textInput);
+        const rail = getOrCreateChatInputToolbarRail(mountContext);
+        if (!(rail instanceof HTMLElement)) return;
 
         let wrapper = document.getElementById(PHRASES_MENU_WRAPPER_ID);
         if (!wrapper) {
@@ -6137,42 +7077,31 @@
             wrapper.style.alignItems = 'center';
             wrapper.style.gap = '8px';
             wrapper.style.justifyContent = 'flex-end';
-            wrapper.style.position = 'absolute';
-            wrapper.style.right = '0';
-            wrapper.style.bottom = '100%';
-            wrapper.style.marginBottom = '8px';
+            wrapper.style.position = 'relative';
             wrapper.style.zIndex = '50';
             wrapper.style.overflow = 'visible';
+            wrapper.style.pointerEvents = 'auto';
+            wrapper.style.flexShrink = '0';
         }
 
-        if (getComputedStyle(inputArea).position === 'static') {
-            inputArea.style.position = 'relative';
-        }
-
-        if (wrapper.parentNode !== inputArea) {
-            inputArea.appendChild(wrapper);
-        }
-
-        inputArea.style.overflow = 'visible';
-        if (inputArea.parentNode && inputArea.parentNode instanceof HTMLElement) {
-            const computed = window.getComputedStyle(inputArea.parentNode);
-            if (computed.overflow === 'hidden' || computed.overflowY === 'hidden') {
-                inputArea.parentNode.style.overflow = 'visible';
-            }
+        if (wrapper.parentNode !== rail) {
+            rail.appendChild(wrapper);
         }
 
         wrapper.innerHTML = '';
         if (savedPhrases.length === 0) {
             wrapper.style.display = 'none';
+            syncChatInputToolbarReservedSpace(textInput);
             return;
         }
 
         wrapper.style.display = 'flex';
 
-        // Bouton Flottant
         const toggleBtn = document.createElement('button');
         toggleBtn.type = 'button';
         toggleBtn.innerHTML = '<span style="margin-right:4px;">✨</span> Réponses rapides';
+        toggleBtn.title = 'Ouvrir les réponses rapides';
+        toggleBtn.setAttribute('aria-label', 'Ouvrir les réponses rapides');
         toggleBtn.style.background = 'linear-gradient(135deg, rgba(88,28,135,0.7) 0%, rgba(30,58,138,0.7) 100%)';
         toggleBtn.style.border = '1px solid rgba(139,92,246,0.25)';
         toggleBtn.style.color = '#e0e7ff';
@@ -6231,7 +7160,6 @@
             quickAddBtn.style.border = '1px solid rgba(59,130,246,0.28)';
         });
 
-        // Menu Pop-up Modern
         const menu = document.createElement('div');
         menu.setAttribute('data-tm-saved-phrases-menu', '1');
         menu.style.display = 'none';
@@ -6263,6 +7191,7 @@
                 hideSavedPhrasesMenu(menu);
             } else {
                 buildSavedPhrasesMenuContent(menu, getChatInput());
+                closeKlipyGifMenu();
                 closeSavedPhrasesMenu();
                 showSavedPhrasesMenu(menu);
             }
@@ -6273,6 +7202,7 @@
         quickAddBtn.addEventListener('click', (event) => {
             event.preventDefault();
             event.stopPropagation();
+            closeKlipyGifMenu();
             closeSavedPhrasesMenu();
             openSavedPhraseQuickAddModal(getChatInputCurrentValue(textInput), textInput);
         });
@@ -6280,6 +7210,585 @@
         wrapper.appendChild(toggleBtn);
         wrapper.appendChild(quickAddBtn);
         wrapper.appendChild(menu);
+        syncChatInputToolbarReservedSpace(textInput);
+        syncNativeChatInputActionButtons(textInput);
+    }
+
+    function getKlipyGifMenu() {
+        const wrapper = document.getElementById(GIF_MENU_WRAPPER_ID);
+        if (!(wrapper instanceof HTMLElement)) return null;
+
+        const menu = wrapper.querySelector('[data-tm-klipy-gif-menu="1"]');
+        return menu instanceof HTMLElement ? menu : null;
+    }
+
+    function clearKlipyGifSearchDebounce() {
+        if (!klipyGifSearchDebounceTimer) return;
+        clearTimeout(klipyGifSearchDebounceTimer);
+        klipyGifSearchDebounceTimer = null;
+    }
+
+    function clearKlipyGifMenuHideTimer(menu) {
+        if (!(menu instanceof HTMLElement)) return;
+
+        const timerId = Number(menu.dataset.tmHideTimerId || 0);
+        if (timerId > 0) {
+            clearTimeout(timerId);
+            delete menu.dataset.tmHideTimerId;
+        }
+    }
+
+    function showKlipyGifMenu(menu) {
+        if (!(menu instanceof HTMLElement)) return;
+
+        clearKlipyGifMenuHideTimer(menu);
+        menu.style.display = 'flex';
+        menu.dataset.tmOpen = '1';
+        void menu.offsetWidth;
+        menu.style.opacity = '1';
+        menu.style.transform = 'translateY(0) scale(1)';
+    }
+
+    function hideKlipyGifMenu(menu) {
+        if (!(menu instanceof HTMLElement)) return;
+
+        clearKlipyGifSearchDebounce();
+        clearKlipyGifMenuHideTimer(menu);
+        menu.dataset.tmOpen = '0';
+        menu.style.opacity = '0';
+        menu.style.transform = 'translateY(10px) scale(0.95)';
+
+        const timerId = window.setTimeout(() => {
+            if (menu.dataset.tmOpen === '1') return;
+
+            menu.style.display = 'none';
+            delete menu.dataset.tmHideTimerId;
+        }, 200);
+
+        menu.dataset.tmHideTimerId = String(timerId);
+    }
+
+    function closeKlipyGifMenu() {
+        const menu = getKlipyGifMenu();
+        if (menu) {
+            hideKlipyGifMenu(menu);
+        }
+    }
+
+    function removeKlipyGifToolbar() {
+        clearKlipyGifSearchDebounce();
+
+        const menu = getKlipyGifMenu();
+        if (menu) {
+            clearKlipyGifMenuHideTimer(menu);
+        }
+
+        const wrapper = document.getElementById(GIF_MENU_WRAPPER_ID);
+        if (wrapper) {
+            wrapper.remove();
+        }
+
+        syncNativeChatInputActionButtons();
+        syncChatInputToolbarReservedSpace();
+    }
+
+    function installKlipyGifToolbarGlobalHandlers() {
+        if (klipyGifToolbarEventsInstalled) return;
+
+        klipyGifToolbarEventsInstalled = true;
+
+        document.addEventListener('click', (event) => {
+            const wrapper = document.getElementById(GIF_MENU_WRAPPER_ID);
+            if (!(wrapper instanceof HTMLElement)) return;
+            if (event.target instanceof Node && wrapper.contains(event.target)) return;
+
+            closeKlipyGifMenu();
+        });
+
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') {
+                closeKlipyGifMenu();
+            }
+        }, true);
+
+        window.addEventListener('blur', () => {
+            closeKlipyGifMenu();
+        });
+    }
+
+    function getKlipyGifMenuElements(menu) {
+        if (!(menu instanceof HTMLElement)) {
+            return {
+                searchInput: null,
+                status: null,
+                results: null,
+                loadMoreBtn: null
+            };
+        }
+
+        return {
+            searchInput: menu.querySelector('[data-tm-klipy-search="1"]'),
+            status: menu.querySelector('[data-tm-klipy-status="1"]'),
+            results: menu.querySelector('[data-tm-klipy-results="1"]'),
+            loadMoreBtn: menu.querySelector('[data-tm-klipy-more="1"]')
+        };
+    }
+
+    function setKlipyGifMenuStatus(menu, message, isError = false) {
+        const { status } = getKlipyGifMenuElements(menu);
+        if (!(status instanceof HTMLElement)) return;
+
+        status.textContent = message;
+        status.style.color = isError ? '#fca5a5' : '#cbd5f5';
+    }
+
+    function updateKlipyGifMoreButton(menu, visible, isLoading = false) {
+        const { loadMoreBtn } = getKlipyGifMenuElements(menu);
+        if (!(loadMoreBtn instanceof HTMLButtonElement)) return;
+
+        loadMoreBtn.style.display = visible ? 'inline-flex' : 'none';
+        loadMoreBtn.disabled = isLoading;
+        loadMoreBtn.textContent = isLoading ? 'Chargement...' : 'Afficher plus';
+        loadMoreBtn.style.cursor = isLoading ? 'progress' : 'pointer';
+        loadMoreBtn.style.opacity = isLoading ? '0.72' : '1';
+    }
+
+    function createKlipyGifResultCard(result, menu) {
+        const card = document.createElement('button');
+        card.type = 'button';
+        card.title = result.title || 'Insérer ce GIF Klipy';
+        card.style.display = 'flex';
+        card.style.flexDirection = 'column';
+        card.style.gap = '8px';
+        card.style.padding = '8px';
+        card.style.borderRadius = '12px';
+        card.style.border = '1px solid rgba(255,255,255,0.08)';
+        card.style.background = 'rgba(255,255,255,0.03)';
+        card.style.cursor = 'pointer';
+        card.style.color = '#f8fafc';
+        card.style.textAlign = 'left';
+        card.style.transition = 'transform 0.16s ease, border-color 0.16s ease, background 0.16s ease';
+        card.style.minWidth = '0';
+
+        const preview = document.createElement('img');
+        preview.src = result.previewUrl;
+        preview.alt = result.title || 'GIF Klipy';
+        preview.loading = 'lazy';
+        preview.referrerPolicy = 'no-referrer';
+        preview.style.display = 'block';
+        preview.style.width = '100%';
+        preview.style.aspectRatio = result.width > 0 && result.height > 0 ? `${result.width} / ${result.height}` : '1 / 1';
+        preview.style.maxHeight = '140px';
+        preview.style.objectFit = 'cover';
+        preview.style.borderRadius = '10px';
+        preview.style.background = 'rgba(15,23,42,0.55)';
+
+        const title = document.createElement('div');
+        title.textContent = result.title || 'GIF Klipy';
+        title.style.fontSize = '11px';
+        title.style.fontWeight = '700';
+        title.style.lineHeight = '1.35';
+        title.style.color = '#e2e8f0';
+        title.style.whiteSpace = 'nowrap';
+        title.style.overflow = 'hidden';
+        title.style.textOverflow = 'ellipsis';
+
+        const subtitle = document.createElement('div');
+        subtitle.textContent = result.tags.length > 0 ? result.tags.join(' · ') : 'Insérer la balise [img][/img]';
+        subtitle.style.fontSize = '10px';
+        subtitle.style.lineHeight = '1.35';
+        subtitle.style.color = '#94a3b8';
+        subtitle.style.whiteSpace = 'nowrap';
+        subtitle.style.overflow = 'hidden';
+        subtitle.style.textOverflow = 'ellipsis';
+
+        card.addEventListener('mouseenter', () => {
+            card.style.transform = 'translateY(-1px)';
+            card.style.borderColor = 'rgba(34,197,94,0.28)';
+            card.style.background = 'rgba(34,197,94,0.08)';
+        });
+
+        card.addEventListener('mouseleave', () => {
+            card.style.transform = 'translateY(0)';
+            card.style.borderColor = 'rgba(255,255,255,0.08)';
+            card.style.background = 'rgba(255,255,255,0.03)';
+        });
+
+        card.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+
+            const nextInput = getChatInput();
+            if (!nextInput) {
+                showToast('Champ de texte non trouvé.', true);
+                return;
+            }
+
+            const resultInsertion = insertGifIntoChatInput(nextInput, result.gifUrl);
+            if (!resultInsertion.ok) {
+                showToast(resultInsertion.message, true);
+                return;
+            }
+
+            hideKlipyGifMenu(menu);
+        });
+
+        card.appendChild(preview);
+        card.appendChild(title);
+        card.appendChild(subtitle);
+        return card;
+    }
+
+    function renderKlipyGifResults(menu, results, append = false) {
+        const { results: resultsContainer } = getKlipyGifMenuElements(menu);
+        if (!(resultsContainer instanceof HTMLElement)) return;
+
+        if (!append) {
+            resultsContainer.innerHTML = '';
+        }
+
+        if (!Array.isArray(results) || results.length === 0) {
+            if (!append) {
+                const emptyState = document.createElement('div');
+                emptyState.textContent = 'Aucun GIF disponible pour cette recherche.';
+                emptyState.style.padding = '10px 12px';
+                emptyState.style.borderRadius = '10px';
+                emptyState.style.background = 'rgba(255,255,255,0.03)';
+                emptyState.style.border = '1px dashed rgba(255,255,255,0.08)';
+                emptyState.style.fontSize = '11px';
+                emptyState.style.color = '#94a3b8';
+                emptyState.style.textAlign = 'center';
+                resultsContainer.appendChild(emptyState);
+            }
+            return;
+        }
+
+        results.forEach((result) => {
+            resultsContainer.appendChild(createKlipyGifResultCard(result, menu));
+        });
+    }
+
+    async function loadKlipyGifResults(menu, { append = false } = {}) {
+        if (!(menu instanceof HTMLElement)) return;
+
+        const { searchInput } = getKlipyGifMenuElements(menu);
+        if (!(searchInput instanceof HTMLInputElement)) return;
+
+        const rawQuery = String(searchInput.value || '').trim();
+        const effectiveQuery = rawQuery.length >= KLIPY_SEARCH_MIN_LENGTH ? rawQuery : '';
+        const nextCursor = append ? String(menu.dataset.tmKlipyNext || '') : '';
+
+        if (append && !nextCursor) return;
+
+        const requestId = String(++klipyGifRequestSerial);
+        menu.dataset.tmKlipyRequestId = requestId;
+
+        updateKlipyGifMoreButton(menu, append || !!menu.dataset.tmKlipyNext, append);
+        setKlipyGifMenuStatus(
+            menu,
+            rawQuery && rawQuery.length < KLIPY_SEARCH_MIN_LENGTH
+                ? `Tendances Klipy. Tape au moins ${KLIPY_SEARCH_MIN_LENGTH} caractères pour chercher.`
+                : effectiveQuery
+                    ? `Recherche Klipy: ${effectiveQuery}`
+                    : 'Chargement des tendances Klipy...'
+        );
+
+        try {
+            const payload = await fetchKlipyGifFeed({
+                query: effectiveQuery,
+                pos: nextCursor
+            });
+
+            if (menu.dataset.tmKlipyRequestId !== requestId) return;
+
+            renderKlipyGifResults(menu, payload.results, append);
+            menu.dataset.tmKlipyLoaded = '1';
+            menu.dataset.tmKlipyQuery = effectiveQuery;
+            menu.dataset.tmKlipyNext = payload.next || '';
+
+            if (payload.results.length === 0 && !append) {
+                setKlipyGifMenuStatus(
+                    menu,
+                    effectiveQuery
+                        ? `Aucun GIF Klipy pour "${effectiveQuery}".`
+                        : 'Aucun GIF tendance disponible pour le moment.',
+                    true
+                );
+            } else if (rawQuery && rawQuery.length < KLIPY_SEARCH_MIN_LENGTH) {
+                setKlipyGifMenuStatus(menu, `Tendances Klipy. Tape au moins ${KLIPY_SEARCH_MIN_LENGTH} caractères pour chercher.`);
+            } else {
+                setKlipyGifMenuStatus(
+                    menu,
+                    effectiveQuery
+                        ? `Résultats Klipy pour "${effectiveQuery}".`
+                        : 'Tendances Klipy.'
+                );
+            }
+
+            updateKlipyGifMoreButton(menu, !!payload.next, false);
+        } catch (error) {
+            if (menu.dataset.tmKlipyRequestId !== requestId) return;
+
+            if (!append) {
+                renderKlipyGifResults(menu, [], false);
+            }
+
+            updateKlipyGifMoreButton(menu, false, false);
+            setKlipyGifMenuStatus(
+                menu,
+                `Erreur Klipy: ${error instanceof Error ? error.message : 'chargement impossible.'}`,
+                true
+            );
+        }
+    }
+
+    function scheduleKlipyGifSearch(menu) {
+        clearKlipyGifSearchDebounce();
+        klipyGifSearchDebounceTimer = window.setTimeout(() => {
+            klipyGifSearchDebounceTimer = null;
+            loadKlipyGifResults(menu);
+        }, KLIPY_SEARCH_DEBOUNCE_MS);
+    }
+
+    function injectKlipyGifToolbar() {
+        if (!isSupportedPage()) return;
+        if (!klipyGifsEnabled) {
+            removeKlipyGifToolbar();
+            return;
+        }
+
+        installKlipyGifToolbarGlobalHandlers();
+
+        const textInput = getChatInput();
+        if (!textInput) return;
+        const mountContext = getChatInputToolbarMountContext(textInput);
+        const rail = getOrCreateChatInputToolbarRail(mountContext);
+        if (!(rail instanceof HTMLElement)) return;
+
+        let wrapper = document.getElementById(GIF_MENU_WRAPPER_ID);
+        if (!wrapper) {
+            wrapper = document.createElement('div');
+            wrapper.id = GIF_MENU_WRAPPER_ID;
+            wrapper.style.display = 'flex';
+            wrapper.style.alignItems = 'center';
+            wrapper.style.justifyContent = 'flex-start';
+            wrapper.style.position = 'relative';
+            wrapper.style.zIndex = '50';
+            wrapper.style.overflow = 'visible';
+            wrapper.style.pointerEvents = 'auto';
+        }
+
+        const phrasesWrapper = document.getElementById(PHRASES_MENU_WRAPPER_ID);
+        if (wrapper.parentNode !== rail) {
+            if (phrasesWrapper instanceof HTMLElement && phrasesWrapper.parentElement === rail) {
+                rail.insertBefore(wrapper, phrasesWrapper);
+            } else {
+                rail.appendChild(wrapper);
+            }
+        } else if (phrasesWrapper instanceof HTMLElement && phrasesWrapper.parentElement === rail && wrapper.nextElementSibling !== phrasesWrapper) {
+            rail.insertBefore(wrapper, phrasesWrapper);
+        }
+
+        wrapper.innerHTML = '';
+        wrapper.style.display = 'flex';
+
+        const toggleBtn = document.createElement('button');
+        toggleBtn.type = 'button';
+        toggleBtn.innerHTML = '<span style="margin-right:4px;">🎞</span> GIF';
+        toggleBtn.title = 'Ouvrir le picker GIF Klipy';
+        toggleBtn.setAttribute('aria-label', 'Ouvrir le picker GIF Klipy');
+        toggleBtn.style.background = 'linear-gradient(135deg, rgba(21,128,61,0.72) 0%, rgba(5,150,105,0.72) 100%)';
+        toggleBtn.style.border = '1px solid rgba(74,222,128,0.26)';
+        toggleBtn.style.color = '#ecfdf5';
+        toggleBtn.style.fontSize = '12px';
+        toggleBtn.style.fontWeight = '600';
+        toggleBtn.style.padding = '6px 14px';
+        toggleBtn.style.borderRadius = '999px';
+        toggleBtn.style.cursor = 'pointer';
+        toggleBtn.style.backdropFilter = 'blur(10px)';
+        toggleBtn.style.boxShadow = '0 4px 12px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.1)';
+        toggleBtn.style.transition = 'all 0.2s cubic-bezier(0.16, 1, 0.3, 1)';
+
+        toggleBtn.addEventListener('mouseenter', () => {
+            toggleBtn.style.filter = 'brightness(1.12)';
+            toggleBtn.style.transform = 'scale(1.02)';
+            toggleBtn.style.boxShadow = '0 6px 16px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.2)';
+            toggleBtn.style.border = '1px solid rgba(134,239,172,0.42)';
+        });
+
+        toggleBtn.addEventListener('mouseleave', () => {
+            toggleBtn.style.filter = 'brightness(1)';
+            toggleBtn.style.transform = 'scale(1)';
+            toggleBtn.style.boxShadow = '0 4px 12px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.1)';
+            toggleBtn.style.border = '1px solid rgba(74,222,128,0.26)';
+        });
+
+        const menu = document.createElement('div');
+        menu.setAttribute('data-tm-klipy-gif-menu', '1');
+        menu.style.display = 'none';
+        menu.style.position = 'absolute';
+        menu.style.bottom = 'calc(100% + 8px)';
+        menu.style.left = '0';
+        menu.style.width = 'min(640px, calc(100vw - 28px))';
+        menu.style.maxHeight = 'min(76vh, 620px)';
+        menu.style.background = 'rgba(17,24,39,0.9)';
+        menu.style.backdropFilter = 'blur(16px)';
+        menu.style.border = '1px solid rgba(255,255,255,0.08)';
+        menu.style.borderRadius = '16px';
+        menu.style.padding = '10px';
+        menu.style.boxShadow = '0 18px 45px rgba(0,0,0,0.48)';
+        menu.style.flexDirection = 'column';
+        menu.style.gap = '10px';
+        menu.style.zIndex = '1000';
+        menu.style.opacity = '0';
+        menu.style.transform = 'translateY(10px) scale(0.95)';
+        menu.style.transformOrigin = 'bottom left';
+        menu.style.transition = 'opacity 0.2s cubic-bezier(0.16, 1, 0.3, 1), transform 0.2s cubic-bezier(0.16, 1, 0.3, 1)';
+
+        const header = document.createElement('div');
+        header.style.display = 'flex';
+        header.style.alignItems = 'center';
+        header.style.justifyContent = 'space-between';
+        header.style.gap = '10px';
+
+        const title = document.createElement('div');
+        title.textContent = 'Klipy GIF';
+        title.style.fontSize = '12px';
+        title.style.fontWeight = '700';
+        title.style.color = '#f8fafc';
+
+        const subtitle = document.createElement('div');
+        subtitle.textContent = 'Insertion via balise [img][/img]';
+        subtitle.style.fontSize = '10px';
+        subtitle.style.color = '#94a3b8';
+
+        const titleBlock = document.createElement('div');
+        titleBlock.appendChild(title);
+        titleBlock.appendChild(subtitle);
+
+        const providerLink = document.createElement('a');
+        providerLink.href = 'https://klipy.com/';
+        providerLink.target = '_blank';
+        providerLink.rel = 'noreferrer noopener';
+        providerLink.textContent = 'Klipy';
+        providerLink.style.fontSize = '10px';
+        providerLink.style.fontWeight = '700';
+        providerLink.style.color = '#86efac';
+        providerLink.style.textDecoration = 'none';
+
+        header.appendChild(titleBlock);
+        header.appendChild(providerLink);
+
+        const searchInput = document.createElement('input');
+        searchInput.type = 'text';
+        searchInput.placeholder = 'Rechercher un GIF Klipy';
+        searchInput.setAttribute('data-tm-klipy-search', '1');
+        searchInput.style.width = '100%';
+        searchInput.style.background = 'rgba(15,23,42,0.75)';
+        searchInput.style.color = '#f8fafc';
+        searchInput.style.border = '1px solid rgba(255,255,255,0.08)';
+        searchInput.style.borderRadius = '12px';
+        searchInput.style.padding = '10px 12px';
+        searchInput.style.outline = 'none';
+        searchInput.style.fontSize = '12px';
+
+        const status = document.createElement('div');
+        status.setAttribute('data-tm-klipy-status', '1');
+        status.textContent = `Tendances Klipy. Tape au moins ${KLIPY_SEARCH_MIN_LENGTH} caractères pour chercher.`;
+        status.style.fontSize = '11px';
+        status.style.lineHeight = '1.45';
+        status.style.color = '#cbd5f5';
+
+        const results = document.createElement('div');
+        results.setAttribute('data-tm-klipy-results', '1');
+        results.style.display = 'grid';
+        results.style.gridTemplateColumns = 'repeat(3, minmax(0, 1fr))';
+        results.style.gap = '8px';
+        results.style.maxHeight = '420px';
+        results.style.overflowY = 'auto';
+        results.style.paddingRight = '2px';
+
+        const loadMoreBtn = document.createElement('button');
+        loadMoreBtn.type = 'button';
+        loadMoreBtn.setAttribute('data-tm-klipy-more', '1');
+        loadMoreBtn.textContent = 'Afficher plus';
+        loadMoreBtn.style.display = 'none';
+        loadMoreBtn.style.alignSelf = 'center';
+        loadMoreBtn.style.border = '1px solid rgba(74,222,128,0.22)';
+        loadMoreBtn.style.background = 'rgba(22,163,74,0.12)';
+        loadMoreBtn.style.color = '#dcfce7';
+        loadMoreBtn.style.borderRadius = '999px';
+        loadMoreBtn.style.padding = '8px 12px';
+        loadMoreBtn.style.fontSize = '11px';
+        loadMoreBtn.style.fontWeight = '700';
+        loadMoreBtn.style.cursor = 'pointer';
+
+        const footer = document.createElement('div');
+        footer.textContent = 'Le bouton colle une balise BBCode [img]URL[/img] dans le champ du chat.';
+        footer.style.fontSize = '10px';
+        footer.style.lineHeight = '1.45';
+        footer.style.color = '#64748b';
+
+        menu.appendChild(header);
+        menu.appendChild(searchInput);
+        menu.appendChild(status);
+        menu.appendChild(results);
+        menu.appendChild(loadMoreBtn);
+        menu.appendChild(footer);
+
+        toggleBtn.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+
+            if (menu.dataset.tmOpen === '1') {
+                hideKlipyGifMenu(menu);
+                return;
+            }
+
+            closeSavedPhrasesMenu();
+            closeKlipyGifMenu();
+            showKlipyGifMenu(menu);
+
+            if (menu.dataset.tmKlipyLoaded !== '1') {
+                loadKlipyGifResults(menu);
+            }
+
+            searchInput.focus();
+        });
+
+        searchInput.addEventListener('input', () => {
+            delete menu.dataset.tmKlipyLoaded;
+            delete menu.dataset.tmKlipyNext;
+            scheduleKlipyGifSearch(menu);
+        });
+
+        searchInput.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                clearKlipyGifSearchDebounce();
+                loadKlipyGifResults(menu);
+            }
+
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                hideKlipyGifMenu(menu);
+            }
+        });
+
+        loadMoreBtn.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            loadKlipyGifResults(menu, { append: true });
+        });
+
+        menu.addEventListener('click', (event) => {
+            event.stopPropagation();
+        });
+
+        wrapper.appendChild(toggleBtn);
+        wrapper.appendChild(menu);
+        syncChatInputToolbarReservedSpace(textInput);
+        syncNativeChatInputActionButtons(textInput);
     }
 
     function startObserver() {
@@ -6382,6 +7891,11 @@
         const replyContextText = getMessageReplyContextText(messageEl);
         const messageTimestamp = getMessageTimestampText(messageEl);
         const messageTimestampKey = parseMessageTimestampKey(messageTimestamp);
+        const normalizedMessageText = normalizeMentionComparableText(messageText);
+        const normalizedReplyContextText = normalizeMentionComparableText(replyContextText).replace(/^@+/, '');
+        const stableTimestampToken = messageTimestampKey > 0
+            ? String(messageTimestampKey)
+            : normalizeMentionComparableText(messageTimestamp);
 
         if (!username || (!messageText && !replyContextText)) {
             logMentionDebug('signature: invalid message data', {
@@ -6403,8 +7917,15 @@
             });
         }
 
+        const signatureParts = [username, stableTimestampToken, normalizedMessageText];
+
+        // Keep reply-context-only mentions distinct without making home/chat hashes diverge.
+        if (!normalizedMessageText && normalizedReplyContextText) {
+            signatureParts.push(`reply:${normalizedReplyContextText}`);
+        }
+
         return {
-            hash: hashString(`${location.pathname}|${username}|${messageTimestamp}|${replyContextText}|${messageText}`),
+            hash: hashString(signatureParts.join('|')),
             messageTimestamp,
             messageTimestampKey
         };
@@ -6555,11 +8076,14 @@
         picker.style.right = 'auto';
         picker.style.left = '-9999px';
         picker.style.top = '-9999px';
+        picker.style.zIndex = '260';
 
         const rect = picker.getBoundingClientRect();
         const maxLeft = Math.max(8, window.innerWidth - rect.width - 8);
         const maxTop = Math.max(8, window.innerHeight - rect.height - 8);
-        const nextLeft = clamp(clientX + LONG_PRESS_REACTION_PICKER_OFFSET_X, 8, maxLeft);
+        const nextLeft = messageActionsLeftEnabled
+            ? clamp(clientX - rect.width - LONG_PRESS_REACTION_PICKER_OFFSET_X, 8, maxLeft)
+            : clamp(clientX + LONG_PRESS_REACTION_PICKER_OFFSET_X, 8, maxLeft);
         const nextTop = clamp(clientY + LONG_PRESS_REACTION_PICKER_OFFSET_Y, 8, maxTop);
 
         picker.style.left = `${nextLeft}px`;
@@ -7122,6 +8646,27 @@
         }, true);
     }
 
+    function installNativeReactionButtonPositionHandler() {
+        document.addEventListener('click', (event) => {
+            if (modalOpen || !isChatPage() || !messageActionsLeftEnabled) return;
+
+            const target = event.target;
+            if (!(target instanceof Element)) return;
+
+            const clickedButton = target.closest('button');
+            if (!(clickedButton instanceof HTMLButtonElement)) return;
+
+            const messageEl = findMessageElementFromTarget(clickedButton);
+            if (!messageEl || !messageEl.contains(clickedButton)) return;
+
+            const reactionButton = getMessageReactionActionButton(messageEl);
+            if (!(reactionButton instanceof HTMLButtonElement) || reactionButton.disabled) return;
+            if (clickedButton !== reactionButton && !reactionButton.contains(clickedButton)) return;
+
+            positionReactionPickerNearPointer(event.clientX, event.clientY);
+        }, true);
+    }
+
     function clearLongPressReactionState() {
         if (!longPressReactionState) return;
 
@@ -7260,10 +8805,13 @@
             statsCollapsed = loadStatsCollapsed();
             statsHidden = loadStatsHidden();
             chatScrollbarEnabled = loadChatScrollbarEnabled();
+            messageActionsLeftEnabled = loadMessageActionsLeftEnabled();
+            hideChatFooterEnabled = loadHideChatFooterEnabled();
             lightThemeEnabled = loadLightThemeEnabled();
 
             if (isHomePage() && !getHomepageChatContainer()) {
                 removeSavedPhrasesToolbar();
+                removeKlipyGifToolbar();
                 stopObserver();
                 return;
             }
@@ -7273,7 +8821,14 @@
             applyBoxPosition();
             applyLightThemeState();
             applyChatPageScrollbarState();
+            applyMessageActionsPositionState();
+            applyChatFooterVisibilityState();
+            applyHomeChatPopoverState();
+            applyNativeChatInputPopoverState();
             injectSavedPhrasesToolbar();
+            injectKlipyGifToolbar();
+            applyChatInputToolbarAlignmentState();
+            syncNativeChatInputActionButtons();
 
             if (isHomePage() && homeChatCollapsed) {
                 stopObserver();
@@ -7284,12 +8839,18 @@
         } else {
             lightThemeEnabled = false;
             applyLightThemeState();
+            applyMessageActionsPositionState();
+            applyChatFooterVisibilityState();
+            applyHomeChatPopoverState();
+            applyNativeChatInputPopoverState();
             stopObserver();
             removeSavedPhrasesToolbar();
+            removeKlipyGifToolbar();
             removeStatsBox();
             closeSettingsModal();
             hideImagePreview();
             removeToast();
+            syncNativeChatInputActionButtons();
         }
     }
 
@@ -7314,9 +8875,13 @@
                 lastChatContextKey = getCurrentChatContextKey();
                 clearSavedPhrasesReplyContext();
                 injectSavedPhrasesToolbar();
+                injectKlipyGifToolbar();
+                applyChatInputToolbarAlignmentState();
+                syncNativeChatInputActionButtons();
                 processAllMessages();
             } else if (isHomePage() && !getHomepageChatContainer()) {
                 removeSavedPhrasesToolbar();
+                removeKlipyGifToolbar();
                 stopObserver();
             } else if (isHomePage() && needsHomepageCollapseUiRefresh()) {
                 syncHomepageCollapseUi();
@@ -7325,16 +8890,34 @@
             } else if (isSupportedPage()) {
                 if (!savedPhrasesEnabled) {
                     removeSavedPhrasesToolbar();
-                    return;
+                }
+
+                if (!klipyGifsEnabled) {
+                    removeKlipyGifToolbar();
                 }
 
                 const textInput = getChatInput();
                 if (textInput) {
-                    const inputArea = textInput.closest('form') || textInput.parentElement;
-                    const wrapper = document.getElementById(PHRASES_MENU_WRAPPER_ID);
-                    if (inputArea && inputArea.parentNode && (!wrapper || wrapper.parentNode !== inputArea)) {
+                    const mountContext = getChatInputToolbarMountContext(textInput);
+                    const mountParent = mountContext.mountParent;
+                    const phrasesWrapper = document.getElementById(PHRASES_MENU_WRAPPER_ID);
+                    const gifWrapper = document.getElementById(GIF_MENU_WRAPPER_ID);
+
+                    if (
+                        savedPhrasesEnabled &&
+                        savedPhrases.length > 0 &&
+                        mountParent &&
+                        (!phrasesWrapper || !mountParent.contains(phrasesWrapper))
+                    ) {
                         injectSavedPhrasesToolbar();
                     }
+
+                    if (klipyGifsEnabled && mountParent && (!gifWrapper || !mountParent.contains(gifWrapper))) {
+                        injectKlipyGifToolbar();
+                    }
+
+                    applyChatInputToolbarAlignmentState();
+                    syncNativeChatInputActionButtons(textInput);
                 }
             }
         }, 500);
@@ -7357,6 +8940,11 @@
         window.addEventListener('popstate', () => {
             setTimeout(refreshForRoute, 50);
         });
+
+        window.addEventListener('resize', () => {
+            if (!isChatPage() || !messageActionsLeftEnabled) return;
+            processAllMessages();
+        });
     }
 
     document.addEventListener('keydown', function (e) {
@@ -7375,6 +8963,7 @@
         installQuickToggleHandler();
         installNativeReplyShortcutHandler();
         installSavedPhrasesReplyContextTracker();
+        installNativeReactionButtonPositionHandler();
         installNativeReactionShortcutHandler();
         installImagePreviewHandler();
         installRouteWatcher();
