@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torr9 Chat - Shoutbox 2.0
 // @namespace    https://github.com/SaltedButch/torr9-scripting
-// @version      2.51
+// @version      2.52
 // @description  Blacklist, mise en avant, mentions, réponses rapides contextuelles, Gif et confort avancé pour la shoutbox Torr9
 // @icon         https://torr9.net/favicon.ico?favicon.71918ed5.ico`
 // @author       Butchered
@@ -7343,12 +7343,48 @@
             menu.style.left = 'auto';
             menu.style.right = '0';
             menu.style.transformOrigin = 'bottom right';
+            if (menu.dataset.tmOpen === '1') {
+                positionKlipyGifMenu(menu);
+            }
             return;
         }
 
         menu.style.left = '0';
         menu.style.right = 'auto';
         menu.style.transformOrigin = 'bottom left';
+        if (menu.dataset.tmOpen === '1') {
+            positionKlipyGifMenu(menu);
+        }
+    }
+
+    function positionKlipyGifMenu(menu) {
+        if (!(menu instanceof HTMLElement)) return;
+
+        const anchor = menu.parentElement;
+        if (!(anchor instanceof HTMLElement)) return;
+
+        const anchorRect = anchor.getBoundingClientRect();
+        if (anchorRect.width <= 0 || anchorRect.height <= 0) return;
+
+        menu.style.setProperty('position', 'fixed', 'important');
+        menu.style.setProperty('right', 'auto', 'important');
+        menu.style.setProperty('bottom', 'auto', 'important');
+        menu.style.setProperty('left', '-9999px', 'important');
+        menu.style.setProperty('top', '-9999px', 'important');
+        menu.style.setProperty('z-index', isHomePage() ? '1400' : '1200', 'important');
+
+        const menuRect = menu.getBoundingClientRect();
+        if (menuRect.width <= 0 || menuRect.height <= 0) return;
+
+        const maxLeft = Math.max(8, window.innerWidth - menuRect.width - 8);
+        const maxTop = Math.max(8, window.innerHeight - menuRect.height - 8);
+        const nextLeft = chatInputToolbarAlignRight
+            ? clamp(anchorRect.right - menuRect.width, 8, maxLeft)
+            : clamp(anchorRect.left, 8, maxLeft);
+        const nextTop = clamp(anchorRect.top - menuRect.height - 8, 8, maxTop);
+
+        menu.style.setProperty('left', `${nextLeft}px`, 'important');
+        menu.style.setProperty('top', `${nextTop}px`, 'important');
     }
 
     function clearKlipyGifSearchDebounce() {
@@ -7373,6 +7409,7 @@
         clearKlipyGifMenuHideTimer(menu);
         menu.style.display = 'flex';
         menu.dataset.tmOpen = '1';
+        positionKlipyGifMenu(menu);
         void menu.offsetWidth;
         menu.style.opacity = '1';
         menu.style.transform = 'translateY(0) scale(1)';
@@ -9071,6 +9108,11 @@
         });
 
         window.addEventListener('resize', () => {
+            const gifMenu = getKlipyGifMenu();
+            if (gifMenu instanceof HTMLElement && gifMenu.dataset.tmOpen === '1') {
+                positionKlipyGifMenu(gifMenu);
+            }
+
             if (!isChatPage() || !messageActionsLeftEnabled) return;
             processAllMessages();
         });
