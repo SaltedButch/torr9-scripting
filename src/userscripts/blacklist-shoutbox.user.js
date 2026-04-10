@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torr9 Chat - Shoutbox 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.50
+// @version      2.51
 // @description  Blacklist, mise en avant, mentions, réponses rapides contextuelles, Gif et confort avancé pour la shoutbox Torr9
 // @icon         https://torr9.net/favicon.ico?favicon.71918ed5.ico`
 // @author       Butchered
