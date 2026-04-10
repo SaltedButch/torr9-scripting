@@ -1,8 +1,9 @@
 // ==UserScript==
 // @name         Torr9 Chat - Shoutbox 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.50
+// @version      2.51
 // @description  Blacklist, mise en avant, mentions, réponses rapides contextuelles, Gif et confort avancé pour la shoutbox Torr9
+// @icon         https://torr9.net/favicon.ico?favicon.71918ed5.ico`
 // @author       Butchered
 // @match        https://torr9.net/*
 // @grant        none
@@ -63,6 +64,9 @@
     const MAX_CHAT_FONT_SCALE = 1.7;
     const DEFAULT_CHAT_SCROLLBAR_THICKNESS = 18;
     const DEFAULT_CHAT_SCROLLBAR_THUMB_BORDER = 4;
+    const STATS_DISPLAY_MODE_EXPANDED = 'expanded';
+    const STATS_DISPLAY_MODE_COMPACT = 'compact';
+    const STATS_DISPLAY_MODE_MINI = 'mini';
     const MAX_STATS_RIGHT_PERCENT = 100;
     const MAX_STATS_BOTTOM_PERCENT = 95;
     const MAX_RECENT_MENTION_SOUND_RECORDS = 40;
@@ -118,7 +122,7 @@
     let hoveredMessageImage = null;
     let debugMode = loadDebugMode();
     let homeChatCollapsed = loadHomeChatCollapsed();
-    let statsCollapsed = loadStatsCollapsed();
+    let statsDisplayMode = loadStatsDisplayMode();
     let statsHidden = loadStatsHidden();
     let statsUpdateFrame = null;
     let toastHideTimer = null;
@@ -955,17 +959,31 @@
         localStorage.setItem(STORAGE_KEY_HOME_COLLAPSED, homeChatCollapsed ? '1' : '0');
     }
 
-    function loadStatsCollapsed() {
+    function normalizeStatsDisplayMode(value) {
+        const rawValue = String(value || '').trim().toLowerCase();
+
+        if (rawValue === '1' || rawValue === 'true' || rawValue === STATS_DISPLAY_MODE_COMPACT) {
+            return STATS_DISPLAY_MODE_COMPACT;
+        }
+
+        if (rawValue === STATS_DISPLAY_MODE_MINI) {
+            return STATS_DISPLAY_MODE_MINI;
+        }
+
+        return STATS_DISPLAY_MODE_EXPANDED;
+    }
+
+    function loadStatsDisplayMode() {
         try {
-            return localStorage.getItem(getStatsCollapsedStorageKey()) === '1';
+            return normalizeStatsDisplayMode(localStorage.getItem(getStatsCollapsedStorageKey()));
         } catch (e) {
-            return false;
+            return STATS_DISPLAY_MODE_EXPANDED;
         }
     }
 
-    function saveStatsCollapsed(value) {
-        statsCollapsed = !!value;
-        localStorage.setItem(getStatsCollapsedStorageKey(), statsCollapsed ? '1' : '0');
+    function saveStatsDisplayMode(value) {
+        statsDisplayMode = normalizeStatsDisplayMode(value);
+        localStorage.setItem(getStatsCollapsedStorageKey(), statsDisplayMode);
     }
 
     function loadStatsHidden() {
@@ -2344,6 +2362,25 @@
             .sort((a, b) => b[1] - a[1]);
 
         const total = entries.reduce((sum, [, count]) => sum + count, 0);
+        const isCompactMode = statsDisplayMode === STATS_DISPLAY_MODE_COMPACT;
+        const isMiniMode = statsDisplayMode === STATS_DISPLAY_MODE_MINI;
+        const createStatsActionButtonHtml = (action, title, label, fontSize = '15px') => `
+            <button type="button" data-tm-action="${action}" title="${title}" aria-label="${title}" style="
+                border:none;
+                background:#27272a;
+                color:#d4d4d8;
+                border-radius:8px;
+                width:24px;
+                height:24px;
+                display:inline-flex;
+                align-items:center;
+                justify-content:center;
+                cursor:pointer;
+                font-size:${fontSize};
+                font-weight:600;
+                line-height:1;
+            ">${label}</button>
+        `;
         const settingsButtonHtml = `
             <button type="button" data-tm-action="open-settings" title="Ouvrir les paramètres" aria-label="Ouvrir les paramètres" style="
                 border:none;
@@ -2362,39 +2399,16 @@
             ">⚙</button>
         `;
 
-        if (statsCollapsed) {
+        if (isMiniMode) {
             return `
-                <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px;">
-                    <div style="font-weight:700;font-size:13px;color:#fff;">
-                        Messages bloqués
+                <div style="display:flex;align-items:center;gap:10px;white-space:nowrap;">
+                    <div style="font-size:12px;color:#cfcfcf;">
+                        Total : <span style="color:#fff;font-weight:700;">${total}</span>
                     </div>
-                    <div style="display:flex;align-items:center;gap:6px;">
+                    <div style="display:flex;align-items:center;gap:6px;margin-left:auto;">
                         ${settingsButtonHtml}
-                        <button type="button" data-tm-action="toggle-stats-collapsed" title="Développer la stats box" aria-label="Développer la stats box" style="
-                            border:none;
-                            background:#27272a;
-                            color:#d4d4d8;
-                            border-radius:8px;
-                            width:24px;
-                            height:24px;
-                            display:inline-flex;
-                            align-items:center;
-                            justify-content:center;
-                            cursor:pointer;
-                            font-size:15px;
-                            font-weight:600;
-                            line-height:1;
-                        ">+</button>
+                        ${createStatsActionButtonHtml('set-stats-display-expanded', 'Développer la stats box', '+')}
                     </div>
-                </div>
-
-                <div style="font-size:12px;color:#cfcfcf;">
-                    Total session : <span style="color:#fff;font-weight:700;">${total}</span>
-                </div>
-
-                <div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.08);font-size:11px;color:#9ca3af;line-height:1.45;">
-                    <p>Ctrl+Alt+C ou Ctrl+Cmd+C : paramètres · Alt+clic pseudo : pour blacklister</p>
-                    <p>${debugMode ? 'toggle · Debug ON' : ''}</p>
                 </div>
             `;
         }
@@ -2406,21 +2420,14 @@
                 </div>
                 <div style="display:flex;align-items:center;gap:6px;">
                     ${settingsButtonHtml}
-                    <button type="button" data-tm-action="toggle-stats-collapsed" title="Réduire la stats box" aria-label="Réduire la stats box" style="
-                        border:none;
-                        background:#27272a;
-                        color:#d4d4d8;
-                        border-radius:8px;
-                        width:24px;
-                        height:24px;
-                        display:inline-flex;
-                        align-items:center;
-                        justify-content:center;
-                        cursor:pointer;
-                        font-size:15px;
-                        font-weight:600;
-                        line-height:1;
-                    ">-</button>
+                    ${isCompactMode
+                        ? createStatsActionButtonHtml('set-stats-display-mini', 'Passer la stats box en pastille', '--', '16px')
+                        : createStatsActionButtonHtml('set-stats-display-compact', 'Réduire la stats box', '-', '15px')
+                    }
+                    ${isCompactMode
+                        ? createStatsActionButtonHtml('set-stats-display-expanded', 'Développer la stats box', '+', '15px')
+                        : ''
+                    }
                 </div>
             </div>
 
@@ -2430,13 +2437,13 @@
             </div>
         `;
 
-        if (entries.length === 0) {
+        if (!isCompactMode && entries.length === 0) {
             html += `
                 <div style="font-size:12px;color:#9ca3af;">
                     Aucun message bloqué pour l’instant
                 </div>
             `;
-        } else {
+        } else if (!isCompactMode) {
             html += `<div style="display:flex;flex-direction:column;gap:6px;">`;
 
             for (const [user, count] of entries) {
@@ -2756,9 +2763,29 @@
         statsBox.style.bottom = `${clamp(pos.bottomPercent, 0, MAX_STATS_BOTTOM_PERCENT)}%`;
     }
 
-    function applyStatsBoxCollapsedState() {
+    function applyStatsBoxDisplayModeState() {
         if (!statsBox) return;
-        statsBox.style.width = statsCollapsed ? '220px' : '240px';
+
+        if (statsDisplayMode === STATS_DISPLAY_MODE_MINI) {
+            statsBox.style.width = 'auto';
+            statsBox.style.maxWidth = 'calc(100vw - 24px)';
+            statsBox.style.maxHeight = 'none';
+            statsBox.style.overflow = 'hidden';
+            statsBox.style.overflowY = 'hidden';
+            statsBox.style.overflowX = 'hidden';
+            statsBox.style.padding = '8px 10px';
+            statsBox.style.borderRadius = '999px';
+            return;
+        }
+
+        statsBox.style.width = '240px';
+        statsBox.style.maxWidth = 'calc(100vw - 24px)';
+        statsBox.style.maxHeight = '50vh';
+        statsBox.style.overflow = 'hidden';
+        statsBox.style.overflowY = 'auto';
+        statsBox.style.overflowX = 'hidden';
+        statsBox.style.padding = '12px';
+        statsBox.style.borderRadius = '14px';
     }
 
     function applyStatsBoxVisibilityState() {
@@ -2774,7 +2801,7 @@
             statsBox = existing;
             statsContent = existing.firstElementChild;
             bindStatsBoxEvents();
-            applyStatsBoxCollapsedState();
+            applyStatsBoxDisplayModeState();
             applyStatsBoxVisibilityState();
             applyBoxPosition();
             updateStatsBox();
@@ -2803,7 +2830,7 @@
         document.body.appendChild(statsBox);
 
         bindStatsBoxEvents();
-        applyStatsBoxCollapsedState();
+        applyStatsBoxDisplayModeState();
         applyStatsBoxVisibilityState();
         applyBoxPosition();
         updateStatsBox();
@@ -3470,6 +3497,7 @@
         modalOpen = false;
         hideImagePreview();
         applyChatFontScale(loadChatFontScale());
+        applyStatsBoxDisplayModeState();
         applyStatsBoxVisibilityState();
         syncHomepageCollapseUi(true);
         applyBoxPosition(loadPosition());
@@ -4780,11 +4808,25 @@
         refreshPickerList();
     }
 
-    function toggleStatsCollapsed(forceValue = !statsCollapsed) {
-        saveStatsCollapsed(forceValue);
-        applyStatsBoxCollapsedState();
+    function setStatsDisplayMode(nextMode) {
+        const normalizedMode = normalizeStatsDisplayMode(nextMode);
+        if (statsDisplayMode === normalizedMode) return;
+
+        saveStatsDisplayMode(normalizedMode);
+        applyStatsBoxDisplayModeState();
         updateStatsBox();
-        showToast(statsCollapsed ? 'Stats box réduite.' : 'Stats box développée.');
+
+        if (statsDisplayMode === STATS_DISPLAY_MODE_MINI) {
+            showToast('Stats box minimisée.');
+            return;
+        }
+
+        if (statsDisplayMode === STATS_DISPLAY_MODE_COMPACT) {
+            showToast('Stats box réduite.');
+            return;
+        }
+
+        showToast('Stats box développée.');
     }
 
     function handleStatsBoxActionClick(event) {
@@ -4797,10 +4839,24 @@
 
         const action = actionEl.getAttribute('data-tm-action');
 
-        if (action === 'toggle-stats-collapsed') {
+        if (action === 'set-stats-display-expanded') {
             event.preventDefault();
             event.stopPropagation();
-            toggleStatsCollapsed();
+            setStatsDisplayMode(STATS_DISPLAY_MODE_EXPANDED);
+            return;
+        }
+
+        if (action === 'set-stats-display-compact') {
+            event.preventDefault();
+            event.stopPropagation();
+            setStatsDisplayMode(STATS_DISPLAY_MODE_COMPACT);
+            return;
+        }
+
+        if (action === 'set-stats-display-mini') {
+            event.preventDefault();
+            event.stopPropagation();
+            setStatsDisplayMode(STATS_DISPLAY_MODE_MINI);
             return;
         }
 
@@ -6543,6 +6599,8 @@
             if (!(rail instanceof HTMLElement)) return;
             rail.style.justifyContent = chatInputToolbarAlignRight ? 'flex-end' : 'flex-start';
         });
+
+        applyKlipyGifMenuAlignmentState();
     }
 
     function shouldUseChatInputToolbarRail() {
@@ -6697,13 +6755,21 @@
 
                 Array.from(source.children).forEach((child) => {
                     if (!(child instanceof HTMLElement)) return;
-                    if (!child.classList.contains('bottom-24')) return;
+                    if (!child.classList.contains('bottom-12') && !child.classList.contains('bottom-24')) return;
+
+                    const computedStyle = window.getComputedStyle(child);
+                    if (computedStyle.position !== 'absolute' && computedStyle.position !== 'fixed') return;
 
                     child.classList.remove('bottom-24');
-                    child.classList.add('bottom-12');
+                    if (!child.classList.contains('bottom-12')) {
+                        child.classList.add('bottom-12');
+                    }
+                    child.style.removeProperty('position');
+                    child.style.removeProperty('left');
+                    child.style.removeProperty('right');
                     child.style.removeProperty('top');
-                    child.style.removeProperty('z-index');
                     child.style.removeProperty('bottom');
+                    child.style.removeProperty('z-index');
                 });
             }
         });
@@ -6716,15 +6782,59 @@
         });
     }
 
+    function getMovedNativeChatInputActionHostByPlaceholderId(placeholderId) {
+        const safePlaceholderId = String(placeholderId || '').trim();
+        if (!safePlaceholderId) return null;
+
+        const movedButton = document.querySelector(
+            `[data-tm-native-chat-input-action-moved="1"][data-tm-native-chat-input-action-placeholder-id="${safePlaceholderId}"]`
+        );
+        if (!(movedButton instanceof HTMLButtonElement)) return null;
+
+        const host = movedButton.closest(`[${NATIVE_CHAT_INPUT_ACTION_HOST_ATTR}="1"]`);
+        return host instanceof HTMLElement ? host : null;
+    }
+
+    function positionMovedNativeChatInputPopover(popup, host) {
+        if (!(popup instanceof HTMLElement) || !(host instanceof HTMLElement)) return;
+
+        const hostRect = host.getBoundingClientRect();
+        if (hostRect.width <= 0 || hostRect.height <= 0) return;
+
+        popup.style.setProperty('position', 'fixed', 'important');
+        popup.style.setProperty('right', 'auto', 'important');
+        popup.style.setProperty('bottom', 'auto', 'important');
+        popup.style.setProperty('left', '-9999px', 'important');
+        popup.style.setProperty('top', '-9999px', 'important');
+        popup.style.setProperty('z-index', isHomePage() ? '1400' : '120', 'important');
+
+        const popupRect = popup.getBoundingClientRect();
+        if (popupRect.width <= 0 || popupRect.height <= 0) return;
+
+        const maxLeft = Math.max(8, window.innerWidth - popupRect.width - 8);
+        const maxTop = Math.max(8, window.innerHeight - popupRect.height - 8);
+        const nextLeft = chatInputToolbarAlignRight
+            ? clamp(hostRect.right - popupRect.width, 8, maxLeft)
+            : clamp(hostRect.left, 8, maxLeft);
+        const nextTop = clamp(hostRect.top - popupRect.height - 8, 8, maxTop);
+
+        popup.style.setProperty('left', `${nextLeft}px`, 'important');
+        popup.style.setProperty('top', `${nextTop}px`, 'important');
+    }
+
     function syncMovedNativeChatInputActionPopovers() {
         applyNativeChatInputPopoverState();
-        if (!isChatPage()) return;
+        if (!isSupportedPage()) return;
 
         document.querySelectorAll(`[${NATIVE_CHAT_INPUT_ACTION_PLACEHOLDER_ATTR}]`).forEach((placeholder) => {
             if (!(placeholder instanceof HTMLElement)) return;
 
             const source = placeholder.parentElement;
             if (!(source instanceof HTMLElement)) return;
+
+            const placeholderId = placeholder.getAttribute(NATIVE_CHAT_INPUT_ACTION_PLACEHOLDER_ATTR) || '';
+            const host = getMovedNativeChatInputActionHostByPlaceholderId(placeholderId);
+            if (!(host instanceof HTMLElement)) return;
 
             source.setAttribute(NATIVE_CHAT_INPUT_ACTION_SOURCE_ATTR, '1');
             source.style.overflow = 'visible';
@@ -6737,11 +6847,12 @@
                 const computedStyle = window.getComputedStyle(child);
                 if (computedStyle.position !== 'absolute' && computedStyle.position !== 'fixed') return;
 
-                child.classList.remove('bottom-12');
-                child.classList.add('bottom-24');
-                child.style.top = 'auto';
-                child.style.removeProperty('bottom');
-                child.style.zIndex = '120';
+                if (isChatPage()) {
+                    child.classList.remove('bottom-12');
+                    child.classList.add('bottom-24');
+                }
+
+                positionMovedNativeChatInputPopover(child, host);
             });
         });
     }
@@ -7173,8 +7284,8 @@
         menu.style.padding = '6px';
         menu.style.minWidth = '220px';
         menu.style.maxWidth = '300px';
-        menu.style.maxHeight = '280px';
-        menu.style.overflowY = 'auto'; // custom scrollbar si possible, sinon normal
+        menu.style.maxHeight = 'none';
+        menu.style.overflow = 'hidden';
         menu.style.boxShadow = '0 10px 40px rgba(0,0,0,0.6)';
         menu.style.flexDirection = 'column';
         menu.style.gap = '2px';
@@ -7220,6 +7331,21 @@
 
         const menu = wrapper.querySelector('[data-tm-klipy-gif-menu="1"]');
         return menu instanceof HTMLElement ? menu : null;
+    }
+
+    function applyKlipyGifMenuAlignmentState(menu = getKlipyGifMenu()) {
+        if (!(menu instanceof HTMLElement)) return;
+
+        if (chatInputToolbarAlignRight) {
+            menu.style.left = 'auto';
+            menu.style.right = '0';
+            menu.style.transformOrigin = 'bottom right';
+            return;
+        }
+
+        menu.style.left = '0';
+        menu.style.right = 'auto';
+        menu.style.transformOrigin = 'bottom left';
     }
 
     function clearKlipyGifSearchDebounce() {
@@ -7642,8 +7768,8 @@
         menu.style.zIndex = '1000';
         menu.style.opacity = '0';
         menu.style.transform = 'translateY(10px) scale(0.95)';
-        menu.style.transformOrigin = 'bottom left';
         menu.style.transition = 'opacity 0.2s cubic-bezier(0.16, 1, 0.3, 1), transform 0.2s cubic-bezier(0.16, 1, 0.3, 1)';
+        applyKlipyGifMenuAlignmentState(menu);
 
         const header = document.createElement('div');
         header.style.display = 'flex';
@@ -8802,7 +8928,7 @@
         lastChatContextKey = currentChatContextKey;
 
         if (isSupportedPage()) {
-            statsCollapsed = loadStatsCollapsed();
+            statsDisplayMode = loadStatsDisplayMode();
             statsHidden = loadStatsHidden();
             chatScrollbarEnabled = loadChatScrollbarEnabled();
             messageActionsLeftEnabled = loadMessageActionsLeftEnabled();
