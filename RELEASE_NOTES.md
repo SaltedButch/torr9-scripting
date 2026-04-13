@@ -1,0 +1,43 @@
+# Release Notes
+
+Ce fichier suit l'état fonctionnel du userscript à partir de la version actuellement en place. Aucun historique antérieur n'est reconstruit.
+
+## Règle de mise à jour
+
+- Ajouter une ligne explicative dans ce fichier à chaque nouvelle feature livrée.
+- Ouvrir une nouvelle section seulement quand la version du userscript change.
+- Garder des formulations courtes, orientées usage, sans reconstituer les anciennes releases.
+
+## Version en préparation
+
+
+## v2.60 - 2026-04-13
+
+- Ajustement du placement des actions natives `Répondre` et `Réagir` quand leur affichage à gauche est activé, pour mieux dégager le texte du message.
+- Ajout d'une visionneuse grand format pour les images prévisualisées, ouvrable au clic depuis l'image, le lien image ou l'aperçu flottant.
+- Ajout d’un bouton `play` sur les liens YouTube pour ouvrir la vidéo dans un player flottant, déplaçable, redimensionnable et maintenu dans l’écran, sans changer le clic normal sur le lien.
+- Affichage du titre de la vidéo dans le player YouTube, avec mise à jour automatique quand on relance une autre vidéo dans la même fenêtre.
+- Ajout d’un mode AFK activable au clavier sur le chat en cours, avec réponse automatique, historique dédié des mentions et réponses, et panneau persistant pour relire les messages au retour.
+- Limitation globale des réponses automatiques du mode AFK à un envoi maximum par minute, même si plusieurs personnes mentionnent ou répondent entre-temps.
+- Ajout d’une coupure dure des réponses automatiques AFK après 30 minutes d’inactivité, tout en continuant à stocker les mentions et réponses reçues.
+- Désactivation automatique du mode AFK dès qu’un message est envoyé manuellement depuis l’input du chat, sans couper l’AFK lors des réponses automatiques du script.
+- Ajout d’un statut `Non lu / Lu` sur les entrées AFK, avec conservation illimitée des non-lus et limitation des lus aux 50 plus récents.
+- Ajout de la fermeture manuelle du panneau AFK quand le mode est inactif, avec réouverture au raccourci et déplacement du panneau à la souris.
+- Refonte du paramétrage des notifications sonores avec des pills `Désactivé / Accueil / Chat / Les deux`, et repli automatique des réglages audio quand le son est coupé.
+- Harmonisation des libellés, messages de validation et textes d’aide affichés dans les écrans du script, avec accents corrigés sans sur-traduire les termes techniques de l’interface.
+
+## v2.52 - Snapshot initial - 2026-04-13
+
+- Initialisation du fichier de release notes à partir de l'état réel du script, sans rétroaction sur les versions précédentes.
+- Blacklist de pseudos avec ajout ou retrait depuis les paramètres ou via `Alt+clic`, et comptage des messages bloqués pendant la session.
+- Stats box de suivi des messages bloqués, déplaçable, réductible, masquable et mémorisée séparément pour l'accueil et la page chat.
+- Masquage de la shoutbox sur la page d'accueil avec réglage persistant.
+- Mise en avant personnalisée d'utilisateurs avec couleur et opacité configurables.
+- Détection des mentions `@moi` avec surbrillance configurable, clignotement optionnel, conservation de la couleur et prise en compte possible des réponses citées.
+- Notifications sonores de mention avec plusieurs styles, URL audio personnalisée et délai anti-spam.
+- Réponses rapides sauvegardées avec activation dédiée, configuration complète, ajout rapide depuis le texte du chat, édition, suppression, import/export JSON et suggestions contextuelles.
+- Bouton GIF Klipy dans le chat avec tendances, recherche et insertion automatique en BBCode image.
+- Raccourcis d'interaction sur la page chat avec double-clic pour répondre et clic long pour ouvrir les réactions.
+- Déplacement optionnel des actions de message à gauche pour rendre `Répondre` et `Réagir` plus accessibles.
+- Réglages de confort avec taille de police, URLs cliquables, prévisualisation des liens directs d'images au survol, ascenseur visible du chat, alignement des boutons du chat à droite, masquage du footer sur la page chat et thème clair beta.
+- Mode debug qui n'efface pas les messages blacklistés mais les marque en rouge pour vérification.
