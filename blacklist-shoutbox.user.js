@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torr9 Chat - Shoutbox 2.0
 // @namespace    https://github.com/SaltedButch/torr9-scripting
-// @version      2.52
+// @version      2.60
 // @description  Blacklist, mise en avant, mentions, réponses rapides contextuelles, Gif et confort avancé pour la shoutbox Torr9
 // @icon         https://torr9.net/favicon.ico?favicon.71918ed5.ico`
 // @author       Butchered
@@ -40,16 +40,26 @@
     const STORAGE_KEY_SAVED_PHRASES_ENABLED = 'tm_torr9_saved_phrases_enabled';
     const STORAGE_KEY_KLIPY_GIFS_ENABLED = 'tm_torr9_klipy_gifs_enabled';
     const STORAGE_KEY_CHAT_INPUT_TOOLBAR_ALIGN_RIGHT = 'tm_torr9_chat_input_toolbar_align_right';
+    const STORAGE_KEY_AFK_STATE = 'tm_torr9_afk_state';
+    const STORAGE_KEY_AFK_ACTIVITY = 'tm_torr9_afk_activity';
+    const STORAGE_KEY_AFK_PANEL_POSITION = 'tm_torr9_afk_panel_position';
+    const STORAGE_KEY_AFK_PANEL_HIDDEN = 'tm_torr9_afk_panel_hidden';
     const PANEL_ID = 'tm-torr9-chat-stats';
     const MODAL_ID = 'tm-torr9-chat-modal';
     const OVERLAY_ID = 'tm-torr9-chat-overlay';
     const TOAST_ID = 'tm-torr9-chat-toast';
     const IMAGE_PREVIEW_ID = 'tm-torr9-image-preview';
+    const IMAGE_VIEWER_MODAL_ID = 'tm-torr9-image-viewer-modal';
+    const IMAGE_VIEWER_OVERLAY_ID = 'tm-torr9-image-viewer-overlay';
+    const YOUTUBE_PLAYER_ID = 'tm-torr9-youtube-player';
+    const AFK_PANEL_ID = 'tm-torr9-afk-panel';
     const HOME_COLLAPSE_BUTTON_ID = 'tm-home-chat-collapse-toggle';
     const PHRASES_MENU_WRAPPER_ID = 'tm-torr9-phrases-menu-wrapper';
     const GIF_MENU_WRAPPER_ID = 'tm-torr9-klipy-gif-wrapper';
     const MODAL_SCROLLBAR_STYLE_ID = 'tm-torr9-modal-scrollbar-style';
     const CHAT_SCROLLBAR_STYLE_ID = 'tm-torr9-chat-scrollbar-style';
+    const DEFAULT_YOUTUBE_PLAYER_TITLE = 'Player YouTube';
+    const DEFAULT_AFK_AUTO_REPLY_MESSAGE = 'Je suis AFK quelques minutes, je reviens rapidement.';
     const DEFAULT_HIGHLIGHT_COLOR = '#f59e0b';
     const DEFAULT_HIGHLIGHT_OPACITY = 14;
     const DEFAULT_MENTION_COLOR = '#22c55e';
@@ -58,6 +68,7 @@
     const DEFAULT_MENTION_KEEP_HIGHLIGHT = true;
     const DEFAULT_MENTION_INCLUDE_REPLY_CONTEXT = false;
     const DEFAULT_MENTION_SOUND_ENABLED = false;
+    const DEFAULT_MENTION_SOUND_SCOPE = 'off';
     const DEFAULT_MENTION_SOUND_STYLE = 'ping';
     const DEFAULT_MENTION_SOUND_CUSTOM_URL = '';
     const DEFAULT_MENTION_SOUND_COOLDOWN_SECONDS = 8;
@@ -73,6 +84,7 @@
     const MAX_STATS_RIGHT_PERCENT = 100;
     const MAX_STATS_BOTTOM_PERCENT = 95;
     const MAX_RECENT_MENTION_SOUND_RECORDS = 40;
+    const MAX_AFK_READ_ACTIVITY_RECORDS = 50;
     const MAX_SAVED_PHRASE_LENGTH = 1000;
     const MAX_VISIBLE_SAVED_PHRASES_IN_MENU = 5;
     const SAVED_PHRASES_EXPORT_VERSION = 1;
@@ -94,6 +106,7 @@
     const LIGHT_THEME_STYLE_ID = 'tm-torr9-light-theme-style';
     const LINKIFIED_URL_STYLE_ID = 'tm-torr9-linkified-url-style';
     const EMBEDDED_IMAGE_STYLE_ID = 'tm-torr9-embedded-image-style';
+    const YOUTUBE_LINK_ACTION_STYLE_ID = 'tm-torr9-youtube-link-action-style';
     const MESSAGE_ACTIONS_POSITION_STYLE_ID = 'tm-torr9-message-actions-position-style';
     const HIDE_CHAT_FOOTER_STYLE_ID = 'tm-torr9-hide-chat-footer-style';
     const HOME_CHAT_POPOVER_STYLE_ID = 'tm-torr9-home-chat-popover-style';
@@ -111,6 +124,10 @@
     const URL_CANDIDATE_RE = /(?:https?:\/\/|www\.)[^\s<>"']+/i;
     const URL_MATCH_RE = /(?:https?:\/\/|www\.)[^\s<>"']+/gi;
     const DIRECT_IMAGE_PATH_RE = /\.(?:avif|bmp|gif|jpe?g|png|svg|webp)$/i;
+    const MESSAGE_ACTIONS_LEFT_VERTICAL_OFFSET_PX = 10;
+    const AFK_AUTO_REPLY_GLOBAL_COOLDOWN_MS = 60 * 1000;
+    const AFK_AUTO_REPLY_PER_USER_COOLDOWN_MS = 5 * 60 * 1000;
+    const AFK_AUTO_REPLY_MAX_INACTIVITY_MS = 30 * 60 * 1000;
 
     const DEFAULT_POSITION = {
         rightPercent: 2,
@@ -122,6 +139,12 @@
     let statsContent = null;
     let routeWatcher = null;
     let modalOpen = false;
+    let imageViewerOpen = false;
+    let imageViewerKeydownHandler = null;
+    let youtubePlayerKeydownHandler = null;
+    let youtubePlayerResizeObserver = null;
+    let youtubePlayerViewportResizeHandler = null;
+    let youtubePlayerTitleRequestSerial = 0;
     let hoveredMessageImage = null;
     let debugMode = loadDebugMode();
     let homeChatCollapsed = loadHomeChatCollapsed();
@@ -153,6 +176,11 @@
     let klipyGifRequestSerial = 0;
     let savedPhrasesStorageNeedsRepair = false;
     let savedPhrasesReplyContext = null;
+    let afkAutomatedSendInFlight = false;
+    let afkState = loadAfkState();
+    let afkActivityRecords = loadAfkActivityRecords();
+    let afkPanelPosition = loadAfkPanelPosition();
+    let afkPanelHidden = loadAfkPanelHidden();
 
     const savedPhrases = loadSavedPhrases();
     if (savedPhrasesStorageNeedsRepair) {
@@ -165,6 +193,8 @@
     const mentionBlinkStates = new WeakMap();
     const mentionSoundNotifiedMessages = new WeakSet();
     const klipyGifResponseCache = new Map();
+    const youtubeVideoTitleCache = new Map();
+    const afkSeenMessageKeys = new Set();
 
     function isChatPage() {
         return location.pathname.startsWith('/chat');
@@ -186,6 +216,16 @@
 
     function getCurrentPageLabel() {
         return isChatPage() ? 'Chat' : 'Accueil';
+    }
+
+    function getCurrentContextLabel() {
+        if (isHomePage()) return 'Accueil';
+        if (!isChatPage()) return 'Autre';
+
+        const context = getCurrentChatContext();
+        if (!context) return 'Chat';
+        if (context.type === 'channel') return `#${context.name}`;
+        return context.name || 'Chat privé';
     }
 
     function getPositionStorageKey() {
@@ -418,6 +458,236 @@
     function saveChatInputToolbarAlignRight(value) {
         chatInputToolbarAlignRight = !!value;
         localStorage.setItem(STORAGE_KEY_CHAT_INPUT_TOOLBAR_ALIGN_RIGHT, chatInputToolbarAlignRight ? '1' : '0');
+    }
+
+    function normalizeAfkAutoReplyMessage(value) {
+        const normalizedMessage = normalizeSavedPhraseText(value, true);
+        return normalizedMessage || DEFAULT_AFK_AUTO_REPLY_MESSAGE;
+    }
+
+    function normalizeAfkPerUserReplyAtMap(value) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+
+        return Object.fromEntries(
+            Object.entries(value)
+                .map(([username, timestamp]) => [normalizeName(username), Math.max(0, Number(timestamp) || 0)])
+                .filter(([username, timestamp]) => !!username && timestamp > 0)
+        );
+    }
+
+    function normalizeAfkState(value) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+            return {
+                enabled: false,
+                contextKey: '',
+                contextLabel: '',
+                username: normalizeName(mentionSettings?.username || ''),
+                autoReplyMessage: DEFAULT_AFK_AUTO_REPLY_MESSAGE,
+                activatedAt: 0,
+                lastAutoReplyAt: 0,
+                perUserReplyAt: {}
+            };
+        }
+
+        return {
+            enabled: value.enabled === true,
+            contextKey: String(value.contextKey || '').trim(),
+            contextLabel: String(value.contextLabel || '').trim(),
+            username: normalizeName(value.username || mentionSettings?.username || ''),
+            autoReplyMessage: normalizeAfkAutoReplyMessage(value.autoReplyMessage),
+            activatedAt: Math.max(0, Number(value.activatedAt) || 0),
+            lastAutoReplyAt: Math.max(0, Number(value.lastAutoReplyAt) || 0),
+            perUserReplyAt: normalizeAfkPerUserReplyAtMap(value.perUserReplyAt)
+        };
+    }
+
+    function loadAfkState() {
+        try {
+            return normalizeAfkState(JSON.parse(localStorage.getItem(STORAGE_KEY_AFK_STATE) || 'null'));
+        } catch (e) {
+            return normalizeAfkState(null);
+        }
+    }
+
+    function saveAfkState(nextState) {
+        afkState = normalizeAfkState(nextState);
+        localStorage.setItem(STORAGE_KEY_AFK_STATE, JSON.stringify(afkState));
+    }
+
+    function buildAfkMessageKey(signature) {
+        if (!signature) return '';
+
+        const hash = String(signature.hash || '').trim();
+        const timestampKey = Math.max(0, Number(signature.messageTimestampKey) || 0);
+        if (!hash) return '';
+
+        return `${hash}:${timestampKey}`;
+    }
+
+    function normalizeAfkActivityRecord(value) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+
+        const signatureHash = String(value.signatureHash || '').trim();
+        const signatureTimestampKey = Math.max(0, Number(value.signatureTimestampKey) || 0);
+        const messageText = String(value.messageText || '').trim();
+        const replyContextText = String(value.replyContextText || '').trim();
+        const username = normalizeName(value.username || '');
+        const contextKey = String(value.contextKey || '').trim();
+        const contextLabel = String(value.contextLabel || '').trim();
+
+        if (!signatureHash || !username || (!messageText && !replyContextText)) {
+            return null;
+        }
+
+        return {
+            id: String(value.id || `${signatureHash}-${signatureTimestampKey || 'na'}`).trim(),
+            contextKey,
+            contextLabel,
+            username,
+            displayUsername: String(value.displayUsername || value.username || '').trim() || username,
+            messageText,
+            replyContextText,
+            reason: value.reason === 'reply' ? 'reply' : (value.reason === 'mention+reply' ? 'mention+reply' : 'mention'),
+            messageTimestamp: String(value.messageTimestamp || '').trim(),
+            capturedAt: Math.max(0, Number(value.capturedAt) || Date.now()),
+            isRead: value.isRead === true || Math.max(0, Number(value.readAt) || 0) > 0,
+            readAt: Math.max(0, Number(value.readAt) || 0),
+            autoReplySent: value.autoReplySent === true,
+            autoReplyStatus: String(value.autoReplyStatus || '').trim(),
+            autoReplyText: String(value.autoReplyText || '').trim(),
+            signatureHash,
+            signatureTimestampKey
+        };
+    }
+
+    function sortAfkActivityRecords(records = []) {
+        return records
+            .slice()
+            .sort((a, b) =>
+                Number(a.isRead) - Number(b.isRead) ||
+                (b.isRead ? Math.max(0, Number(b.readAt) || Number(b.capturedAt) || 0) : Math.max(0, Number(b.capturedAt) || 0)) -
+                (a.isRead ? Math.max(0, Number(a.readAt) || Number(a.capturedAt) || 0) : Math.max(0, Number(a.capturedAt) || 0)) ||
+                (Number(b.capturedAt) || 0) - (Number(a.capturedAt) || 0)
+            );
+    }
+
+    function pruneAfkActivityRecords(records = []) {
+        const normalizedRecords = records
+            .map(normalizeAfkActivityRecord)
+            .filter(Boolean);
+
+        const unreadRecords = normalizedRecords.filter((record) => !record.isRead);
+        const readRecords = normalizedRecords
+            .filter((record) => record.isRead)
+            .sort((a, b) =>
+                Math.max(0, Number(b.readAt) || Number(b.capturedAt) || 0) -
+                Math.max(0, Number(a.readAt) || Number(a.capturedAt) || 0)
+            )
+            .slice(0, MAX_AFK_READ_ACTIVITY_RECORDS);
+
+        return sortAfkActivityRecords([...unreadRecords, ...readRecords]);
+    }
+
+    function loadAfkActivityRecords() {
+        try {
+            const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY_AFK_ACTIVITY) || '[]');
+            if (!Array.isArray(parsed)) return [];
+
+            return pruneAfkActivityRecords(parsed);
+        } catch (e) {
+            return [];
+        }
+    }
+
+    function saveAfkActivityRecords() {
+        afkActivityRecords = pruneAfkActivityRecords(afkActivityRecords);
+
+        localStorage.setItem(STORAGE_KEY_AFK_ACTIVITY, JSON.stringify(afkActivityRecords));
+    }
+
+    function normalizeAfkPanelPosition(value) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+
+        const leftPx = Math.max(0, Math.round(Number(value.leftPx) || 0));
+        const topPx = Math.max(0, Math.round(Number(value.topPx) || 0));
+
+        if (!Number.isFinite(leftPx) || !Number.isFinite(topPx)) return null;
+
+        return { leftPx, topPx };
+    }
+
+    function loadAfkPanelPosition() {
+        try {
+            return normalizeAfkPanelPosition(JSON.parse(localStorage.getItem(STORAGE_KEY_AFK_PANEL_POSITION) || 'null'));
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function saveAfkPanelPosition(position) {
+        const normalizedPosition = normalizeAfkPanelPosition(position);
+        afkPanelPosition = normalizedPosition;
+
+        try {
+            if (!normalizedPosition) {
+                localStorage.removeItem(STORAGE_KEY_AFK_PANEL_POSITION);
+                return;
+            }
+
+            localStorage.setItem(STORAGE_KEY_AFK_PANEL_POSITION, JSON.stringify(normalizedPosition));
+        } catch (e) {}
+    }
+
+    function loadAfkPanelHidden() {
+        try {
+            return localStorage.getItem(STORAGE_KEY_AFK_PANEL_HIDDEN) === '1';
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function saveAfkPanelHidden(value) {
+        afkPanelHidden = !!value;
+
+        try {
+            localStorage.setItem(STORAGE_KEY_AFK_PANEL_HIDDEN, afkPanelHidden ? '1' : '0');
+        } catch (e) {}
+    }
+
+    function applyAfkPanelPosition(panel) {
+        if (!(panel instanceof HTMLElement) || !afkPanelPosition) return;
+
+        panel.style.left = `${Math.max(0, afkPanelPosition.leftPx)}px`;
+        panel.style.top = `${Math.max(0, afkPanelPosition.topPx)}px`;
+        panel.style.right = 'auto';
+        panel.style.bottom = 'auto';
+    }
+
+    function constrainAfkPanelToViewport(panel, persistPosition = true) {
+        if (!(panel instanceof HTMLElement)) return;
+
+        const margin = 12;
+        const rect = panel.getBoundingClientRect();
+        const currentLeft = panel.style.left && panel.style.left !== 'auto'
+            ? Number.parseFloat(panel.style.left) || rect.left
+            : rect.left;
+        const currentTop = panel.style.top && panel.style.top !== 'auto'
+            ? Number.parseFloat(panel.style.top) || rect.top
+            : rect.top;
+        const nextLeft = clamp(currentLeft, margin, Math.max(margin, window.innerWidth - rect.width - margin));
+        const nextTop = clamp(currentTop, margin, Math.max(margin, window.innerHeight - rect.height - margin));
+
+        panel.style.left = `${nextLeft}px`;
+        panel.style.top = `${nextTop}px`;
+        panel.style.right = 'auto';
+        panel.style.bottom = 'auto';
+
+        if (persistPosition) {
+            saveAfkPanelPosition({
+                leftPx: nextLeft,
+                topPx: nextTop
+            });
+        }
     }
 
     function formatSavedPhrasesCountLabel(count = savedPhrases.length) {
@@ -1033,11 +1303,16 @@
                     keepHighlightAfterBlink: DEFAULT_MENTION_KEEP_HIGHLIGHT,
                     includeReplyContext: DEFAULT_MENTION_INCLUDE_REPLY_CONTEXT,
                     soundEnabled: DEFAULT_MENTION_SOUND_ENABLED,
+                    soundScope: DEFAULT_MENTION_SOUND_SCOPE,
                     soundStyle: DEFAULT_MENTION_SOUND_STYLE,
                     soundCustomUrl: DEFAULT_MENTION_SOUND_CUSTOM_URL,
                     soundCooldownSeconds: DEFAULT_MENTION_SOUND_COOLDOWN_SECONDS
                 };
             }
+
+            const soundScope = normalizeMentionSoundScope(
+                parsed.soundScope ?? (parsed.soundEnabled === true ? 'both' : 'off')
+            );
 
             return {
                 username: normalizeName(parsed.username || ''),
@@ -1046,7 +1321,8 @@
                 blinkSeconds: clamp(Number(parsed.blinkSeconds) || 0, 0, 30),
                 keepHighlightAfterBlink: parsed.keepHighlightAfterBlink !== false,
                 includeReplyContext: parsed.includeReplyContext === true,
-                soundEnabled: parsed.soundEnabled === true,
+                soundEnabled: isMentionSoundScopeEnabled(soundScope),
+                soundScope,
                 soundStyle: normalizeMentionSoundStyle(parsed.soundStyle),
                 soundCustomUrl: normalizeMentionSoundCustomUrl(parsed.soundCustomUrl),
                 soundCooldownSeconds: clamp(Number(parsed.soundCooldownSeconds) || 0, 0, 300)
@@ -1060,6 +1336,7 @@
                 keepHighlightAfterBlink: DEFAULT_MENTION_KEEP_HIGHLIGHT,
                 includeReplyContext: DEFAULT_MENTION_INCLUDE_REPLY_CONTEXT,
                 soundEnabled: DEFAULT_MENTION_SOUND_ENABLED,
+                soundScope: DEFAULT_MENTION_SOUND_SCOPE,
                 soundStyle: DEFAULT_MENTION_SOUND_STYLE,
                 soundCustomUrl: DEFAULT_MENTION_SOUND_CUSTOM_URL,
                 soundCooldownSeconds: DEFAULT_MENTION_SOUND_COOLDOWN_SECONDS
@@ -1068,6 +1345,10 @@
     }
 
     function saveMentionSettings(nextSettings) {
+        const soundScope = normalizeMentionSoundScope(
+            nextSettings?.soundScope ?? (nextSettings?.soundEnabled === true ? 'both' : 'off')
+        );
+
         mentionSettings = {
             username: normalizeName(nextSettings?.username || ''),
             color: normalizeHexColor(nextSettings?.color, DEFAULT_MENTION_COLOR),
@@ -1075,7 +1356,8 @@
             blinkSeconds: clamp(Number(nextSettings?.blinkSeconds) || 0, 0, 30),
             keepHighlightAfterBlink: nextSettings?.keepHighlightAfterBlink !== false,
             includeReplyContext: nextSettings?.includeReplyContext === true,
-            soundEnabled: nextSettings?.soundEnabled === true,
+            soundEnabled: isMentionSoundScopeEnabled(soundScope),
+            soundScope,
             soundStyle: normalizeMentionSoundStyle(nextSettings?.soundStyle),
             soundCustomUrl: normalizeMentionSoundCustomUrl(nextSettings?.soundCustomUrl),
             soundCooldownSeconds: clamp(Number(nextSettings?.soundCooldownSeconds) || 0, 0, 300)
@@ -1408,6 +1690,44 @@
         document.head.appendChild(style);
     }
 
+    function ensureYouTubeLinkActionStyle() {
+        if (document.getElementById(YOUTUBE_LINK_ACTION_STYLE_ID)) return;
+        if (!document.head) return;
+
+        const style = document.createElement('style');
+        style.id = YOUTUBE_LINK_ACTION_STYLE_ID;
+        style.textContent = `
+            button[data-tm-youtube-play-link="1"] {
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                margin-left: 6px;
+                padding: 1px 7px;
+                border: 1px solid rgba(239,68,68,0.28);
+                border-radius: 999px;
+                background: rgba(127,29,29,0.72);
+                color: #fee2e2;
+                font: 700 11px/1.6 Inter, Arial, sans-serif;
+                cursor: pointer;
+                vertical-align: middle;
+            }
+
+            button[data-tm-youtube-play-link="1"]:hover {
+                background: rgba(153,27,27,0.88);
+                border-color: rgba(248,113,113,0.4);
+            }
+
+            :root[data-tm-torr9-theme="light"] button[data-tm-youtube-play-link="1"],
+            [data-tm-chat-surface="light"] button[data-tm-youtube-play-link="1"] {
+                background: rgba(254,226,226,0.96);
+                border-color: rgba(248,113,113,0.35);
+                color: #991b1b;
+            }
+        `;
+
+        document.head.appendChild(style);
+    }
+
     function ensureMessageActionsPositionStyle() {
         if (document.getElementById(MESSAGE_ACTIONS_POSITION_STYLE_ID)) return;
         if (!document.head) return;
@@ -1419,6 +1739,7 @@
                 right: auto !important;
                 left: min(var(--tm-message-actions-inline-left, calc(0.5rem + 2.4rem)), calc(100% - 4.75rem)) !important;
                 top: var(--tm-message-actions-inline-top, 0px) !important;
+                transform: translateY(-${MESSAGE_ACTIONS_LEFT_VERTICAL_OFFSET_PX}px) !important;
             }
         `;
 
@@ -1784,6 +2105,27 @@
         const num = Number(String(value).trim().replace(',', '.'));
         if (Number.isNaN(num)) return clamp(fallback, 0, 300);
         return clamp(num, 0, 300);
+    }
+
+    function normalizeMentionSoundScope(value) {
+        const raw = String(value || '').trim().toLowerCase();
+        if (raw === 'home' || raw === 'chat' || raw === 'both' || raw === 'off') return raw;
+        return DEFAULT_MENTION_SOUND_SCOPE;
+    }
+
+    function isMentionSoundScopeEnabled(scope = mentionSettings?.soundScope) {
+        return normalizeMentionSoundScope(scope) !== 'off';
+    }
+
+    function isMentionSoundEnabledForCurrentPage(scope = mentionSettings?.soundScope) {
+        const normalizedScope = normalizeMentionSoundScope(scope);
+
+        if (normalizedScope === 'off') return false;
+        if (normalizedScope === 'both') return isSupportedPage();
+        if (normalizedScope === 'home') return isHomePage();
+        if (normalizedScope === 'chat') return isChatPage();
+
+        return false;
     }
 
     function normalizeMentionSoundStyle(value) {
@@ -2463,8 +2805,8 @@
 
         html += `
             <div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.08);font-size:11px;color:#9ca3af;line-height:1.45;">
-                <p>Ctrl+Alt+C ou Ctrl+Cmd+C : paramètres · Alt+clic pseudo : pour blacklister</p>
-                <p>${debugMode ? 'toggle · Debug ON' : ''}</p>
+                <p>Ctrl+Alt+C ou Ctrl+Cmd+C : paramètres · ${formatAfkShortcutLabel()} : mode AFK · Alt+clic pseudo : blacklist</p>
+                <p>${debugMode ? 'Mode debug activé' : ''}</p>
             </div>
         `;
 
@@ -2543,6 +2885,651 @@
             toast.style.transform = 'translate(-50%, 12px)';
             toastHideTimer = null;
         }, 2200);
+    }
+
+    function formatAfkShortcutLabel() {
+        return 'Ctrl+Alt+A ou Ctrl+Cmd+A';
+    }
+
+    function getAfkWatchedUsername() {
+        return normalizeName(afkState.username || mentionSettings.username || '');
+    }
+
+    function isAfkEnabledForCurrentContext() {
+        return afkState.enabled === true && afkState.contextKey === getCurrentChatContextKey();
+    }
+
+    function getAfkReasonLabel(reason) {
+        if (reason === 'reply') return 'Réponse';
+        if (reason === 'mention+reply') return 'Mention + réponse';
+        return 'Mention';
+    }
+
+    function getAfkAutoReplyStatusLabel(record) {
+        if (record?.autoReplySent === true) return 'Réponse auto envoyée';
+
+        const status = String(record?.autoReplyStatus || '').trim();
+        if (status === 'inactive-timeout') return 'Réponses auto coupées après 30 min';
+        if (status === 'cooldown') return 'Réponse auto en cooldown';
+        if (status === 'already-replied') return 'Déjà notifié récemment';
+        if (status === 'send-failed') return 'Réponse auto non envoyée';
+        if (status === 'input-unavailable') return 'Chat indisponible';
+        if (status === 'missing-username') return 'Pseudo AFK manquant';
+
+        return 'Réponse auto non envoyée';
+    }
+
+    function getAfkReadStatusLabel(record) {
+        return record?.isRead === true ? 'Lu' : 'Non lu';
+    }
+
+    function isAfkAutoReplyWindowExpired(referenceTime = Date.now()) {
+        const activatedAt = Math.max(0, Number(afkState.activatedAt) || 0);
+        if (!activatedAt) return false;
+
+        return referenceTime - activatedAt >= AFK_AUTO_REPLY_MAX_INACTIVITY_MS;
+    }
+
+    function formatAfkRecordTimestamp(record) {
+        const messageTimestamp = String(record?.messageTimestamp || '').trim();
+        if (messageTimestamp) return messageTimestamp;
+
+        const capturedAt = Math.max(0, Number(record?.capturedAt) || 0);
+        if (capturedAt <= 0) return 'Horodatage indisponible';
+
+        return new Date(capturedAt).toLocaleString('fr-FR', {
+            day: '2-digit',
+            month: '2-digit',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit'
+        });
+    }
+
+    function seedAfkSeenMessagesFromCurrentRoot() {
+        const root = getActiveChatRoot();
+        if (!root) return;
+
+        root.querySelectorAll('div').forEach((element) => {
+            if (!(element instanceof HTMLElement)) return;
+            if (!isChatMessage(element)) return;
+
+            const signature = getMentionNotificationSignature(element);
+            const messageKey = buildAfkMessageKey(signature);
+            if (messageKey) {
+                afkSeenMessageKeys.add(messageKey);
+            }
+        });
+    }
+
+    function upsertAfkActivityRecord(record) {
+        const normalizedRecord = normalizeAfkActivityRecord(record);
+        if (!normalizedRecord) return null;
+
+        const existingIndex = afkActivityRecords.findIndex((entry) =>
+            entry.signatureHash === normalizedRecord.signatureHash &&
+            entry.signatureTimestampKey === normalizedRecord.signatureTimestampKey
+        );
+
+        if (existingIndex === -1) {
+            afkActivityRecords.unshift(normalizedRecord);
+        } else {
+            afkActivityRecords[existingIndex] = {
+                ...afkActivityRecords[existingIndex],
+                ...normalizedRecord,
+                isRead: afkActivityRecords[existingIndex].isRead === true,
+                readAt: afkActivityRecords[existingIndex].isRead === true
+                    ? Math.max(0, Number(afkActivityRecords[existingIndex].readAt) || Number(afkActivityRecords[existingIndex].capturedAt) || 0)
+                    : 0
+            };
+        }
+
+        saveAfkActivityRecords();
+        renderAfkPanel();
+        return normalizedRecord;
+    }
+
+    function setAfkActivityRecordReadState(recordId, isRead) {
+        const normalizedRecordId = String(recordId || '').trim();
+        if (!normalizedRecordId) {
+            return { ok: false, message: 'Entrée AFK introuvable.' };
+        }
+
+        let recordFound = false;
+        afkActivityRecords = afkActivityRecords.map((record) => {
+            if (record.id !== normalizedRecordId) return record;
+
+            recordFound = true;
+            return normalizeAfkActivityRecord({
+                ...record,
+                isRead: isRead === true,
+                readAt: isRead === true ? Date.now() : 0
+            });
+        }).filter(Boolean);
+
+        if (!recordFound) {
+            return { ok: false, message: 'Entrée AFK introuvable.' };
+        }
+
+        saveAfkActivityRecords();
+        renderAfkPanel();
+
+        return {
+            ok: true,
+            message: isRead === true
+                ? 'Message AFK marqué comme lu.'
+                : 'Message AFK repassé en non lu.'
+        };
+    }
+
+    function clearAfkActivityRecords() {
+        afkActivityRecords = [];
+        saveAfkActivityRecords();
+        renderAfkPanel();
+    }
+
+    function updateAfkAutoReplyMessage(value) {
+        saveAfkState({
+            ...afkState,
+            autoReplyMessage: normalizeAfkAutoReplyMessage(value)
+        });
+        renderAfkPanel();
+    }
+
+    function disableAfkModeForCurrentContext(reasonLabel = 'après envoi manuel') {
+        if (!isAfkEnabledForCurrentContext()) {
+            return { ok: false, message: '' };
+        }
+
+        const currentContextLabel = getCurrentContextLabel();
+
+        saveAfkState({
+            ...afkState,
+            enabled: false,
+            contextKey: '',
+            contextLabel: '',
+            activatedAt: 0,
+            lastAutoReplyAt: 0,
+            perUserReplyAt: {}
+        });
+        afkSeenMessageKeys.clear();
+        renderAfkPanel();
+
+        return {
+            ok: true,
+            message: `Mode AFK désactivé ${reasonLabel} pour ${currentContextLabel}.`
+        };
+    }
+
+    function getAfkTargetingInfo(messageEl, watchedUsername = getAfkWatchedUsername()) {
+        const normalizedWatchedUsername = normalizeMentionComparableText(watchedUsername).replace(/^@+/, '');
+        if (!normalizedWatchedUsername) {
+            return {
+                matched: false,
+                directMentionMatched: false,
+                replyMentionMatched: false,
+                reason: 'mention',
+                senderDisplayName: getLogicalUsername(messageEl) || '',
+                senderUsername: normalizeName(getLogicalUsername(messageEl) || ''),
+                messageText: getMessageTextContent(messageEl),
+                replyContextText: getMessageReplyContextText(messageEl)
+            };
+        }
+
+        const senderDisplayName = getLogicalUsername(messageEl) || '';
+        const senderUsername = normalizeName(senderDisplayName);
+        const messageText = getMessageTextContent(messageEl);
+        const replyContextText = getMessageReplyContextText(messageEl);
+        const normalizedMessageText = normalizeMentionComparableText(messageText);
+        const normalizedReplyContextText = normalizeMentionComparableText(replyContextText).replace(/^@+/, '');
+        const mentionRegex = new RegExp(
+            `(^|[^\\p{L}\\p{N}_])@${escapeRegExp(normalizedWatchedUsername)}(?=$|[^\\p{L}\\p{N}_])`,
+            'u'
+        );
+
+        const directMentionMatched = !!normalizedMessageText && mentionRegex.test(normalizedMessageText);
+        const replyMentionMatched = isChatPage() && normalizedReplyContextText === normalizedWatchedUsername;
+        const matched = directMentionMatched || replyMentionMatched;
+
+        return {
+            matched,
+            directMentionMatched,
+            replyMentionMatched,
+            reason: directMentionMatched && replyMentionMatched
+                ? 'mention+reply'
+                : (replyMentionMatched ? 'reply' : 'mention'),
+            senderDisplayName,
+            senderUsername,
+            messageText,
+            replyContextText
+        };
+    }
+
+    function getOrCreateAfkPanel() {
+        let panel = document.getElementById(AFK_PANEL_ID);
+        if (panel) return panel;
+        if (!document.body) return null;
+
+        panel = document.createElement('div');
+        panel.id = AFK_PANEL_ID;
+        panel.style.position = 'fixed';
+        panel.style.left = '18px';
+        panel.style.bottom = '18px';
+        panel.style.zIndex = '1000001';
+        panel.style.width = 'min(380px, calc(100vw - 24px))';
+        panel.style.maxHeight = 'min(62vh, 720px)';
+        panel.style.overflowY = 'auto';
+        panel.style.padding = '14px';
+        panel.style.borderRadius = '16px';
+        panel.style.background = 'rgba(24,24,27,0.96)';
+        panel.style.border = '1px solid rgba(255,255,255,0.08)';
+        panel.style.boxShadow = '0 18px 40px rgba(0,0,0,0.4)';
+        panel.style.backdropFilter = 'blur(8px)';
+        panel.style.fontFamily = 'Inter, Arial, sans-serif';
+        panel.style.color = '#fff';
+
+        document.body.appendChild(panel);
+        applyAfkPanelPosition(panel);
+        constrainAfkPanelToViewport(panel, false);
+        return panel;
+    }
+
+    function removeAfkPanel() {
+        const panel = document.getElementById(AFK_PANEL_ID);
+        if (panel) {
+            panel.remove();
+        }
+    }
+
+    function renderAfkPanel() {
+        const shouldDisplayPanel = afkState.enabled || afkActivityRecords.length > 0;
+        if (!shouldDisplayPanel) {
+            removeAfkPanel();
+            return;
+        }
+
+        if (afkState.enabled && afkPanelHidden) {
+            saveAfkPanelHidden(false);
+        }
+
+        if (!afkState.enabled && afkPanelHidden) {
+            removeAfkPanel();
+            return;
+        }
+
+        const panel = getOrCreateAfkPanel();
+        if (!(panel instanceof HTMLElement)) return;
+
+        const statusLabel = afkState.enabled
+            ? `Actif sur ${escapeHtml(afkState.contextLabel || 'ce chat')}`
+            : 'Inactif';
+        const currentAfkMessage = escapeHtml(afkState.autoReplyMessage || DEFAULT_AFK_AUTO_REPLY_MESSAGE);
+        const activityCount = afkActivityRecords.length;
+        const unreadCount = afkActivityRecords.filter((record) => !record.isRead).length;
+        const readCount = Math.max(0, activityCount - unreadCount);
+        const autoReplyWindowExpired = afkState.enabled && isAfkAutoReplyWindowExpired();
+        const toggleLabel = isAfkEnabledForCurrentContext()
+            ? 'Désactiver ici'
+            : (afkState.enabled ? 'Basculer ici' : 'Activer ici');
+        const closeButtonHtml = afkState.enabled
+            ? ''
+            : `
+                <button
+                    type="button"
+                    data-tm-afk-action="hide-panel"
+                    title="Masquer le panneau AFK"
+                    aria-label="Masquer le panneau AFK"
+                    style="
+                        border:none;
+                        background:#27272a;
+                        color:#fff;
+                        width:30px;
+                        height:30px;
+                        border-radius:10px;
+                        cursor:pointer;
+                        font-size:18px;
+                        line-height:1;
+                        flex:0 0 auto;
+                    "
+                >×</button>
+            `;
+
+        panel.innerHTML = `
+            <div
+                data-tm-afk-drag-handle="1"
+                style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:12px;cursor:move;user-select:none;"
+            >
+                <div style="flex:1 1 auto;min-width:0;">
+                    <div style="font-size:15px;font-weight:700;">Mode AFK</div>
+                    <div style="margin-top:4px;font-size:11px;color:${afkState.enabled ? '#86efac' : '#a1a1aa'};">${statusLabel}</div>
+                </div>
+                <div style="display:flex;align-items:flex-start;gap:8px;flex:0 0 auto;">
+                    <div style="font-size:11px;color:#a1a1aa;text-align:right;line-height:1.4;">
+                        ${formatAfkShortcutLabel()}
+                    </div>
+                    ${closeButtonHtml}
+                </div>
+            </div>
+
+            <div style="padding:12px;border-radius:14px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);margin-bottom:12px;">
+                <div style="font-size:12px;font-weight:700;color:#d4d4d8;">Réponse automatique</div>
+                <div style="margin-top:8px;font-size:11px;color:#a1a1aa;line-height:1.45;">
+                    Utilise le pseudo défini dans les mentions pour repérer les messages qui te ciblent.
+                </div>
+                <div style="margin-top:8px;font-size:11px;color:${autoReplyWindowExpired ? '#facc15' : '#71717a'};line-height:1.45;">
+                    ${autoReplyWindowExpired
+                        ? 'Les réponses automatiques sont coupées après 30 minutes d’inactivité, mais les messages continuent d’être enregistrés.'
+                        : 'Les réponses automatiques s’arrêtent d’elles-mêmes après 30 minutes d’inactivité, mais le suivi des messages continue.'}
+                </div>
+                <textarea id="tm-afk-message-input" rows="3" maxlength="${MAX_SAVED_PHRASE_LENGTH}" style="
+                    width:100%;
+                    margin-top:10px;
+                    min-height:88px;
+                    resize:vertical;
+                    background:#18181b;
+                    color:#fff;
+                    border:1px solid rgba(255,255,255,0.10);
+                    border-radius:10px;
+                    padding:10px 12px;
+                    outline:none;
+                    line-height:1.45;
+                ">${currentAfkMessage}</textarea>
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px;">
+                    <div style="font-size:11px;color:#71717a;">
+                        Pseudo ciblé : <span style="color:#fff;font-weight:600;">${escapeHtml(getAfkWatchedUsername() || 'non configuré')}</span>
+                    </div>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                        <button type="button" data-tm-afk-action="save-message" style="
+                            border:none;
+                            background:#2563eb;
+                            color:#fff;
+                            border-radius:10px;
+                            padding:8px 10px;
+                            cursor:pointer;
+                            font-size:12px;
+                            font-weight:600;
+                        ">Enregistrer</button>
+                        <button type="button" data-tm-afk-action="toggle" style="
+                            border:none;
+                            background:${afkState.enabled ? '#14532d' : '#3f3f46'};
+                            color:#fff;
+                            border-radius:10px;
+                            padding:8px 10px;
+                            cursor:pointer;
+                            font-size:12px;
+                            font-weight:600;
+                        ">${toggleLabel}</button>
+                        <button type="button" data-tm-afk-action="clear" style="
+                            border:none;
+                            background:#3f3f46;
+                            color:#fca5a5;
+                            border-radius:10px;
+                            padding:8px 10px;
+                            cursor:pointer;
+                            font-size:12px;
+                            font-weight:600;
+                        ">Effacer</button>
+                    </div>
+                </div>
+            </div>
+
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px;">
+                <div style="font-size:12px;font-weight:700;color:#d4d4d8;">Messages à relire</div>
+                <div style="font-size:11px;color:#a1a1aa;text-align:right;line-height:1.4;">
+                    ${unreadCount} non lu${unreadCount > 1 ? 's' : ''} · ${readCount} lu${readCount > 1 ? 's' : ''}
+                </div>
+            </div>
+
+            <div id="tm-afk-records" style="display:grid;gap:8px;">
+                ${afkActivityRecords.length === 0
+                    ? `<div style="font-size:12px;color:#a1a1aa;padding:8px 2px;">Aucun message AFK enregistré pour le moment.</div>`
+                    : afkActivityRecords.map((record) => `
+                        <div style="padding:10px 12px;border-radius:12px;background:${record.isRead ? 'rgba(255,255,255,0.03)' : 'rgba(59,130,246,0.08)'};border:1px solid ${record.isRead ? 'rgba(255,255,255,0.08)' : 'rgba(59,130,246,0.16)'};opacity:${record.isRead ? '0.82' : '1'};">
+                            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap;">
+                                <div style="font-size:12px;font-weight:700;color:#e0f2fe;">${escapeHtml(record.displayUsername)}</div>
+                                <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                                    <span style="display:inline-flex;align-items:center;padding:3px 7px;border-radius:999px;background:${record.isRead ? 'rgba(113,113,122,0.18)' : 'rgba(250,204,21,0.14)'};border:1px solid ${record.isRead ? 'rgba(113,113,122,0.28)' : 'rgba(250,204,21,0.22)'};color:${record.isRead ? '#d4d4d8' : '#fde68a'};font-size:10px;font-weight:700;">${escapeHtml(getAfkReadStatusLabel(record))}</span>
+                                    <span style="display:inline-flex;align-items:center;padding:3px 7px;border-radius:999px;background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.22);color:#bbf7d0;font-size:10px;font-weight:700;">${escapeHtml(getAfkReasonLabel(record.reason))}</span>
+                                    <span style="font-size:10px;color:#a1a1aa;">${escapeHtml(formatAfkRecordTimestamp(record))}</span>
+                                </div>
+                            </div>
+                            <div style="margin-top:8px;font-size:12px;line-height:1.45;color:#e4e4e7;white-space:pre-wrap;word-break:break-word;">${escapeHtml(record.messageText || '(message vide)')}</div>
+                            ${record.replyContextText ? `
+                                <div style="margin-top:6px;font-size:11px;color:#c4b5fd;">
+                                    Contexte réponse : ${escapeHtml(record.replyContextText)}
+                                </div>
+                            ` : ''}
+                            <div style="margin-top:8px;font-size:10px;color:${record.autoReplySent ? '#86efac' : '#a1a1aa'};">
+                                ${escapeHtml(getAfkAutoReplyStatusLabel(record))}
+                            </div>
+                            <div style="margin-top:4px;font-size:10px;color:#71717a;">
+                                ${escapeHtml(record.contextLabel || 'Contexte inconnu')}
+                            </div>
+                            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px;">
+                                <button
+                                    type="button"
+                                    data-tm-afk-record-action="toggle-read"
+                                    data-tm-afk-record-id="${escapeHtml(record.id)}"
+                                    style="
+                                        border:none;
+                                        background:${record.isRead ? '#3b82f6' : '#3f3f46'};
+                                        color:#fff;
+                                        border-radius:10px;
+                                        padding:7px 10px;
+                                        cursor:pointer;
+                                        font-size:11px;
+                                        font-weight:600;
+                                    "
+                                >${record.isRead ? 'Remettre non lu' : 'Marquer lu'}</button>
+                            </div>
+                        </div>
+                    `).join('')
+                }
+            </div>
+        `;
+
+        const saveMessageBtn = panel.querySelector('[data-tm-afk-action="save-message"]');
+        const toggleBtn = panel.querySelector('[data-tm-afk-action="toggle"]');
+        const clearBtn = panel.querySelector('[data-tm-afk-action="clear"]');
+        const hidePanelBtn = panel.querySelector('[data-tm-afk-action="hide-panel"]');
+        const afkMessageInput = panel.querySelector('#tm-afk-message-input');
+        const dragHandle = panel.querySelector('[data-tm-afk-drag-handle="1"]');
+
+        saveMessageBtn?.addEventListener('click', () => {
+            updateAfkAutoReplyMessage(afkMessageInput instanceof HTMLTextAreaElement ? afkMessageInput.value : '');
+            showToast('Message AFK enregistré.');
+        });
+
+        toggleBtn?.addEventListener('click', () => {
+            const result = toggleAfkModeForCurrentContext();
+            showToast(result.message, !result.ok);
+        });
+
+        clearBtn?.addEventListener('click', () => {
+            clearAfkActivityRecords();
+            showToast('Historique AFK effacé.');
+        });
+
+        hidePanelBtn?.addEventListener('click', () => {
+            saveAfkPanelHidden(true);
+            removeAfkPanel();
+            showToast('Panneau AFK masqué.');
+        });
+
+        panel.querySelectorAll('[data-tm-afk-record-action="toggle-read"]').forEach((button) => {
+            if (!(button instanceof HTMLButtonElement)) return;
+
+            button.addEventListener('click', () => {
+                const recordId = button.getAttribute('data-tm-afk-record-id') || '';
+                const nextIsRead = button.textContent?.includes('Remettre') !== true;
+                const result = setAfkActivityRecordReadState(recordId, nextIsRead);
+                showToast(result.message, !result.ok);
+            });
+        });
+
+        afkMessageInput?.addEventListener('keydown', (event) => {
+            if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+                event.preventDefault();
+                updateAfkAutoReplyMessage(afkMessageInput.value);
+                showToast('Message AFK enregistré.');
+            }
+        });
+
+        if (dragHandle instanceof HTMLElement) {
+            let dragState = null;
+
+            function finishDrag() {
+                if (!dragState) return;
+                constrainAfkPanelToViewport(panel);
+                stopDrag();
+            }
+
+            function stopDrag() {
+                dragState = null;
+                document.removeEventListener('mousemove', handleDrag, true);
+                document.removeEventListener('mouseup', finishDrag, true);
+            }
+
+            function handleDrag(event) {
+                if (!dragState) return;
+
+                const nextLeft = dragState.startLeft + (event.clientX - dragState.startX);
+                const nextTop = dragState.startTop + (event.clientY - dragState.startY);
+
+                panel.style.left = `${nextLeft}px`;
+                panel.style.top = `${nextTop}px`;
+                panel.style.right = 'auto';
+                panel.style.bottom = 'auto';
+            }
+
+            dragHandle.addEventListener('mousedown', (event) => {
+                if (event.button !== 0) return;
+                if (event.target instanceof Element && event.target.closest('button, textarea, input, a, select, label')) return;
+
+                const rect = panel.getBoundingClientRect();
+                dragState = {
+                    startX: event.clientX,
+                    startY: event.clientY,
+                    startLeft: rect.left,
+                    startTop: rect.top
+                };
+
+                document.addEventListener('mousemove', handleDrag, true);
+                document.addEventListener('mouseup', finishDrag, true);
+                event.preventDefault();
+            });
+        }
+
+        applyAfkPanelPosition(panel);
+        constrainAfkPanelToViewport(panel, false);
+    }
+
+    function toggleAfkModeForCurrentContext() {
+        if (!isSupportedPage()) {
+            return { ok: false, message: 'Mode AFK disponible seulement sur l’accueil ou la page chat.' };
+        }
+
+        const watchedUsername = getAfkWatchedUsername();
+        if (!watchedUsername) {
+            renderAfkPanel();
+            return {
+                ok: false,
+                message: 'Renseigne ton pseudo dans les réglages de mentions avant d’activer le mode AFK.'
+            };
+        }
+
+        const currentContextKey = getCurrentChatContextKey();
+        const currentContextLabel = getCurrentContextLabel();
+
+        if (afkState.enabled && afkState.contextKey === currentContextKey) {
+            return disableAfkModeForCurrentContext();
+        }
+
+        saveAfkState({
+            ...afkState,
+            enabled: true,
+            contextKey: currentContextKey,
+            contextLabel: currentContextLabel,
+            username: watchedUsername,
+            activatedAt: Date.now(),
+            lastAutoReplyAt: 0,
+            perUserReplyAt: {}
+        });
+        saveAfkPanelHidden(false);
+        afkSeenMessageKeys.clear();
+        seedAfkSeenMessagesFromCurrentRoot();
+        renderAfkPanel();
+
+        return { ok: true, message: `Mode AFK activé pour ${currentContextLabel}.` };
+    }
+
+    function maybeHandleAfkMessage(messageEl) {
+        if (!(messageEl instanceof HTMLElement)) return;
+        if (!isAfkEnabledForCurrentContext()) return;
+
+        const signature = getMentionNotificationSignature(messageEl);
+        const messageKey = buildAfkMessageKey(signature);
+        if (!messageKey) return;
+        if (afkSeenMessageKeys.has(messageKey)) return;
+        afkSeenMessageKeys.add(messageKey);
+
+        const watchedUsername = getAfkWatchedUsername();
+        const targetingInfo = getAfkTargetingInfo(messageEl, watchedUsername);
+        if (!targetingInfo.matched) return;
+        if (!targetingInfo.senderUsername) return;
+        if (targetingInfo.senderUsername === watchedUsername) return;
+
+        const now = Date.now();
+        const lastReplyAtForUser = Math.max(0, Number(afkState.perUserReplyAt?.[targetingInfo.senderUsername]) || 0);
+        const autoReplyMessage = `@${targetingInfo.senderDisplayName || targetingInfo.senderUsername} ${normalizeAfkAutoReplyMessage(afkState.autoReplyMessage)}`;
+        let autoReplySent = false;
+        let autoReplyStatus = '';
+
+        if (!watchedUsername) {
+            autoReplyStatus = 'missing-username';
+        } else if (isAfkAutoReplyWindowExpired(now)) {
+            autoReplyStatus = 'inactive-timeout';
+        } else if (lastReplyAtForUser > 0 && now - lastReplyAtForUser < AFK_AUTO_REPLY_PER_USER_COOLDOWN_MS) {
+            autoReplyStatus = 'already-replied';
+        } else if (afkState.lastAutoReplyAt > 0 && now - afkState.lastAutoReplyAt < AFK_AUTO_REPLY_GLOBAL_COOLDOWN_MS) {
+            autoReplyStatus = 'cooldown';
+        } else {
+            const sendResult = sendAutomatedChatMessage(autoReplyMessage);
+            if (sendResult.ok) {
+                autoReplySent = true;
+                autoReplyStatus = 'sent';
+                saveAfkState({
+                    ...afkState,
+                    lastAutoReplyAt: now,
+                    perUserReplyAt: {
+                        ...afkState.perUserReplyAt,
+                        [targetingInfo.senderUsername]: now
+                    }
+                });
+            } else {
+                autoReplyStatus = sendResult.message === 'Champ de texte non trouvé.'
+                    ? 'input-unavailable'
+                    : 'send-failed';
+            }
+        }
+
+        upsertAfkActivityRecord({
+            id: `${signature.hash}-${signature.messageTimestampKey || now}`,
+            contextKey: afkState.contextKey,
+            contextLabel: afkState.contextLabel || getCurrentContextLabel(),
+            username: targetingInfo.senderUsername,
+            displayUsername: targetingInfo.senderDisplayName || targetingInfo.senderUsername,
+            messageText: targetingInfo.messageText,
+            replyContextText: targetingInfo.replyContextText,
+            reason: targetingInfo.reason,
+            messageTimestamp: getMessageTimestampText(messageEl),
+            capturedAt: now,
+            autoReplySent,
+            autoReplyStatus,
+            autoReplyText: autoReplySent ? autoReplyMessage : '',
+            signatureHash: signature.hash,
+            signatureTimestampKey: signature.messageTimestampKey
+        });
     }
 
     function ensureMentionAnimationStyle() {
@@ -3137,8 +4124,8 @@
 
     function maybeNotifyMention(messageEl) {
         if (!(messageEl instanceof HTMLElement)) return;
-        if (!mentionSettings.soundEnabled) {
-            logMentionDebug('skip: sound disabled');
+        if (!isMentionSoundEnabledForCurrentPage()) {
+            logMentionDebug('skip: sound disabled or out of scope');
             return;
         }
         if (mentionSoundNotifiedMessages.has(messageEl)) {
@@ -3333,6 +4320,8 @@
             messageEl.style.removeProperty('display');
             clearDebugStyle(messageEl);
         }
+
+        maybeHandleAfkMessage(messageEl);
     }
 
     function processAllMessages() {
@@ -3364,7 +4353,7 @@
         if (!root) return;
         if (!(node instanceof HTMLElement)) return;
         if (node !== root && !root.contains(node) && node !== document.body) return;
-        if (node.closest(`#${PANEL_ID}, #${MODAL_ID}, #${OVERLAY_ID}, #${TOAST_ID}`)) return;
+        if (node.closest(`#${PANEL_ID}, #${AFK_PANEL_ID}, #${MODAL_ID}, #${OVERLAY_ID}, #${IMAGE_VIEWER_MODAL_ID}, #${IMAGE_VIEWER_OVERLAY_ID}, #${TOAST_ID}`)) return;
         const allowMentionAndHighlight = isMentionAndHighlightContextAllowed();
 
         if (isChatMessage(node)) {
@@ -3421,7 +4410,7 @@
         return {
             ok: true,
             message: hadHighlight
-                ? `Couleur mise a jour pour ${usernameRaw}`
+                ? `Couleur mise à jour pour ${usernameRaw}`
                 : `Utilisateur mis en avant : ${usernameRaw}`
         };
     }
@@ -3436,7 +4425,7 @@
         processAllMessages();
         updateStatsBox();
 
-        return { ok: true, message: `Mise en avant retiree : ${usernameRaw}` };
+        return { ok: true, message: `Mise en avant retirée : ${usernameRaw}` };
     }
 
     function updateMentionSettings(
@@ -3446,7 +4435,7 @@
         blinkSecondsRaw,
         keepHighlightAfterBlinkRaw,
         includeReplyContextRaw,
-        soundEnabledRaw,
+        soundScopeRaw,
         soundStyleRaw,
         soundCustomUrlRaw,
         soundCooldownSecondsRaw
@@ -3457,7 +4446,7 @@
         const blinkSeconds = parseBlinkSecondsInput(blinkSecondsRaw, DEFAULT_MENTION_BLINK_SECONDS);
         const keepHighlightAfterBlink = !!keepHighlightAfterBlinkRaw;
         const includeReplyContext = !!includeReplyContextRaw;
-        const soundEnabled = !!soundEnabledRaw;
+        const soundScope = normalizeMentionSoundScope(soundScopeRaw);
         const soundStyle = normalizeMentionSoundStyle(soundStyleRaw);
         const soundCustomUrl = normalizeMentionSoundCustomUrl(soundCustomUrlRaw);
         const soundCooldownSeconds = parseMentionSoundCooldownInput(
@@ -3472,7 +4461,7 @@
             blinkSeconds,
             keepHighlightAfterBlink,
             includeReplyContext,
-            soundEnabled,
+            soundScope,
             soundStyle,
             soundCustomUrl,
             soundCooldownSeconds
@@ -3481,14 +4470,14 @@
         updateStatsBox();
 
         if (!mentionSettings.username) {
-            return { ok: true, message: 'Surveillance des mentions desactivee.' };
+            return { ok: true, message: 'Surveillance des mentions désactivée.' };
         }
 
         return {
             ok: true,
-            message: mentionSettings.soundEnabled
-                ? `Mentions surveillees pour @${mentionSettings.username} avec son`
-                : `Mentions surveillees pour @${mentionSettings.username}`
+            message: isMentionSoundScopeEnabled(mentionSettings.soundScope)
+                ? `Mentions surveillées pour @${mentionSettings.username} avec son`
+                : `Mentions surveillées pour @${mentionSettings.username}`
         };
     }
 
@@ -3505,6 +4494,456 @@
         syncHomepageCollapseUi(true);
         applyBoxPosition(loadPosition());
         updateStatsBox();
+    }
+
+    function closeImageViewer() {
+        const modal = document.getElementById(IMAGE_VIEWER_MODAL_ID);
+        const overlay = document.getElementById(IMAGE_VIEWER_OVERLAY_ID);
+        if (modal) modal.remove();
+        if (overlay) overlay.remove();
+        if (imageViewerKeydownHandler) {
+            document.removeEventListener('keydown', imageViewerKeydownHandler, true);
+            imageViewerKeydownHandler = null;
+        }
+        imageViewerOpen = false;
+    }
+
+    function closeYouTubePlayer() {
+        const player = document.getElementById(YOUTUBE_PLAYER_ID);
+        if (player) {
+            const iframe = player.querySelector('iframe');
+            if (iframe instanceof HTMLIFrameElement) {
+                iframe.src = 'about:blank';
+            }
+            player.remove();
+        }
+
+        if (youtubePlayerKeydownHandler) {
+            document.removeEventListener('keydown', youtubePlayerKeydownHandler, true);
+            youtubePlayerKeydownHandler = null;
+        }
+
+        if (youtubePlayerResizeObserver) {
+            youtubePlayerResizeObserver.disconnect();
+            youtubePlayerResizeObserver = null;
+        }
+
+        if (youtubePlayerViewportResizeHandler) {
+            window.removeEventListener('resize', youtubePlayerViewportResizeHandler, true);
+            youtubePlayerViewportResizeHandler = null;
+        }
+    }
+
+    function constrainYouTubePlayerToViewport(player) {
+        if (!(player instanceof HTMLElement)) return;
+
+        const margin = 12;
+        const maxWidth = Math.max(260, window.innerWidth - margin * 2);
+        const maxHeight = Math.max(180, window.innerHeight - margin * 2);
+
+        if (player.offsetWidth > maxWidth) {
+            player.style.width = `${maxWidth}px`;
+        }
+
+        if (player.offsetHeight > maxHeight) {
+            player.style.height = `${maxHeight}px`;
+        }
+
+        const rect = player.getBoundingClientRect();
+        const currentLeft = player.style.left && player.style.left !== 'auto'
+            ? Number.parseFloat(player.style.left) || rect.left
+            : rect.left;
+        const currentTop = player.style.top && player.style.top !== 'auto'
+            ? Number.parseFloat(player.style.top) || rect.top
+            : rect.top;
+        const nextLeft = clamp(currentLeft, margin, Math.max(margin, window.innerWidth - rect.width - margin));
+        const nextTop = clamp(currentTop, margin, Math.max(margin, window.innerHeight - rect.height - margin));
+
+        player.style.left = `${nextLeft}px`;
+        player.style.top = `${nextTop}px`;
+        player.style.right = 'auto';
+        player.style.bottom = 'auto';
+    }
+
+    function getOrCreateYouTubePlayer() {
+        let player = document.getElementById(YOUTUBE_PLAYER_ID);
+        if (player) return player;
+        if (!document.body) return null;
+
+        player = document.createElement('div');
+        player.id = YOUTUBE_PLAYER_ID;
+        player.style.position = 'fixed';
+        player.style.right = '18px';
+        player.style.bottom = '18px';
+        player.style.zIndex = '1000001';
+        player.style.display = 'flex';
+        player.style.flexDirection = 'column';
+        player.style.width = '420px';
+        player.style.height = '260px';
+        player.style.minWidth = '320px';
+        player.style.minHeight = '220px';
+        player.style.maxWidth = 'calc(100vw - 24px)';
+        player.style.maxHeight = 'calc(100vh - 24px)';
+        player.style.background = 'rgba(24,24,27,0.98)';
+        player.style.border = '1px solid rgba(255,255,255,0.08)';
+        player.style.borderRadius = '16px';
+        player.style.boxShadow = '0 20px 50px rgba(0,0,0,0.45)';
+        player.style.backdropFilter = 'blur(8px)';
+        player.style.overflow = 'hidden';
+        player.style.resize = 'both';
+
+        const header = document.createElement('div');
+        header.style.display = 'flex';
+        header.style.alignItems = 'center';
+        header.style.justifyContent = 'space-between';
+        header.style.gap = '12px';
+        header.style.padding = '10px 12px';
+        header.style.background = 'rgba(255,255,255,0.04)';
+        header.style.borderBottom = '1px solid rgba(255,255,255,0.06)';
+        header.style.cursor = 'move';
+        header.style.userSelect = 'none';
+
+        const title = document.createElement('div');
+        title.textContent = DEFAULT_YOUTUBE_PLAYER_TITLE;
+        title.setAttribute('data-tm-youtube-player-title', '1');
+        title.title = DEFAULT_YOUTUBE_PLAYER_TITLE;
+        title.style.fontSize = '12px';
+        title.style.fontWeight = '700';
+        title.style.color = '#f4f4f5';
+
+        const closeBtn = document.createElement('button');
+        closeBtn.type = 'button';
+        closeBtn.textContent = '×';
+        closeBtn.style.border = 'none';
+        closeBtn.style.background = '#27272a';
+        closeBtn.style.color = '#fff';
+        closeBtn.style.width = '30px';
+        closeBtn.style.height = '30px';
+        closeBtn.style.borderRadius = '9px';
+        closeBtn.style.cursor = 'pointer';
+        closeBtn.style.fontSize = '18px';
+        closeBtn.style.lineHeight = '1';
+
+        const body = document.createElement('div');
+        body.style.flex = '1';
+        body.style.minHeight = '0';
+        body.style.background = '#09090b';
+
+        const iframe = document.createElement('iframe');
+        iframe.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share';
+        iframe.allowFullscreen = true;
+        iframe.referrerPolicy = 'strict-origin-when-cross-origin';
+        iframe.style.display = 'block';
+        iframe.style.width = '100%';
+        iframe.style.height = '100%';
+        iframe.style.border = '0';
+        iframe.style.background = '#000';
+
+        body.appendChild(iframe);
+        header.appendChild(title);
+        header.appendChild(closeBtn);
+        player.appendChild(header);
+        player.appendChild(body);
+
+        closeBtn.addEventListener('click', () => {
+            closeYouTubePlayer();
+        });
+
+        let dragState = null;
+
+        function stopDrag() {
+            dragState = null;
+            document.removeEventListener('mousemove', handleDrag, true);
+            document.removeEventListener('mouseup', stopDrag, true);
+        }
+
+        function handleDrag(event) {
+            if (!dragState) return;
+
+            const nextLeft = clamp(
+                dragState.startLeft + (event.clientX - dragState.startX),
+                0,
+                Math.max(0, window.innerWidth - player.offsetWidth)
+            );
+            const nextTop = clamp(
+                dragState.startTop + (event.clientY - dragState.startY),
+                0,
+                Math.max(0, window.innerHeight - player.offsetHeight)
+            );
+
+            player.style.left = `${nextLeft}px`;
+            player.style.top = `${nextTop}px`;
+            player.style.right = 'auto';
+            player.style.bottom = 'auto';
+        }
+
+        header.addEventListener('mousedown', (event) => {
+            if (event.button !== 0) return;
+            if (event.target instanceof Element && event.target.closest('button')) return;
+
+            const rect = player.getBoundingClientRect();
+            dragState = {
+                startX: event.clientX,
+                startY: event.clientY,
+                startLeft: rect.left,
+                startTop: rect.top
+            };
+
+            document.addEventListener('mousemove', handleDrag, true);
+            document.addEventListener('mouseup', stopDrag, true);
+            event.preventDefault();
+        });
+
+        document.body.appendChild(player);
+
+        youtubePlayerViewportResizeHandler = () => {
+            constrainYouTubePlayerToViewport(player);
+        };
+        window.addEventListener('resize', youtubePlayerViewportResizeHandler, true);
+
+        if ('ResizeObserver' in window) {
+            youtubePlayerResizeObserver = new ResizeObserver(() => {
+                constrainYouTubePlayerToViewport(player);
+            });
+            youtubePlayerResizeObserver.observe(player);
+        }
+
+        constrainYouTubePlayerToViewport(player);
+        return player;
+    }
+
+    function openYouTubePlayer(embedUrl, options = {}) {
+        const normalizedEmbedUrl = String(embedUrl || '').trim();
+        if (!normalizedEmbedUrl) return;
+
+        const videoId = String(options?.videoId || '').trim();
+        const watchUrl = String(options?.watchUrl || '').trim();
+        const player = getOrCreateYouTubePlayer();
+        if (!(player instanceof HTMLElement)) return;
+
+        const iframe = player.querySelector('iframe');
+        if (!(iframe instanceof HTMLIFrameElement)) return;
+
+        player.dataset.tmYoutubeVideoId = videoId;
+        setYouTubePlayerTitle(
+            youtubeVideoTitleCache.get(videoId) ||
+            getFallbackYouTubePlayerTitle(videoId)
+        );
+        iframe.src = normalizedEmbedUrl;
+
+        if (videoId && watchUrl && !youtubeVideoTitleCache.has(videoId)) {
+            const requestSerial = ++youtubePlayerTitleRequestSerial;
+
+            void fetchYouTubeVideoTitle(videoId, watchUrl).then((resolvedTitle) => {
+                if (!resolvedTitle) return;
+                if (requestSerial !== youtubePlayerTitleRequestSerial) return;
+
+                const activePlayer = document.getElementById(YOUTUBE_PLAYER_ID);
+                if (!(activePlayer instanceof HTMLElement)) return;
+                if ((activePlayer.dataset.tmYoutubeVideoId || '') !== videoId) return;
+
+                setYouTubePlayerTitle(resolvedTitle);
+            });
+        }
+
+        if (!youtubePlayerKeydownHandler) {
+            youtubePlayerKeydownHandler = (event) => {
+                if (event.key !== 'Escape') return;
+                if (modalOpen || imageViewerOpen) return;
+
+                const activePlayer = document.getElementById(YOUTUBE_PLAYER_ID);
+                if (!(activePlayer instanceof HTMLElement)) return;
+
+                event.preventDefault();
+                closeYouTubePlayer();
+            };
+
+            document.addEventListener('keydown', youtubePlayerKeydownHandler, true);
+        }
+    }
+
+    function openImageViewerFromCandidates(candidateUrls) {
+        if (!Array.isArray(candidateUrls) || candidateUrls.length === 0) return;
+
+        closeImageViewer();
+        hideImagePreview();
+        imageViewerOpen = true;
+
+        const overlay = document.createElement('div');
+        overlay.id = IMAGE_VIEWER_OVERLAY_ID;
+        overlay.style.position = 'fixed';
+        overlay.style.inset = '0';
+        overlay.style.zIndex = '1000004';
+        overlay.style.display = 'flex';
+        overlay.style.alignItems = 'center';
+        overlay.style.justifyContent = 'center';
+        overlay.style.padding = '12px';
+        overlay.style.background = 'rgba(0,0,0,0.7)';
+        overlay.style.backdropFilter = 'blur(4px)';
+
+        const modal = document.createElement('div');
+        modal.id = IMAGE_VIEWER_MODAL_ID;
+        modal.style.position = 'relative';
+        modal.style.zIndex = '1000005';
+        modal.style.width = 'min(1400px, calc(100vw - 24px))';
+        modal.style.maxWidth = 'calc(100vw - 24px)';
+        modal.style.maxHeight = 'calc(100vh - 24px)';
+        modal.style.display = 'flex';
+        modal.style.flexDirection = 'column';
+        modal.style.gap = '12px';
+        modal.style.padding = '16px';
+        modal.style.background = 'rgba(24,24,27,0.98)';
+        modal.style.border = '1px solid rgba(255,255,255,0.08)';
+        modal.style.borderRadius = '18px';
+        modal.style.boxShadow = '0 24px 60px rgba(0,0,0,0.5)';
+        modal.style.color = '#fff';
+        modal.style.fontFamily = 'Inter, Arial, sans-serif';
+
+        const header = document.createElement('div');
+        header.style.display = 'flex';
+        header.style.justifyContent = 'space-between';
+        header.style.alignItems = 'center';
+        header.style.gap = '12px';
+
+        const headerText = document.createElement('div');
+
+        const title = document.createElement('div');
+        title.textContent = 'Aperçu image grand format';
+        title.style.fontSize = '16px';
+        title.style.fontWeight = '700';
+
+        const subtitle = document.createElement('div');
+        subtitle.textContent = 'Échap ou clic hors de la fenêtre pour fermer.';
+        subtitle.style.marginTop = '4px';
+        subtitle.style.fontSize = '12px';
+        subtitle.style.color = '#a1a1aa';
+
+        headerText.appendChild(title);
+        headerText.appendChild(subtitle);
+
+        const headerActions = document.createElement('div');
+        headerActions.style.display = 'flex';
+        headerActions.style.alignItems = 'center';
+        headerActions.style.gap = '8px';
+
+        const sourceLink = document.createElement('a');
+        sourceLink.textContent = 'Ouvrir l’original';
+        sourceLink.target = '_blank';
+        sourceLink.rel = 'noreferrer noopener';
+        sourceLink.style.display = 'inline-flex';
+        sourceLink.style.alignItems = 'center';
+        sourceLink.style.justifyContent = 'center';
+        sourceLink.style.padding = '10px 12px';
+        sourceLink.style.borderRadius = '10px';
+        sourceLink.style.background = '#2563eb';
+        sourceLink.style.color = '#fff';
+        sourceLink.style.fontSize = '12px';
+        sourceLink.style.fontWeight = '600';
+        sourceLink.style.textDecoration = 'none';
+
+        const closeBtn = document.createElement('button');
+        closeBtn.type = 'button';
+        closeBtn.textContent = '×';
+        closeBtn.style.border = 'none';
+        closeBtn.style.background = '#27272a';
+        closeBtn.style.color = '#fff';
+        closeBtn.style.width = '36px';
+        closeBtn.style.height = '36px';
+        closeBtn.style.borderRadius = '10px';
+        closeBtn.style.cursor = 'pointer';
+        closeBtn.style.fontSize = '20px';
+        closeBtn.style.lineHeight = '1';
+
+        headerActions.appendChild(sourceLink);
+        headerActions.appendChild(closeBtn);
+        header.appendChild(headerText);
+        header.appendChild(headerActions);
+
+        const surface = document.createElement('div');
+        surface.style.display = 'flex';
+        surface.style.alignItems = 'center';
+        surface.style.justifyContent = 'center';
+        surface.style.minHeight = 'min(72vh, 720px)';
+        surface.style.maxHeight = 'calc(100vh - 130px)';
+        surface.style.padding = '10px';
+        surface.style.borderRadius = '16px';
+        surface.style.background = 'rgba(255,255,255,0.03)';
+        surface.style.border = '1px solid rgba(255,255,255,0.06)';
+        surface.style.overflow = 'auto';
+
+        const image = document.createElement('img');
+        image.alt = '';
+        image.style.display = 'block';
+        image.style.maxWidth = '100%';
+        image.style.maxHeight = 'calc(100vh - 180px)';
+        image.style.width = 'auto';
+        image.style.height = 'auto';
+        image.style.objectFit = 'contain';
+        image.style.borderRadius = '12px';
+        image.style.boxShadow = '0 18px 40px rgba(0,0,0,0.35)';
+
+        const status = document.createElement('div');
+        status.textContent = 'Chargement de l’image...';
+        status.style.fontSize = '12px';
+        status.style.color = '#a1a1aa';
+        status.style.textAlign = 'center';
+
+        surface.appendChild(image);
+        modal.appendChild(header);
+        modal.appendChild(surface);
+        modal.appendChild(status);
+        overlay.appendChild(modal);
+
+        function handleEscape(event) {
+            if (event.key !== 'Escape') return;
+            event.preventDefault();
+            closeImageViewer();
+        }
+
+        imageViewerKeydownHandler = handleEscape;
+
+        let candidateIndex = 0;
+
+        function tryNextCandidate() {
+            if (!imageViewerOpen) return;
+
+            if (candidateIndex >= candidateUrls.length) {
+                status.textContent = 'Impossible de charger l’image.';
+                sourceLink.removeAttribute('href');
+                return;
+            }
+
+            const nextUrl = candidateUrls[candidateIndex];
+            candidateIndex += 1;
+            status.textContent = 'Chargement de l’image...';
+            sourceLink.href = nextUrl;
+            image.src = nextUrl;
+        }
+
+        image.onload = () => {
+            if (!imageViewerOpen) return;
+
+            sourceLink.href = image.currentSrc || image.src || sourceLink.href;
+            status.textContent = `${image.naturalWidth || '?'} x ${image.naturalHeight || '?'} px`;
+        };
+
+        image.onerror = () => {
+            if (!imageViewerOpen) return;
+            tryNextCandidate();
+        };
+
+        closeBtn.addEventListener('click', () => {
+            closeImageViewer();
+        });
+
+        overlay.addEventListener('click', (event) => {
+            if (event.target !== overlay) return;
+            closeImageViewer();
+        });
+
+        document.body.appendChild(overlay);
+        document.addEventListener('keydown', imageViewerKeydownHandler, true);
+        tryNextCandidate();
     }
 
     function openSavedPhraseQuickAddModal(initialText = '', sourceInput = null) {
@@ -4986,7 +6425,7 @@
                 <div style="display:grid;gap:12px;">
                     <label style="display:flex;flex-direction:column;gap:6px;">
                         <span style="display:flex;justify-content:space-between;gap:12px;font-size:12px;color:#c4c4c8;">
-                            <span>Position (0 Gauche; 100 Droite)</span>
+                            <span>Position horizontale (0 = gauche ; 100 = droite)</span>
                             <span id="tm-right-value">${formatNumberInputValue(currentPos.rightPercent, MAX_STATS_RIGHT_PERCENT)}%</span>
                         </span>
                         <input id="tm-right-input" type="range" min="0" max="${MAX_STATS_RIGHT_PERCENT}" step="0.5" value="${formatNumberInputValue(currentPos.rightPercent, MAX_STATS_RIGHT_PERCENT)}"
@@ -5025,7 +6464,7 @@
                         padding:10px 12px;
                         cursor:pointer;
                         font-weight:600;
-                    ">Reset position</button>
+                    ">Réinitialiser la position</button>
                 </div>
 
             </div>
@@ -5093,7 +6532,7 @@
                         padding:10px 12px;
                         cursor:pointer;
                         font-weight:600;
-                    ">Reset police</button>
+                    ">Réinitialiser la police</button>
                 </div>
 
                 <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
@@ -5126,7 +6565,7 @@
                 </label>
 
                 <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
-                    Déplace les boutons Réagir / Répondre qui apparaissent au survol vers la gauche du bloc message. Utile seulement sur la page Chat.
+                    Déplace les boutons Réagir / Répondre qui apparaissent au survol vers la gauche du bloc message. Utile seulement sur la page chat.
                 </div>
 
                 <label style="${settingsCheckboxLabelWithMarginStyle}">
@@ -5141,11 +6580,11 @@
                 ${isChatPage() ? `
                 <label style="${settingsCheckboxLabelWithMarginStyle}">
                     <input id="tm-hide-chat-footer-toggle" type="checkbox" ${hideChatFooterEnabled ? 'checked' : ''} style="${settingsCheckboxInputStyle(accessibilityCheckboxAccentColor)}">
-                    <span>Masquer le footer sur la page Chat</span>
+                    <span>Masquer le footer sur la page chat</span>
                 </label>
 
                 <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
-                    Retire le footer du site sur la page de chat dédiée pour libérer de la hauteur utile.
+                    Retire le footer du site sur la page de chat dédiée donner un effet pleine écran.
                 </div>
                 ` : ''}
 
@@ -5160,16 +6599,16 @@
 
                 <label style="${settingsCheckboxLabelWithMarginStyle}">
                     <input id="tm-light-theme-toggle" type="checkbox" ${lightThemeEnabled ? 'checked' : ''} style="${settingsCheckboxInputStyle(accessibilityCheckboxAccentColor)}">
-                    <span>Theme clair <span style="font-weight:700;text-decoration:underline;">BETA</span> pour la shoutbox</span>
+                    <span>Thème clair <span style="font-weight:700;text-decoration:underline;">beta</span> pour la shoutbox</span>
                 </label>
 
                 <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
-                    Eclaircit la zone de chat, les messages, la stats box et les toasts du script. Reglage enregistre separement pour ${currentPageLabel}.
+                    Éclaircit la zone de chat, les messages, la stats box et les toasts du script. Réglage enregistré séparément pour ${currentPageLabel}.
                 </div>
             </div>
 
             <div style="${settingsCardStyle}">
-                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Phrases Sauvegardées</div>
+                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Phrases sauvegardées</div>
 
                 <label style="${settingsCheckboxLabelStyle}">
                     <input id="tm-phrases-enabled-toggle" type="checkbox" ${savedPhrasesEnabled ? 'checked' : ''} style="${settingsCheckboxInputStyle('#8b5cf6')}">
@@ -5206,7 +6645,7 @@
                 </label>
 
                 <div style="margin-top:10px;font-size:12px;color:#a1a1aa;line-height:1.5;">
-                    Permet d'utiliser un gif picker directement depuis le chat.
+                    Permet d’utiliser un picker GIF directement depuis le chat.
                 </div>
             </div>
 
@@ -5218,6 +6657,13 @@
                         <div style="font-size:12px;font-weight:700;color:#dbeafe;">Ctrl+Alt+C ou Ctrl+Cmd+C</div>
                         <div style="margin-top:4px;font-size:11px;color:#93c5fd;line-height:1.45;">
                             Ouvre directement cette page de paramètres.
+                        </div>
+                    </div>
+
+                    <div style="padding:10px 12px;border-radius:12px;background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.24);">
+                        <div style="font-size:12px;font-weight:700;color:#bbf7d0;">${formatAfkShortcutLabel()}</div>
+                        <div style="margin-top:4px;font-size:11px;color:#86efac;line-height:1.45;">
+                            Active ou coupe le mode AFK sur le chat en cours, avec historique dédié des mentions et réponses.
                         </div>
                     </div>
 
@@ -5237,7 +6683,7 @@
                     </div>
 
                     <div style="padding:10px 12px;border-radius:12px;background:rgba(6,182,212,0.12);border:1px solid rgba(6,182,212,0.24);">
-                        <div style="font-size:12px;font-weight:700;color:#a5f3fc;">Click long sur un message</div>
+                        <div style="font-size:12px;font-weight:700;color:#a5f3fc;">Clic long sur un message</div>
                         <div style="margin-top:4px;font-size:11px;color:#67e8f9;line-height:1.45;">
                             Ouvre les réactions, avec le picker repositionné à droite du pointeur.
                         </div>
@@ -5246,7 +6692,7 @@
                     <div style="padding:10px 12px;border-radius:12px;background:rgba(63,63,70,0.6);border:1px solid rgba(255,255,255,0.08);">
                         <div style="font-size:12px;font-weight:700;color:#f4f4f5;">Raccourcis du chat dédié</div>
                         <div style="margin-top:4px;font-size:11px;color:#a1a1aa;line-height:1.45;">
-                            Les gestes double-clic pour répondre et click long pour réagir ne sont actifs que sur la page Chat, pas sur la shout de l’accueil.
+                            Les gestes double-clic pour répondre et clic long pour réagir ne sont actifs que sur la page chat, pas sur la shout de l’accueil.
                         </div>
                     </div>
                     `}
@@ -5391,7 +6837,7 @@
                 "></div>
 
                 <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.4;">
-                    Clique sur un pseudo pour charger sa couleur. Les messages restents visibles mais sont surlignes avec la couleur choisie.
+                    Clique sur un pseudo pour charger sa couleur. Les messages restent visibles mais sont surlignés avec la couleur choisie.
                 </div>
             </div>
 
@@ -5489,11 +6935,53 @@
                     <span>Considérer aussi les réponses citées vers @moi</span>
                 </label>
 
-                <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:10px;">
-                    <label style="${settingsCheckboxLabelStyle}">
-                        <input id="tm-mention-sound-toggle" type="checkbox" ${mentionSettings.soundEnabled ? 'checked' : ''} style="${settingsCheckboxInputStyle('#22c55e')}">
-                        <span>Son de notification</span>
-                    </label>
+                <div style="margin-top:10px;">
+                    <div style="font-size:12px;color:#c4c4c8;margin-bottom:8px;">Son de notification</div>
+                    <div id="tm-mention-sound-scope-group" data-tm-sound-scope="${mentionSettings.soundScope || DEFAULT_MENTION_SOUND_SCOPE}" style="display:flex;gap:8px;flex-wrap:wrap;">
+                        <button type="button" data-tm-mention-sound-scope="off" style="
+                            border:1px solid rgba(255,255,255,0.08);
+                            background:#27272a;
+                            color:#e4e4e7;
+                            border-radius:999px;
+                            padding:8px 12px;
+                            cursor:pointer;
+                            font-size:12px;
+                            font-weight:600;
+                        ">Désactivé</button>
+                        <button type="button" data-tm-mention-sound-scope="home" style="
+                            border:1px solid rgba(255,255,255,0.08);
+                            background:#27272a;
+                            color:#e4e4e7;
+                            border-radius:999px;
+                            padding:8px 12px;
+                            cursor:pointer;
+                            font-size:12px;
+                            font-weight:600;
+                        ">Accueil</button>
+                        <button type="button" data-tm-mention-sound-scope="chat" style="
+                            border:1px solid rgba(255,255,255,0.08);
+                            background:#27272a;
+                            color:#e4e4e7;
+                            border-radius:999px;
+                            padding:8px 12px;
+                            cursor:pointer;
+                            font-size:12px;
+                            font-weight:600;
+                        ">Chat</button>
+                        <button type="button" data-tm-mention-sound-scope="both" style="
+                            border:1px solid rgba(255,255,255,0.08);
+                            background:#27272a;
+                            color:#e4e4e7;
+                            border-radius:999px;
+                            padding:8px 12px;
+                            cursor:pointer;
+                            font-size:12px;
+                            font-weight:600;
+                        ">Les deux</button>
+                    </div>
+                    <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                        Choisis sur quelle vue le son doit se jouer. Le mode désactivé replie les réglages audio pour gagner de la place.
+                    </div>
                 </div>
 
                 <div id="tm-mention-sound-options" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:10px;">
@@ -5571,7 +7059,7 @@
                 </div>
 
                 <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
-                    Quand un message contient @tonpseudo, il est surligne avec cette couleur. Tu peux aussi inclure les réponses citées, régler l'opacité, mettre 0 seconde pour desactiver le clignotement, choisir un son si besoin et laisser le pseudo vide pour couper la surveillance.
+                    Quand un message contient @tonpseudo, il est surligné avec cette couleur. Tu peux aussi inclure les réponses citées, régler l'opacité, mettre 0 seconde pour désactiver le clignotement, choisir un son si besoin et laisser le pseudo vide pour couper la surveillance.
                 </div>
             </div>
 
@@ -5629,7 +7117,8 @@
         const mentionPreviewText = modal.querySelector('#tm-mention-preview-text');
         const mentionKeepHighlightToggle = modal.querySelector('#tm-mention-keep-highlight-toggle');
         const mentionIncludeReplyToggle = modal.querySelector('#tm-mention-include-reply-toggle');
-        const mentionSoundToggle = modal.querySelector('#tm-mention-sound-toggle');
+        const mentionSoundScopeGroup = modal.querySelector('#tm-mention-sound-scope-group');
+        const mentionSoundScopeButtons = Array.from(modal.querySelectorAll('[data-tm-mention-sound-scope]'));
         const mentionSoundOptions = modal.querySelector('#tm-mention-sound-options');
         const mentionSoundStyleSelect = modal.querySelector('#tm-mention-sound-style-select');
         const mentionSoundCustomUrlInput = modal.querySelector('#tm-mention-sound-custom-url-input');
@@ -5670,9 +7159,30 @@
             }
         }
 
+        function getSelectedMentionSoundScope() {
+            return normalizeMentionSoundScope(
+                mentionSoundScopeGroup?.getAttribute('data-tm-sound-scope') || mentionSettings.soundScope
+            );
+        }
+
         function syncMentionSoundControlsState() {
-            const soundEnabled = mentionSoundToggle?.checked === true;
+            const soundScope = getSelectedMentionSoundScope();
+            const soundEnabled = isMentionSoundScopeEnabled(soundScope);
             const customSoundSelected = mentionSoundStyleSelect?.value === 'custom';
+
+            if (mentionSoundScopeGroup) {
+                mentionSoundScopeGroup.setAttribute('data-tm-sound-scope', soundScope);
+            }
+
+            mentionSoundScopeButtons.forEach((button) => {
+                if (!(button instanceof HTMLButtonElement)) return;
+
+                const isActive = normalizeMentionSoundScope(button.getAttribute('data-tm-mention-sound-scope')) === soundScope;
+                button.style.background = isActive ? '#166534' : '#27272a';
+                button.style.borderColor = isActive ? 'rgba(74,222,128,0.42)' : 'rgba(255,255,255,0.08)';
+                button.style.color = isActive ? '#ecfdf5' : '#e4e4e7';
+                button.style.boxShadow = isActive ? 'inset 0 1px 0 rgba(255,255,255,0.08), 0 0 0 1px rgba(34,197,94,0.12)' : 'none';
+            });
 
             if (mentionSoundOptions) {
                 mentionSoundOptions.style.display = soundEnabled ? 'flex' : 'none';
@@ -5947,7 +7457,7 @@
                 mentionBlinkInput.value,
                 mentionKeepHighlightToggle?.checked,
                 mentionIncludeReplyToggle?.checked,
-                mentionSoundToggle?.checked,
+                getSelectedMentionSoundScope(),
                 mentionSoundStyleSelect?.value,
                 mentionSoundCustomUrlInput?.value,
                 mentionSoundCooldownInput?.value
@@ -5966,8 +7476,8 @@
             if (mentionIncludeReplyToggle) {
                 mentionIncludeReplyToggle.checked = mentionSettings.includeReplyContext;
             }
-            if (mentionSoundToggle) {
-                mentionSoundToggle.checked = mentionSettings.soundEnabled;
+            if (mentionSoundScopeGroup) {
+                mentionSoundScopeGroup.setAttribute('data-tm-sound-scope', mentionSettings.soundScope || DEFAULT_MENTION_SOUND_SCOPE);
             }
             if (mentionSoundStyleSelect) {
                 mentionSoundStyleSelect.value = mentionSettings.soundStyle;
@@ -6009,7 +7519,16 @@
             }
         });
 
-        mentionSoundToggle?.addEventListener('change', syncMentionSoundControlsState);
+        mentionSoundScopeButtons.forEach((button) => {
+            if (!(button instanceof HTMLButtonElement)) return;
+
+            button.addEventListener('click', () => {
+                const scope = normalizeMentionSoundScope(button.getAttribute('data-tm-mention-sound-scope'));
+                mentionSoundScopeGroup?.setAttribute('data-tm-sound-scope', scope);
+                syncMentionSoundControlsState();
+            });
+        });
+
         mentionSoundStyleSelect?.addEventListener('change', syncMentionSoundControlsState);
 
         mentionSoundCustomUrlInput?.addEventListener('keydown', (e) => {
@@ -6020,7 +7539,7 @@
         });
 
         mentionSoundTestBtn?.addEventListener('click', async () => {
-            if (mentionSoundToggle?.checked !== true) return;
+            if (!isMentionSoundScopeEnabled(getSelectedMentionSoundScope())) return;
 
             const played = await playMentionNotificationSound(
                 mentionSoundStyleSelect?.value,
@@ -6133,8 +7652,8 @@
             applyChatFooterVisibilityState();
             setFeedback(
                 hideChatFooterEnabled
-                    ? 'Footer masqué sur la page Chat.'
-                    : 'Footer réaffiché sur la page Chat.'
+                    ? 'Pied de page masqué sur la page chat.'
+                    : 'Pied de page réaffiché sur la page chat.'
             );
         });
 
@@ -6153,9 +7672,9 @@
             applyLightThemeState();
             processAllMessages();
             if (lightThemeEnabled) {
-                showToast(`Theme clair BETA active pour ${currentPageLabel}. Feature tout juste commencee, rendu encore evolutif.`);
+                showToast(`Thème clair beta activé pour ${currentPageLabel}. Fonction encore récente, rendu susceptible d’évoluer.`);
             }
-            setFeedback(lightThemeEnabled ? `Theme clair active pour ${currentPageLabel}.` : `Theme clair desactive pour ${currentPageLabel}.`);
+            setFeedback(lightThemeEnabled ? `Thème clair activé pour ${currentPageLabel}.` : `Thème clair désactivé pour ${currentPageLabel}.`);
         });
 
         rightInput.addEventListener('input', previewPosition);
@@ -6214,8 +7733,11 @@
         return !!element.closest(
             [
                 `#${PANEL_ID}`,
+                `#${AFK_PANEL_ID}`,
                 `#${MODAL_ID}`,
                 `#${OVERLAY_ID}`,
+                `#${IMAGE_VIEWER_MODAL_ID}`,
+                `#${IMAGE_VIEWER_OVERLAY_ID}`,
                 `#${TOAST_ID}`,
                 `#${PHRASES_MENU_WRAPPER_ID}`,
                 `#${GIF_MENU_WRAPPER_ID}`
@@ -6946,6 +8468,174 @@
         return MAX_SAVED_PHRASE_LENGTH;
     }
 
+    function getChatInputRawValue(input = getChatInput()) {
+        if (!(input instanceof HTMLElement)) return '';
+
+        if (input.isContentEditable) {
+            return String(input.textContent || '');
+        }
+
+        if ('value' in input) {
+            return String(input.value || '');
+        }
+
+        return '';
+    }
+
+    function setChatInputExactValue(input, nextValue) {
+        if (!(input instanceof HTMLElement)) {
+            return { ok: false, message: 'Champ de texte non trouvé.' };
+        }
+
+        const safeValue = String(nextValue || '');
+        const maxLength = getChatInputMaxLength(input);
+        if (maxLength > 0 && safeValue.length > maxLength) {
+            return {
+                ok: false,
+                message: `Le message dépasserait la limite du chat (${safeValue.length}/${maxLength}).`
+            };
+        }
+
+        input.focus();
+
+        if (input.isContentEditable) {
+            input.textContent = safeValue;
+        } else if ('value' in input) {
+            const nativeSetter = Object.getOwnPropertyDescriptor(
+                window[input.tagName === 'TEXTAREA' ? 'HTMLTextAreaElement' : 'HTMLInputElement'].prototype,
+                'value'
+            )?.set;
+
+            if (nativeSetter) {
+                nativeSetter.call(input, safeValue);
+            } else {
+                input.value = safeValue;
+            }
+        } else {
+            return { ok: false, message: 'Champ de texte non compatible.' };
+        }
+
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        return { ok: true, message: 'Champ mis à jour.' };
+    }
+
+    function getChatSendButton(input = getChatInput()) {
+        const searchRoot = getNativeChatInputActionSearchRoot(input);
+        if (!(searchRoot instanceof HTMLElement)) return null;
+
+        const buttons = Array.from(searchRoot.querySelectorAll('button, [role="button"]')).filter((element) => {
+            if (!(element instanceof HTMLElement)) return false;
+            if (isScriptUiElement(element)) return false;
+            return true;
+        });
+
+        const explicitButton = buttons.find((button) =>
+            button instanceof HTMLButtonElement && isNativeChatInputSendButton(button)
+        );
+        if (explicitButton instanceof HTMLButtonElement) return explicitButton;
+
+        const submitButton = buttons.find((button) => {
+            if (!(button instanceof HTMLButtonElement)) return false;
+            return String(button.type || '').toLowerCase() === 'submit';
+        });
+        if (submitButton instanceof HTMLButtonElement) return submitButton;
+
+        return null;
+    }
+
+    function scheduleChatInputDraftRestore(input, previousValue, temporaryValue) {
+        if (!(input instanceof HTMLElement)) return;
+
+        const originalDraft = String(previousValue || '');
+        const temporaryDraft = String(temporaryValue || '');
+        if (!originalDraft.trim()) return;
+
+        const startedAt = Date.now();
+
+        function attemptRestore() {
+            if (!(input instanceof HTMLElement) || !document.contains(input)) return;
+
+            const currentValue = getChatInputRawValue(input);
+            if (!currentValue.trim()) {
+                void setChatInputExactValue(input, originalDraft);
+                return;
+            }
+
+            if (Date.now() - startedAt >= 4000) {
+                if (normalizeMentionComparableText(currentValue) === normalizeMentionComparableText(temporaryDraft)) {
+                    void setChatInputExactValue(input, originalDraft);
+                }
+                return;
+            }
+
+            window.setTimeout(attemptRestore, 140);
+        }
+
+        window.setTimeout(attemptRestore, 140);
+    }
+
+    function sendAutomatedChatMessage(messageText, options = {}) {
+        const normalizedMessage = normalizeSavedPhraseText(messageText, true);
+        if (!normalizedMessage) {
+            return { ok: false, message: 'Message AFK vide.' };
+        }
+
+        const input = options?.input instanceof HTMLElement ? options.input : getChatInput();
+        if (!(input instanceof HTMLElement)) {
+            return { ok: false, message: 'Champ de texte non trouvé.' };
+        }
+
+        const previousValue = getChatInputRawValue(input);
+        const setValueResult = setChatInputExactValue(input, normalizedMessage);
+        if (!setValueResult.ok) {
+            return setValueResult;
+        }
+
+        afkAutomatedSendInFlight = true;
+
+        try {
+            const sendButton = getChatSendButton(input);
+            if (sendButton instanceof HTMLButtonElement && !sendButton.disabled) {
+                sendButton.click();
+            } else {
+                const form = input.closest('form');
+                if (form instanceof HTMLFormElement) {
+                    if (typeof form.requestSubmit === 'function') {
+                        form.requestSubmit();
+                    } else {
+                        form.submit();
+                    }
+                } else {
+                    input.dispatchEvent(new KeyboardEvent('keydown', {
+                        key: 'Enter',
+                        code: 'Enter',
+                        keyCode: 13,
+                        which: 13,
+                        bubbles: true,
+                        cancelable: true
+                    }));
+                    input.dispatchEvent(new KeyboardEvent('keyup', {
+                        key: 'Enter',
+                        code: 'Enter',
+                        keyCode: 13,
+                        which: 13,
+                        bubbles: true
+                    }));
+                }
+            }
+        } finally {
+            window.setTimeout(() => {
+                afkAutomatedSendInFlight = false;
+            }, 0);
+        }
+
+        if (options?.preserveDraft !== false) {
+            scheduleChatInputDraftRestore(input, previousValue, normalizedMessage);
+        }
+
+        return { ok: true, message: 'Message envoyé.' };
+    }
+
     function insertTextIntoChatInput(input, textToInsert, successMessage = 'Texte inséré.') {
         if (!(input instanceof HTMLElement)) {
             return { ok: false, message: 'Champ de texte non trouvé.' };
@@ -6991,6 +8681,76 @@
 
         input.dispatchEvent(new Event('input', { bubbles: true }));
         return { ok: true, message: successMessage };
+    }
+
+    function maybeDisableAfkFromManualInputSubmission(input) {
+        if (afkAutomatedSendInFlight) return;
+        if (!(input instanceof HTMLElement)) return;
+        if (!isAfkEnabledForCurrentContext()) return;
+
+        const currentValue = getChatInputRawValue(input);
+        if (!currentValue.trim()) return;
+
+        const result = disableAfkModeForCurrentContext('après envoi manuel');
+        if (result.ok) {
+            showToast(result.message);
+        }
+    }
+
+    function installAfkAutoDisableOnManualSend() {
+        document.addEventListener('submit', (event) => {
+            if (!isSupportedPage() || afkAutomatedSendInFlight) return;
+
+            const form = event.target;
+            if (!(form instanceof HTMLFormElement)) return;
+
+            const input = findChatInputWithin(form);
+            if (!(input instanceof HTMLElement)) return;
+
+            maybeDisableAfkFromManualInputSubmission(input);
+        }, true);
+
+        document.addEventListener('click', (event) => {
+            if (!isSupportedPage() || afkAutomatedSendInFlight) return;
+
+            const target = event.target;
+            if (!(target instanceof Element)) return;
+
+            const button = target.closest('button');
+            if (!(button instanceof HTMLButtonElement)) return;
+            if (isScriptUiElement(button)) return;
+            if (!isNativeChatInputSendButton(button) && String(button.type || '').toLowerCase() !== 'submit') return;
+
+            const input = getChatInput();
+            if (!(input instanceof HTMLElement)) return;
+
+            const searchRoot = getNativeChatInputActionSearchRoot(input);
+            const inputForm = input.closest('form');
+            if (
+                searchRoot instanceof HTMLElement &&
+                !searchRoot.contains(button) &&
+                !(inputForm instanceof HTMLFormElement && inputForm.contains(button))
+            ) {
+                return;
+            }
+
+            maybeDisableAfkFromManualInputSubmission(input);
+        }, true);
+
+        document.addEventListener('keydown', (event) => {
+            if (!isSupportedPage() || afkAutomatedSendInFlight) return;
+            if (event.key !== 'Enter' || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
+
+            const target = event.target;
+            if (!(target instanceof HTMLElement)) return;
+
+            const input = isChatInputCandidate(target)
+                ? target
+                : target.closest('input[type="text"], textarea, [contenteditable="true"]');
+            if (!(input instanceof HTMLElement) || !isChatInputCandidate(input)) return;
+
+            maybeDisableAfkFromManualInputSubmission(input);
+        }, true);
     }
 
     function insertSavedPhraseIntoChatInput(input, phraseText) {
@@ -8333,6 +10093,147 @@
         return DIRECT_IMAGE_PATH_RE.test(parsedUrl.pathname) ? [parsedUrl.href] : [];
     }
 
+    function parseYouTubeTimeToSeconds(rawValue) {
+        const value = String(rawValue || '').trim().toLowerCase();
+        if (!value) return 0;
+        if (/^\d+$/.test(value)) return Number(value) || 0;
+
+        let totalSeconds = 0;
+        const matcher = /(\d+)(h|m|s)/g;
+        let match;
+
+        while ((match = matcher.exec(value)) !== null) {
+            const amount = Number(match[1]) || 0;
+            const unit = match[2];
+
+            if (unit === 'h') totalSeconds += amount * 3600;
+            if (unit === 'm') totalSeconds += amount * 60;
+            if (unit === 's') totalSeconds += amount;
+        }
+
+        return totalSeconds;
+    }
+
+    function normalizeYouTubeVideoTitle(value, fallback = DEFAULT_YOUTUBE_PLAYER_TITLE) {
+        const normalizedTitle = String(value || '')
+            .replace(/\s+/g, ' ')
+            .trim();
+
+        return normalizedTitle || fallback;
+    }
+
+    function getFallbackYouTubePlayerTitle(videoId = '') {
+        const normalizedVideoId = String(videoId || '').trim();
+        if (!normalizedVideoId) return DEFAULT_YOUTUBE_PLAYER_TITLE;
+        return `YouTube · ${normalizedVideoId}`;
+    }
+
+    function setYouTubePlayerTitle(titleText) {
+        const player = document.getElementById(YOUTUBE_PLAYER_ID);
+        if (!(player instanceof HTMLElement)) return;
+
+        const titleEl = player.querySelector('[data-tm-youtube-player-title="1"]');
+        if (!(titleEl instanceof HTMLElement)) return;
+
+        const normalizedTitle = normalizeYouTubeVideoTitle(titleText);
+        titleEl.textContent = normalizedTitle;
+        titleEl.title = normalizedTitle;
+    }
+
+    async function fetchYouTubeVideoTitle(videoId, watchUrl) {
+        const normalizedVideoId = String(videoId || '').trim();
+        const normalizedWatchUrl = String(watchUrl || '').trim();
+
+        if (!normalizedVideoId || !normalizedWatchUrl) return '';
+        if (youtubeVideoTitleCache.has(normalizedVideoId)) {
+            return youtubeVideoTitleCache.get(normalizedVideoId) || '';
+        }
+
+        try {
+            const oEmbedUrl = new URL('https://www.youtube.com/oembed');
+            oEmbedUrl.searchParams.set('url', normalizedWatchUrl);
+            oEmbedUrl.searchParams.set('format', 'json');
+
+            const response = await fetch(oEmbedUrl.toString(), {
+                method: 'GET',
+                headers: {
+                    Accept: 'application/json'
+                },
+                credentials: 'omit'
+            });
+
+            if (!response.ok) return '';
+
+            const payload = await response.json();
+            const resolvedTitle = normalizeYouTubeVideoTitle(
+                payload?.title,
+                ''
+            );
+
+            if (!resolvedTitle) return '';
+
+            youtubeVideoTitleCache.set(normalizedVideoId, resolvedTitle);
+            return resolvedTitle;
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function getYouTubeVideoDescriptor(rawUrl) {
+        const normalizedUrl = String(rawUrl || '').trim();
+        if (!normalizedUrl) return null;
+
+        let parsedUrl;
+        try {
+            parsedUrl = new URL(normalizedUrl, location.origin);
+        } catch (e) {
+            return null;
+        }
+
+        if (!/^https?:$/i.test(parsedUrl.protocol)) return null;
+
+        const hostname = parsedUrl.hostname.toLowerCase().replace(/^www\./, '').replace(/^m\./, '');
+        const pathnameParts = parsedUrl.pathname.split('/').filter(Boolean);
+        let videoId = '';
+
+        if (hostname === 'youtu.be') {
+            videoId = pathnameParts[0] || '';
+        } else if (hostname === 'youtube.com' || hostname === 'music.youtube.com' || hostname === 'youtube-nocookie.com') {
+            if (parsedUrl.pathname === '/watch') {
+                videoId = parsedUrl.searchParams.get('v') || '';
+            } else if (pathnameParts[0] === 'shorts' || pathnameParts[0] === 'embed' || pathnameParts[0] === 'live') {
+                videoId = pathnameParts[1] || '';
+            }
+        }
+
+        if (!/^[a-zA-Z0-9_-]{6,}$/.test(videoId)) return null;
+
+        const startSeconds = Math.max(
+            parseYouTubeTimeToSeconds(parsedUrl.searchParams.get('t')),
+            parseYouTubeTimeToSeconds(parsedUrl.searchParams.get('start')),
+            parseYouTubeTimeToSeconds(parsedUrl.searchParams.get('time_continue'))
+        );
+        const embedUrl = new URL(`https://www.youtube-nocookie.com/embed/${videoId}`);
+
+        embedUrl.searchParams.set('autoplay', '1');
+        embedUrl.searchParams.set('rel', '0');
+        embedUrl.searchParams.set('modestbranding', '1');
+        embedUrl.searchParams.set('playsinline', '1');
+
+        if (startSeconds > 0) {
+            embedUrl.searchParams.set('start', String(startSeconds));
+        }
+
+        const watchUrl = new URL('https://www.youtube.com/watch');
+        watchUrl.searchParams.set('v', videoId);
+
+        return {
+            videoId,
+            embedUrl: embedUrl.toString(),
+            watchUrl: watchUrl.toString()
+        };
+    }
+
     function linkifyTextNodeUrls(textNode) {
         if (!(textNode instanceof Text)) return;
 
@@ -8453,9 +10354,46 @@
         });
     }
 
+    function syncYouTubePlayButtons(messageEl) {
+        const textBlock = getMessageTextBlock(messageEl);
+        if (!(textBlock instanceof HTMLElement)) return;
+
+        const staleButtons = Array.from(textBlock.querySelectorAll('button[data-tm-youtube-play-link="1"]'));
+        staleButtons.forEach((button) => {
+            button.remove();
+        });
+
+        ensureYouTubeLinkActionStyle();
+
+        const linkifiedLinks = Array.from(textBlock.querySelectorAll('a[data-tm-linkified-url="1"]'));
+        linkifiedLinks.forEach((link) => {
+            if (!(link instanceof HTMLAnchorElement)) return;
+
+            const videoDescriptor = getYouTubeVideoDescriptor(link.href);
+            if (!videoDescriptor) return;
+
+            const playButton = document.createElement('button');
+            playButton.type = 'button';
+            playButton.textContent = 'play';
+            playButton.title = 'Lire dans le player';
+            playButton.setAttribute('aria-label', 'Lire dans le player');
+            playButton.setAttribute('data-tm-youtube-play-link', '1');
+            playButton.setAttribute('data-tm-youtube-embed-url', videoDescriptor.embedUrl);
+            playButton.setAttribute('data-tm-youtube-video-id', videoDescriptor.videoId);
+            playButton.setAttribute('data-tm-youtube-watch-url', videoDescriptor.watchUrl);
+
+            link.insertAdjacentElement('afterend', playButton);
+        });
+    }
+
     function unlinkifyMessageTextBlock(messageEl) {
         const textBlock = getMessageTextBlock(messageEl);
         if (!(textBlock instanceof HTMLElement)) return;
+
+        const youtubeButtons = Array.from(textBlock.querySelectorAll('button[data-tm-youtube-play-link="1"]'));
+        youtubeButtons.forEach((button) => {
+            button.remove();
+        });
 
         const previews = Array.from(textBlock.querySelectorAll('span[data-tm-embedded-image-preview="1"]'));
         previews.forEach((preview) => {
@@ -8474,6 +10412,7 @@
         if (linkifyUrlsEnabled) {
             linkifyMessageTextBlock(messageEl);
             syncEmbeddedImagePreviews(messageEl);
+            syncYouTubePlayButtons(messageEl);
             return;
         }
 
@@ -8499,7 +10438,7 @@
 
         const image = target.closest('img');
         if (!(image instanceof HTMLImageElement)) return null;
-        if (image.closest(`#${PANEL_ID}, #${MODAL_ID}, #${OVERLAY_ID}, #${TOAST_ID}`)) return null;
+        if (image.closest(`#${PANEL_ID}, #${AFK_PANEL_ID}, #${MODAL_ID}, #${OVERLAY_ID}, #${IMAGE_VIEWER_MODAL_ID}, #${IMAGE_VIEWER_OVERLAY_ID}, #${TOAST_ID}`)) return null;
 
         const messageEl = findMessageElementFromTarget(image);
         if (!messageEl || !messageEl.contains(image)) return null;
@@ -8519,7 +10458,7 @@
 
         const link = target.closest('a[data-tm-linkified-url="1"][data-tm-linkified-image="1"]');
         if (!(link instanceof HTMLAnchorElement)) return null;
-        if (link.closest(`#${PANEL_ID}, #${MODAL_ID}, #${OVERLAY_ID}, #${TOAST_ID}`)) return null;
+        if (link.closest(`#${PANEL_ID}, #${AFK_PANEL_ID}, #${MODAL_ID}, #${OVERLAY_ID}, #${IMAGE_VIEWER_MODAL_ID}, #${IMAGE_VIEWER_OVERLAY_ID}, #${TOAST_ID}`)) return null;
 
         const messageEl = findMessageElementFromTarget(link);
         if (!messageEl || !messageEl.contains(link)) return null;
@@ -8546,7 +10485,8 @@
         preview.style.position = 'fixed';
         preview.style.zIndex = '1000003';
         preview.style.display = 'none';
-        preview.style.pointerEvents = 'none';
+        preview.style.pointerEvents = 'auto';
+        preview.style.cursor = 'zoom-in';
         preview.style.padding = '8px';
         preview.style.borderRadius = '14px';
         preview.style.background = 'rgba(24,24,27,0.96)';
@@ -8563,6 +10503,22 @@
         img.style.objectFit = 'contain';
 
         preview.appendChild(img);
+        preview.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+
+            const rawCandidates = preview.getAttribute('data-tm-viewer-candidates') || '[]';
+
+            try {
+                const candidateUrls = JSON.parse(rawCandidates);
+                if (Array.isArray(candidateUrls) && candidateUrls.length > 0) {
+                    openImageViewerFromCandidates(candidateUrls);
+                }
+            } catch (e) {
+                // Ignore malformed preview payloads.
+            }
+        });
+
         document.body.appendChild(preview);
         return preview;
     }
@@ -8600,6 +10556,7 @@
         }
 
         preview.removeAttribute('data-tm-preview-signature');
+        preview.removeAttribute('data-tm-viewer-candidates');
     }
 
     function showImagePreviewFromCandidates(hoverTarget, candidateUrls, clientX, clientY) {
@@ -8631,6 +10588,7 @@
         preview.style.left = '-9999px';
         preview.style.top = '-9999px';
         preview.setAttribute('data-tm-preview-signature', candidateSignature);
+        preview.setAttribute('data-tm-viewer-candidates', JSON.stringify(candidateUrls));
 
         function tryNextCandidate() {
             if (preview.getAttribute('data-tm-preview-signature') !== candidateSignature) return;
@@ -8731,8 +10689,11 @@
         return !!target.closest(
             [
                 `#${PANEL_ID}`,
+                `#${AFK_PANEL_ID}`,
                 `#${MODAL_ID}`,
                 `#${OVERLAY_ID}`,
+                `#${IMAGE_VIEWER_MODAL_ID}`,
+                `#${IMAGE_VIEWER_OVERLAY_ID}`,
                 `#${TOAST_ID}`,
                 'button',
                 'a',
@@ -8909,8 +10870,12 @@
 
     function installImagePreviewHandler() {
         document.addEventListener('mousemove', (event) => {
-            if (modalOpen || !isSupportedPage()) {
+            if (imageViewerOpen || modalOpen || !isSupportedPage()) {
                 if (hoveredMessageImage) hideImagePreview();
+                return;
+            }
+
+            if (event.target instanceof Element && event.target.closest(`#${IMAGE_PREVIEW_ID}`)) {
                 return;
             }
 
@@ -8946,6 +10911,52 @@
 
         document.addEventListener('scroll', () => {
             if (hoveredMessageImage) hideImagePreview();
+        }, true);
+
+        document.addEventListener('click', (event) => {
+            if (imageViewerOpen || modalOpen || !isSupportedPage()) return;
+
+            const target = event.target;
+            if (!(target instanceof Element)) return;
+
+            const linkPreview = getMessageLinkImagePreviewCandidatesFromTarget(target);
+            if (linkPreview) {
+                event.preventDefault();
+                event.stopPropagation();
+                openImageViewerFromCandidates(linkPreview.candidateUrls);
+                return;
+            }
+
+            const image = getMessageContentImageFromTarget(target);
+            if (!(image instanceof HTMLImageElement)) return;
+
+            const source = image.currentSrc || image.src;
+            if (!source) return;
+
+            event.preventDefault();
+            event.stopPropagation();
+            openImageViewerFromCandidates([source]);
+        }, true);
+    }
+
+    function installYouTubePlayerHandler() {
+        document.addEventListener('click', (event) => {
+            if (modalOpen || !isSupportedPage()) return;
+
+            const target = event.target;
+            if (!(target instanceof Element)) return;
+
+            const playButton = target.closest('button[data-tm-youtube-play-link="1"]');
+            if (!(playButton instanceof HTMLButtonElement)) return;
+
+            const embedUrl = playButton.getAttribute('data-tm-youtube-embed-url') || '';
+            const videoId = playButton.getAttribute('data-tm-youtube-video-id') || '';
+            const watchUrl = playButton.getAttribute('data-tm-youtube-watch-url') || '';
+            if (!embedUrl) return;
+
+            event.preventDefault();
+            event.stopPropagation();
+            openYouTubePlayer(embedUrl, { videoId, watchUrl });
         }, true);
     }
 
@@ -8996,12 +11007,18 @@
             applyChatInputToolbarAlignmentState();
             syncNativeChatInputActionButtons();
 
+            if (isAfkEnabledForCurrentContext()) {
+                seedAfkSeenMessagesFromCurrentRoot();
+            }
+
             if (isHomePage() && homeChatCollapsed) {
                 stopObserver();
             } else {
                 processAllMessages();
                 startObserver();
             }
+
+            renderAfkPanel();
         } else {
             lightThemeEnabled = false;
             applyLightThemeState();
@@ -9014,9 +11031,12 @@
             removeKlipyGifToolbar();
             removeStatsBox();
             closeSettingsModal();
+            closeImageViewer();
+            closeYouTubePlayer();
             hideImagePreview();
             removeToast();
             syncNativeChatInputActionButtons();
+            renderAfkPanel();
         }
     }
 
@@ -9044,7 +11064,11 @@
                 injectKlipyGifToolbar();
                 applyChatInputToolbarAlignmentState();
                 syncNativeChatInputActionButtons();
+                if (isAfkEnabledForCurrentContext()) {
+                    seedAfkSeenMessagesFromCurrentRoot();
+                }
                 processAllMessages();
+                renderAfkPanel();
             } else if (isHomePage() && !getHomepageChatContainer()) {
                 removeSavedPhrasesToolbar();
                 removeKlipyGifToolbar();
@@ -9085,6 +11109,8 @@
                     applyChatInputToolbarAlignmentState();
                     syncNativeChatInputActionButtons(textInput);
                 }
+
+                renderAfkPanel();
             }
         }, 500);
 
@@ -9113,6 +11139,11 @@
                 positionKlipyGifMenu(gifMenu);
             }
 
+            const afkPanel = document.getElementById(AFK_PANEL_ID);
+            if (afkPanel instanceof HTMLElement) {
+                constrainAfkPanelToViewport(afkPanel);
+            }
+
             if (!isChatPage() || !messageActionsLeftEnabled) return;
             processAllMessages();
         });
@@ -9122,25 +11153,47 @@
         const key = String(e.key || '').toLowerCase();
         const isClassicShortcut = e.ctrlKey && e.altKey && !e.metaKey && key === 'c';
         const isMacShortcut = e.ctrlKey && e.metaKey && !e.altKey && key === 'c';
+        const isClassicAfkShortcut = e.ctrlKey && e.altKey && !e.metaKey && key === 'a';
+        const isMacAfkShortcut = e.ctrlKey && e.metaKey && !e.altKey && key === 'a';
 
         if (isClassicShortcut || isMacShortcut) {
             if (!isSupportedPage()) return;
+            if (imageViewerOpen) return;
             e.preventDefault();
             openSettingsModal();
+            return;
+        }
+
+        if (isClassicAfkShortcut || isMacAfkShortcut) {
+            if (!isSupportedPage()) return;
+            if (imageViewerOpen) return;
+            e.preventDefault();
+
+            if (!afkState.enabled && afkPanelHidden && afkActivityRecords.length > 0) {
+                saveAfkPanelHidden(false);
+                renderAfkPanel();
+                showToast('Panneau AFK réouvert.');
+                return;
+            }
+
+            const result = toggleAfkModeForCurrentContext();
+            showToast(result.message, !result.ok);
         }
     });
 
     function init() {
         installQuickToggleHandler();
         installNativeReplyShortcutHandler();
+        installAfkAutoDisableOnManualSend();
         installSavedPhrasesReplyContextTracker();
         installNativeReactionButtonPositionHandler();
         installNativeReactionShortcutHandler();
         installImagePreviewHandler();
+        installYouTubePlayerHandler();
         installRouteWatcher();
         document.addEventListener('click', handleStatsBoxActionClick, true);
         refreshForRoute();
-        console.log('[Torr9 Chat] Script actif. Raccourcis : Ctrl+Alt+C / Ctrl+Cmd+C');
+        console.log(`[Torr9 Chat] Script actif. Raccourcis : Ctrl+Alt+C / Ctrl+Cmd+C · ${formatAfkShortcutLabel()}`);
     }
 
     if (document.readyState === 'loading') {
