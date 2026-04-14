@@ -10,7 +10,15 @@ Ce fichier suit l'état fonctionnel du userscript à partir de la version actuel
 
 ## Version en préparation
 
-- Aucune entrée pour le moment.
+- Rien à signaler pour l’instant.
+
+## v2.62 - 2026-04-14
+
+- Ajout d’un export/import JSON de la configuration principale du script depuis les paramètres, pour sauvegarder et restaurer rapidement les réglages sur une autre installation.
+- Déplacement de la tuile `Astuces` en tête de la modale de configuration, sur toute la largeur, pour la rendre plus visible.
+- Ajout d’un rappel dans les `Astuces` pour penser à exporter la configuration avant suppression des données navigateur ou changement de profil.
+- Stats box désormais déplaçable et redimensionnable directement à la souris, avec mémorisation séparée sur l’accueil et la page chat, et suppression des sliders de position devenus inutiles.
+- Correction du bouton `play` YouTube sur les liens déjà rendus en balises `<a>` par le BBCode, y compris quand l’URL n’a pas été linkifiée par le script.
 
 ## v2.61 - 2026-04-14
 
