@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torr9 Chat - Shoutbox 2.0
 // @namespace    https://github.com/SaltedButch/torr9-scripting
-// @version      2.60
+// @version      2.61
 // @description  Blacklist, mise en avant, mentions, réponses rapides contextuelles, Gif et confort avancé pour la shoutbox Torr9
 // @icon         https://torr9.net/favicon.ico?favicon.71918ed5.ico`
 // @author       Butchered
@@ -85,6 +85,7 @@
     const MAX_STATS_BOTTOM_PERCENT = 95;
     const MAX_RECENT_MENTION_SOUND_RECORDS = 40;
     const MAX_AFK_READ_ACTIVITY_RECORDS = 50;
+    const MAX_AFK_AUTO_REPLY_MESSAGE_LENGTH = 300;
     const MAX_SAVED_PHRASE_LENGTH = 1000;
     const MAX_VISIBLE_SAVED_PHRASES_IN_MENU = 5;
     const SAVED_PHRASES_EXPORT_VERSION = 1;
@@ -128,6 +129,7 @@
     const AFK_AUTO_REPLY_GLOBAL_COOLDOWN_MS = 60 * 1000;
     const AFK_AUTO_REPLY_PER_USER_COOLDOWN_MS = 5 * 60 * 1000;
     const AFK_AUTO_REPLY_MAX_INACTIVITY_MS = 30 * 60 * 1000;
+    const AFK_RELOAD_REPLAY_PROTECTION_MS = 8000;
 
     const DEFAULT_POSITION = {
         rightPercent: 2,
@@ -177,6 +179,9 @@
     let savedPhrasesStorageNeedsRepair = false;
     let savedPhrasesReplyContext = null;
     let afkAutomatedSendInFlight = false;
+    let afkMessageDraft = null;
+    let afkReplayProtectionUntil = 0;
+    let afkReplayProtectionContextKey = '';
     let afkState = loadAfkState();
     let afkActivityRecords = loadAfkActivityRecords();
     let afkPanelPosition = loadAfkPanelPosition();
@@ -461,7 +466,10 @@
     }
 
     function normalizeAfkAutoReplyMessage(value) {
-        const normalizedMessage = normalizeSavedPhraseText(value, true);
+        const normalizedMessage = extractSavedPhraseStringValue(value)
+            .replace(/\r\n?/g, '\n')
+            .trim()
+            .slice(0, MAX_AFK_AUTO_REPLY_MESSAGE_LENGTH);
         return normalizedMessage || DEFAULT_AFK_AUTO_REPLY_MESSAGE;
     }
 
@@ -479,6 +487,7 @@
         if (!value || typeof value !== 'object' || Array.isArray(value)) {
             return {
                 enabled: false,
+                autoReplyEnabled: false,
                 contextKey: '',
                 contextLabel: '',
                 username: normalizeName(mentionSettings?.username || ''),
@@ -491,6 +500,7 @@
 
         return {
             enabled: value.enabled === true,
+            autoReplyEnabled: value.autoReplyEnabled === true,
             contextKey: String(value.contextKey || '').trim(),
             contextLabel: String(value.contextLabel || '').trim(),
             username: normalizeName(value.username || mentionSettings?.username || ''),
@@ -2899,6 +2909,10 @@
         return afkState.enabled === true && afkState.contextKey === getCurrentChatContextKey();
     }
 
+    function isAfkAutoReplyEnabled() {
+        return afkState.enabled === true && afkState.autoReplyEnabled === true;
+    }
+
     function getAfkReasonLabel(reason) {
         if (reason === 'reply') return 'Réponse';
         if (reason === 'mention+reply') return 'Mention + réponse';
@@ -2909,6 +2923,7 @@
         if (record?.autoReplySent === true) return 'Réponse auto envoyée';
 
         const status = String(record?.autoReplyStatus || '').trim();
+        if (status === 'disabled') return 'Réponse auto désactivée';
         if (status === 'inactive-timeout') return 'Réponses auto coupées après 30 min';
         if (status === 'cooldown') return 'Réponse auto en cooldown';
         if (status === 'already-replied') return 'Déjà notifié récemment';
@@ -2928,6 +2943,27 @@
         if (!activatedAt) return false;
 
         return referenceTime - activatedAt >= AFK_AUTO_REPLY_MAX_INACTIVITY_MS;
+    }
+
+    function clearAfkReplayProtection() {
+        afkReplayProtectionUntil = 0;
+        afkReplayProtectionContextKey = '';
+    }
+
+    function startAfkReplayProtectionForCurrentContext(durationMs = AFK_RELOAD_REPLAY_PROTECTION_MS) {
+        if (!isAfkEnabledForCurrentContext()) {
+            clearAfkReplayProtection();
+            return;
+        }
+
+        afkReplayProtectionContextKey = getCurrentChatContextKey();
+        afkReplayProtectionUntil = Date.now() + Math.max(0, Number(durationMs) || 0);
+    }
+
+    function isAfkReplayProtectionActive() {
+        if (!isAfkEnabledForCurrentContext()) return false;
+        if (!afkReplayProtectionUntil || Date.now() > afkReplayProtectionUntil) return false;
+        return afkReplayProtectionContextKey === getCurrentChatContextKey();
     }
 
     function formatAfkRecordTimestamp(record) {
@@ -3029,11 +3065,32 @@
     }
 
     function updateAfkAutoReplyMessage(value) {
+        afkMessageDraft = null;
         saveAfkState({
             ...afkState,
             autoReplyMessage: normalizeAfkAutoReplyMessage(value)
         });
         renderAfkPanel();
+    }
+
+    function updateAfkAutoReplyEnabled(value) {
+        const nextAutoReplyEnabled = afkState.enabled === true && value === true;
+
+        saveAfkState({
+            ...afkState,
+            autoReplyEnabled: nextAutoReplyEnabled,
+            activatedAt: nextAutoReplyEnabled ? Date.now() : 0,
+            lastAutoReplyAt: 0,
+            perUserReplyAt: {}
+        });
+        renderAfkPanel();
+
+        return {
+            ok: true,
+            message: nextAutoReplyEnabled
+                ? 'Réponse automatique AFK activée.'
+                : 'Réponse automatique AFK désactivée.'
+        };
     }
 
     function disableAfkModeForCurrentContext(reasonLabel = 'après envoi manuel') {
@@ -3046,6 +3103,7 @@
         saveAfkState({
             ...afkState,
             enabled: false,
+            autoReplyEnabled: false,
             contextKey: '',
             contextLabel: '',
             activatedAt: 0,
@@ -3053,6 +3111,7 @@
             perUserReplyAt: {}
         });
         afkSeenMessageKeys.clear();
+        clearAfkReplayProtection();
         renderAfkPanel();
 
         return {
@@ -3139,6 +3198,7 @@
         if (panel) {
             panel.remove();
         }
+        afkMessageDraft = null;
     }
 
     function renderAfkPanel() {
@@ -3159,15 +3219,28 @@
 
         const panel = getOrCreateAfkPanel();
         if (!(panel instanceof HTMLElement)) return;
+        const existingAfkMessageInput = panel.querySelector('#tm-afk-message-input');
+        if (
+            existingAfkMessageInput instanceof HTMLTextAreaElement &&
+            document.activeElement === existingAfkMessageInput
+        ) {
+            afkMessageDraft = existingAfkMessageInput.value.slice(0, MAX_AFK_AUTO_REPLY_MESSAGE_LENGTH);
+            return;
+        }
 
         const statusLabel = afkState.enabled
             ? `Actif sur ${escapeHtml(afkState.contextLabel || 'ce chat')}`
             : 'Inactif';
-        const currentAfkMessage = escapeHtml(afkState.autoReplyMessage || DEFAULT_AFK_AUTO_REPLY_MESSAGE);
+        const currentAfkMessage = escapeHtml(
+            afkMessageDraft !== null
+                ? String(afkMessageDraft).slice(0, MAX_AFK_AUTO_REPLY_MESSAGE_LENGTH)
+                : (afkState.autoReplyMessage || DEFAULT_AFK_AUTO_REPLY_MESSAGE)
+        );
         const activityCount = afkActivityRecords.length;
         const unreadCount = afkActivityRecords.filter((record) => !record.isRead).length;
         const readCount = Math.max(0, activityCount - unreadCount);
-        const autoReplyWindowExpired = afkState.enabled && isAfkAutoReplyWindowExpired();
+        const autoReplyEnabled = isAfkAutoReplyEnabled();
+        const autoReplyWindowExpired = autoReplyEnabled && isAfkAutoReplyWindowExpired();
         const toggleLabel = isAfkEnabledForCurrentContext()
             ? 'Désactiver ici'
             : (afkState.enabled ? 'Basculer ici' : 'Activer ici');
@@ -3214,14 +3287,28 @@
             <div style="padding:12px;border-radius:14px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);margin-bottom:12px;">
                 <div style="font-size:12px;font-weight:700;color:#d4d4d8;">Réponse automatique</div>
                 <div style="margin-top:8px;font-size:11px;color:#a1a1aa;line-height:1.45;">
-                    Utilise le pseudo défini dans les mentions pour repérer les messages qui te ciblent.
+                    Le suivi AFK peut rester actif sans répondre automatiquement. La réponse auto ne part que si la case ci-dessous est cochée.
                 </div>
+                <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:12px;color:#e4e4e7;cursor:${afkState.enabled ? 'pointer' : 'default'};">
+                    <input
+                        id="tm-afk-auto-reply-enabled"
+                        type="checkbox"
+                        ${autoReplyEnabled ? 'checked' : ''}
+                        ${afkState.enabled ? '' : 'disabled'}
+                        style="width:14px;height:14px;cursor:${afkState.enabled ? 'pointer' : 'not-allowed'};"
+                    >
+                    <span>Activer réponse automatique</span>
+                </label>
                 <div style="margin-top:8px;font-size:11px;color:${autoReplyWindowExpired ? '#facc15' : '#71717a'};line-height:1.45;">
-                    ${autoReplyWindowExpired
+                    ${!afkState.enabled
+                        ? 'Active d’abord le mode AFK pour pouvoir autoriser les réponses automatiques.'
+                        : !autoReplyEnabled
+                            ? 'Réponses automatiques désactivées. Le panneau continue simplement à enregistrer les messages à relire.'
+                            : autoReplyWindowExpired
                         ? 'Les réponses automatiques sont coupées après 30 minutes d’inactivité, mais les messages continuent d’être enregistrés.'
                         : 'Les réponses automatiques s’arrêtent d’elles-mêmes après 30 minutes d’inactivité, mais le suivi des messages continue.'}
                 </div>
-                <textarea id="tm-afk-message-input" rows="3" maxlength="${MAX_SAVED_PHRASE_LENGTH}" style="
+                <textarea id="tm-afk-message-input" rows="3" maxlength="${MAX_AFK_AUTO_REPLY_MESSAGE_LENGTH}" style="
                     width:100%;
                     margin-top:10px;
                     min-height:88px;
@@ -3234,6 +3321,9 @@
                     outline:none;
                     line-height:1.45;
                 ">${currentAfkMessage}</textarea>
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                    Message personnalisable, limité à ${MAX_AFK_AUTO_REPLY_MESSAGE_LENGTH} caractères.
+                </div>
                 <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px;">
                     <div style="font-size:11px;color:#71717a;">
                         Pseudo ciblé : <span style="color:#fff;font-weight:600;">${escapeHtml(getAfkWatchedUsername() || 'non configuré')}</span>
@@ -3333,6 +3423,7 @@
         const clearBtn = panel.querySelector('[data-tm-afk-action="clear"]');
         const hidePanelBtn = panel.querySelector('[data-tm-afk-action="hide-panel"]');
         const afkMessageInput = panel.querySelector('#tm-afk-message-input');
+        const autoReplyEnabledInput = panel.querySelector('#tm-afk-auto-reply-enabled');
         const dragHandle = panel.querySelector('[data-tm-afk-drag-handle="1"]');
 
         saveMessageBtn?.addEventListener('click', () => {
@@ -3348,6 +3439,12 @@
         clearBtn?.addEventListener('click', () => {
             clearAfkActivityRecords();
             showToast('Historique AFK effacé.');
+        });
+
+        autoReplyEnabledInput?.addEventListener('change', () => {
+            if (!(autoReplyEnabledInput instanceof HTMLInputElement)) return;
+            const result = updateAfkAutoReplyEnabled(autoReplyEnabledInput.checked);
+            showToast(result.message, !result.ok);
         });
 
         hidePanelBtn?.addEventListener('click', () => {
@@ -3373,6 +3470,10 @@
                 updateAfkAutoReplyMessage(afkMessageInput.value);
                 showToast('Message AFK enregistré.');
             }
+        });
+
+        afkMessageInput?.addEventListener('input', () => {
+            afkMessageDraft = afkMessageInput.value.slice(0, MAX_AFK_AUTO_REPLY_MESSAGE_LENGTH);
         });
 
         if (dragHandle instanceof HTMLElement) {
@@ -3448,19 +3549,24 @@
         saveAfkState({
             ...afkState,
             enabled: true,
+            autoReplyEnabled: false,
             contextKey: currentContextKey,
             contextLabel: currentContextLabel,
             username: watchedUsername,
-            activatedAt: Date.now(),
+            activatedAt: 0,
             lastAutoReplyAt: 0,
             perUserReplyAt: {}
         });
         saveAfkPanelHidden(false);
         afkSeenMessageKeys.clear();
+        clearAfkReplayProtection();
         seedAfkSeenMessagesFromCurrentRoot();
         renderAfkPanel();
 
-        return { ok: true, message: `Mode AFK activé pour ${currentContextLabel}.` };
+        return {
+            ok: true,
+            message: `Mode AFK activé pour ${currentContextLabel}. Réponses auto désactivées par défaut.`
+        };
     }
 
     function maybeHandleAfkMessage(messageEl) {
@@ -3471,6 +3577,12 @@
         const messageKey = buildAfkMessageKey(signature);
         if (!messageKey) return;
         if (afkSeenMessageKeys.has(messageKey)) return;
+
+        if (isAfkReplayProtectionActive()) {
+            afkSeenMessageKeys.add(messageKey);
+            return;
+        }
+
         afkSeenMessageKeys.add(messageKey);
 
         const watchedUsername = getAfkWatchedUsername();
@@ -3482,11 +3594,14 @@
         const now = Date.now();
         const lastReplyAtForUser = Math.max(0, Number(afkState.perUserReplyAt?.[targetingInfo.senderUsername]) || 0);
         const autoReplyMessage = `@${targetingInfo.senderDisplayName || targetingInfo.senderUsername} ${normalizeAfkAutoReplyMessage(afkState.autoReplyMessage)}`;
+        const autoReplyEnabled = isAfkAutoReplyEnabled();
         let autoReplySent = false;
         let autoReplyStatus = '';
 
         if (!watchedUsername) {
             autoReplyStatus = 'missing-username';
+        } else if (!autoReplyEnabled) {
+            autoReplyStatus = 'disabled';
         } else if (isAfkAutoReplyWindowExpired(now)) {
             autoReplyStatus = 'inactive-timeout';
         } else if (lastReplyAtForUser > 0 && now - lastReplyAtForUser < AFK_AUTO_REPLY_PER_USER_COOLDOWN_MS) {
@@ -11008,7 +11123,10 @@
             syncNativeChatInputActionButtons();
 
             if (isAfkEnabledForCurrentContext()) {
+                startAfkReplayProtectionForCurrentContext();
                 seedAfkSeenMessagesFromCurrentRoot();
+            } else {
+                clearAfkReplayProtection();
             }
 
             if (isHomePage() && homeChatCollapsed) {
@@ -11065,7 +11183,10 @@
                 applyChatInputToolbarAlignmentState();
                 syncNativeChatInputActionButtons();
                 if (isAfkEnabledForCurrentContext()) {
+                    startAfkReplayProtectionForCurrentContext();
                     seedAfkSeenMessagesFromCurrentRoot();
+                } else {
+                    clearAfkReplayProtection();
                 }
                 processAllMessages();
                 renderAfkPanel();
