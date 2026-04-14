@@ -10,6 +10,13 @@ Ce fichier suit l'état fonctionnel du userscript à partir de la version actuel
 
 ## Version en préparation
 
+- Aucune entrée pour le moment.
+
+## v2.61 - 2026-04-14
+
+- Limitation du message automatique AFK à 300 caractères, tout en conservant son édition directe depuis le panneau.
+- Correction du panneau AFK pour éviter le reset immédiat du textarea pendant la saisie, avec conservation du brouillon non enregistré tant que le panneau reste ouvert.
+- Séparation entre activation du mode AFK et activation des réponses automatiques, avec une checkbox dédiée dans le panneau et une protection après F5 pour ignorer les anciens messages réinjectés par le chargement du chat.
 
 ## v2.60 - 2026-04-13
 
