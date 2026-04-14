@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torr9 Chat - Shoutbox 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.61
+// @version      2.62
 // @description  Blacklist, mise en avant, mentions, réponses rapides contextuelles, Gif et confort avancé pour la shoutbox Torr9
 // @icon         https://torr9.net/favicon.ico?favicon.71918ed5.ico`
 // @author       Butchered
@@ -10950,8 +10950,8 @@
 
         ensureYouTubeLinkActionStyle();
 
-        const linkifiedLinks = Array.from(textBlock.querySelectorAll('a[data-tm-linkified-url="1"]'));
-        linkifiedLinks.forEach((link) => {
+        const candidateLinks = Array.from(textBlock.querySelectorAll('a[href]'));
+        candidateLinks.forEach((link) => {
             if (!(link instanceof HTMLAnchorElement)) return;
 
             const videoDescriptor = getYouTubeVideoDescriptor(link.href);
@@ -10997,11 +10997,11 @@
         if (linkifyUrlsEnabled) {
             linkifyMessageTextBlock(messageEl);
             syncEmbeddedImagePreviews(messageEl);
-            syncYouTubePlayButtons(messageEl);
-            return;
+        } else {
+            unlinkifyMessageTextBlock(messageEl);
         }
 
-        unlinkifyMessageTextBlock(messageEl);
+        syncYouTubePlayButtons(messageEl);
     }
 
     function getMessageTextBlock(messageEl) {
