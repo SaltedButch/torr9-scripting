@@ -15,6 +15,8 @@
     const STORAGE_KEY_USERS = 'tm_hidden_shout_users_torr9';
     const STORAGE_KEY_POS_HOME = 'tm_torr9_stats_box_position_home';
     const STORAGE_KEY_POS_CHAT = 'tm_torr9_stats_box_position_chat';
+    const STORAGE_KEY_SIZE_HOME = 'tm_torr9_stats_box_size_home';
+    const STORAGE_KEY_SIZE_CHAT = 'tm_torr9_stats_box_size_chat';
     const STORAGE_KEY_STATS_COLLAPSED_HOME = 'tm_torr9_stats_box_collapsed_home';
     const STORAGE_KEY_STATS_COLLAPSED_CHAT = 'tm_torr9_stats_box_collapsed_chat';
     const STORAGE_KEY_STATS_HIDDEN_HOME = 'tm_torr9_stats_box_hidden_home';
@@ -41,6 +43,35 @@
     const STORAGE_KEY_AFK_ACTIVITY = 'tm_torr9_afk_activity';
     const STORAGE_KEY_AFK_PANEL_POSITION = 'tm_torr9_afk_panel_position';
     const STORAGE_KEY_AFK_PANEL_HIDDEN = 'tm_torr9_afk_panel_hidden';
+    const SCRIPT_CONFIG_EXPORT_VERSION = 1;
+    const SCRIPT_CONFIG_STORAGE_KEYS = [
+        STORAGE_KEY_USERS,
+        STORAGE_KEY_POS_HOME,
+        STORAGE_KEY_POS_CHAT,
+        STORAGE_KEY_SIZE_HOME,
+        STORAGE_KEY_SIZE_CHAT,
+        STORAGE_KEY_STATS_COLLAPSED_HOME,
+        STORAGE_KEY_STATS_COLLAPSED_CHAT,
+        STORAGE_KEY_STATS_HIDDEN_HOME,
+        STORAGE_KEY_STATS_HIDDEN_CHAT,
+        STORAGE_KEY_DEBUG,
+        STORAGE_KEY_HOME_COLLAPSED,
+        STORAGE_KEY_HIGHLIGHTED_USERS,
+        STORAGE_KEY_MENTION_SETTINGS,
+        STORAGE_KEY_CHAT_FONT_SCALE,
+        STORAGE_KEY_CHAT_SCROLLBAR_ENABLED,
+        STORAGE_KEY_MESSAGE_ACTIONS_LEFT_ENABLED,
+        STORAGE_KEY_HIDE_CHAT_FOOTER_ENABLED,
+        STORAGE_KEY_LIGHT_THEME_HOME,
+        STORAGE_KEY_LIGHT_THEME_CHAT,
+        STORAGE_KEY_LINKIFY_URLS,
+        STORAGE_KEY_EMBED_URL_IMAGES,
+        STORAGE_KEY_SAVED_PHRASES,
+        STORAGE_KEY_SAVED_PHRASES_ENABLED,
+        STORAGE_KEY_KLIPY_GIFS_ENABLED,
+        STORAGE_KEY_CHAT_INPUT_TOOLBAR_ALIGN_RIGHT,
+        STORAGE_KEY_AFK_PANEL_POSITION
+    ];
     const PANEL_ID = 'tm-torr9-chat-stats';
     const MODAL_ID = 'tm-torr9-chat-modal';
     const OVERLAY_ID = 'tm-torr9-chat-overlay';
@@ -132,10 +163,14 @@
         rightPercent: 2,
         bottomPercent: 2
     };
+    const DEFAULT_STATS_BOX_WIDTH_PX = 240;
+    const MIN_STATS_BOX_WIDTH_PX = 220;
+    const MIN_STATS_BOX_HEIGHT_PX = 110;
 
     let observer = null;
     let statsBox = null;
     let statsContent = null;
+    let statsBoxResizeObserver = null;
     let routeWatcher = null;
     let modalOpen = false;
     let imageViewerOpen = false;
@@ -232,6 +267,10 @@
 
     function getPositionStorageKey() {
         return isChatPage() ? STORAGE_KEY_POS_CHAT : STORAGE_KEY_POS_HOME;
+    }
+
+    function getStatsBoxSizeStorageKey() {
+        return isChatPage() ? STORAGE_KEY_SIZE_CHAT : STORAGE_KEY_SIZE_HOME;
     }
 
     function getStatsCollapsedStorageKey() {
@@ -1107,6 +1146,153 @@
             ok: true,
             message: `Import terminé : ${summaryParts.join(', ')}.`
         };
+    }
+
+    function buildScriptConfigExportPayload() {
+        const storage = {};
+
+        SCRIPT_CONFIG_STORAGE_KEYS.forEach((storageKey) => {
+            const rawValue = localStorage.getItem(storageKey);
+            if (rawValue !== null) {
+                storage[storageKey] = rawValue;
+            }
+        });
+
+        return {
+            version: SCRIPT_CONFIG_EXPORT_VERSION,
+            exportedAt: new Date().toISOString(),
+            source: 'Torr9 Chat - Shoutbox 2.0',
+            storage,
+            afkConfig: {
+                autoReplyMessage: normalizeAfkAutoReplyMessage(afkState.autoReplyMessage)
+            }
+        };
+    }
+
+    function downloadScriptConfigExport() {
+        try {
+            const exportPayload = JSON.stringify(buildScriptConfigExportPayload(), null, 2);
+            const blob = new Blob([exportPayload], { type: 'application/json;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            const exportDate = new Date().toISOString().slice(0, 10);
+
+            link.href = url;
+            link.download = `torr9-config-script-${exportDate}.json`;
+            link.style.display = 'none';
+
+            document.body?.appendChild(link);
+            link.click();
+            link.remove();
+
+            window.setTimeout(() => {
+                URL.revokeObjectURL(url);
+            }, 0);
+
+            return { ok: true, message: 'Sauvegarde de configuration téléchargée.' };
+        } catch (e) {
+            return { ok: false, message: 'Impossible de générer la sauvegarde de configuration.' };
+        }
+    }
+
+    function reloadScriptConfigurationFromStorage() {
+        debugMode = loadDebugMode();
+        homeChatCollapsed = loadHomeChatCollapsed();
+        statsDisplayMode = loadStatsDisplayMode();
+        statsHidden = loadStatsHidden();
+        mentionSettings = loadMentionSettings();
+        chatFontScale = loadChatFontScale();
+        chatScrollbarEnabled = loadChatScrollbarEnabled();
+        messageActionsLeftEnabled = loadMessageActionsLeftEnabled();
+        hideChatFooterEnabled = loadHideChatFooterEnabled();
+        lightThemeEnabled = loadLightThemeEnabled();
+        linkifyUrlsEnabled = loadLinkifyUrlsEnabled();
+        embedUrlImagesEnabled = loadEmbedUrlImagesEnabled();
+        savedPhrasesEnabled = loadSavedPhrasesEnabled();
+        klipyGifsEnabled = loadKlipyGifsEnabled();
+        chatInputToolbarAlignRight = loadChatInputToolbarAlignRight();
+        afkState = loadAfkState();
+        afkPanelPosition = loadAfkPanelPosition();
+        afkPanelHidden = loadAfkPanelHidden();
+
+        hiddenUsers.clear();
+        loadHiddenUsers().forEach((username) => {
+            hiddenUsers.add(username);
+        });
+
+        Object.keys(highlightedUsers).forEach((username) => {
+            delete highlightedUsers[username];
+        });
+        Object.assign(highlightedUsers, loadHighlightedUsers());
+
+        const reloadedSavedPhrases = loadSavedPhrases();
+        savedPhrases.splice(0, savedPhrases.length, ...reloadedSavedPhrases);
+        if (savedPhrasesStorageNeedsRepair) {
+            saveSavedPhrases();
+        }
+    }
+
+    function applyReloadedScriptConfiguration() {
+        syncHomepageCollapseUi(true);
+        applyStatsBoxDisplayModeState();
+        applyBoxPosition(loadPosition());
+        constrainStatsBoxToViewport(false, false);
+        applyStatsBoxVisibilityState();
+        applyLightThemeState();
+        applyChatPageScrollbarState();
+        applyMessageActionsPositionState();
+        applyChatFooterVisibilityState();
+        applyHomeChatPopoverState();
+        applyNativeChatInputPopoverState();
+        applyChatInputToolbarAlignmentState();
+
+        if (savedPhrasesEnabled) {
+            injectSavedPhrasesToolbar();
+        } else {
+            removeSavedPhrasesToolbar();
+        }
+
+        if (klipyGifsEnabled) {
+            injectKlipyGifToolbar();
+        } else {
+            removeKlipyGifToolbar();
+        }
+
+        processAllMessages();
+        renderAfkPanel();
+        updateStatsBox();
+    }
+
+    function importScriptConfiguration(payload) {
+        const importedStorage = payload?.storage;
+        if (!importedStorage || typeof importedStorage !== 'object' || Array.isArray(importedStorage)) {
+            return { ok: false, message: 'Format JSON invalide pour la configuration du script.' };
+        }
+
+        SCRIPT_CONFIG_STORAGE_KEYS.forEach((storageKey) => {
+            const rawValue = importedStorage[storageKey];
+            if (typeof rawValue === 'string') {
+                localStorage.setItem(storageKey, rawValue);
+                return;
+            }
+
+            localStorage.removeItem(storageKey);
+        });
+
+        reloadScriptConfigurationFromStorage();
+
+        saveAfkState({
+            ...normalizeAfkState(null),
+            username: normalizeName(mentionSettings?.username || ''),
+            autoReplyMessage: normalizeAfkAutoReplyMessage(payload?.afkConfig?.autoReplyMessage)
+        });
+
+        afkActivityRecords = [];
+        localStorage.removeItem(STORAGE_KEY_AFK_ACTIVITY);
+        clearAfkReplayProtection();
+        applyReloadedScriptConfiguration();
+
+        return { ok: true, message: 'Configuration du script importée.' };
     }
 
     function addSavedPhrase(phraseRaw, keywordsRaw = []) {
@@ -2022,32 +2208,79 @@
         }
     }
 
+    function normalizeStatsBoxPosition(value) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+
+        const leftPx = Number(value.leftPx);
+        const topPx = Number(value.topPx);
+        if (Number.isFinite(leftPx) && Number.isFinite(topPx)) {
+            return {
+                leftPx: Math.max(0, Math.round(leftPx)),
+                topPx: Math.max(0, Math.round(topPx))
+            };
+        }
+
+        const rightPercent = Number(value.rightPercent);
+        const bottomPercent = Number(value.bottomPercent);
+        if (Number.isFinite(rightPercent) && Number.isFinite(bottomPercent)) {
+            return {
+                rightPercent: clamp(rightPercent, 0, MAX_STATS_RIGHT_PERCENT),
+                bottomPercent: clamp(bottomPercent, 0, MAX_STATS_BOTTOM_PERCENT)
+            };
+        }
+
+        return null;
+    }
+
     function loadPosition() {
         try {
-            const saved = JSON.parse(localStorage.getItem(getPositionStorageKey()) || 'null');
-            if (
-                saved &&
-                typeof saved.rightPercent === 'number' &&
-                typeof saved.bottomPercent === 'number'
-            ) {
-                return {
-                    rightPercent: clamp(saved.rightPercent, 0, MAX_STATS_RIGHT_PERCENT),
-                    bottomPercent: clamp(saved.bottomPercent, 0, MAX_STATS_BOTTOM_PERCENT)
-                };
-            }
+            return normalizeStatsBoxPosition(JSON.parse(localStorage.getItem(getPositionStorageKey()) || 'null')) || { ...DEFAULT_POSITION };
         } catch (e) {}
         return { ...DEFAULT_POSITION };
     }
 
     function savePosition(position) {
-        localStorage.setItem(getPositionStorageKey(), JSON.stringify({
-            rightPercent: clamp(position.rightPercent, 0, MAX_STATS_RIGHT_PERCENT),
-            bottomPercent: clamp(position.bottomPercent, 0, MAX_STATS_BOTTOM_PERCENT)
-        }));
+        const normalizedPosition = normalizeStatsBoxPosition(position) || { ...DEFAULT_POSITION };
+        localStorage.setItem(getPositionStorageKey(), JSON.stringify(normalizedPosition));
     }
 
     function resetPosition() {
-        localStorage.setItem(getPositionStorageKey(), JSON.stringify(DEFAULT_POSITION));
+        localStorage.removeItem(getPositionStorageKey());
+    }
+
+    function normalizeStatsBoxSize(value) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+
+        const widthPx = Math.round(Number(value.widthPx) || 0);
+        const heightPx = Math.round(Number(value.heightPx) || 0);
+        if (!Number.isFinite(widthPx) || !Number.isFinite(heightPx)) return null;
+        if (widthPx < MIN_STATS_BOX_WIDTH_PX || heightPx < MIN_STATS_BOX_HEIGHT_PX) return null;
+
+        return { widthPx, heightPx };
+    }
+
+    function loadStatsBoxSize() {
+        try {
+            return normalizeStatsBoxSize(JSON.parse(localStorage.getItem(getStatsBoxSizeStorageKey()) || 'null'));
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function saveStatsBoxSize(size) {
+        const normalizedSize = normalizeStatsBoxSize(size);
+        try {
+            if (!normalizedSize) {
+                localStorage.removeItem(getStatsBoxSizeStorageKey());
+                return;
+            }
+
+            localStorage.setItem(getStatsBoxSizeStorageKey(), JSON.stringify(normalizedSize));
+        } catch (e) {}
+    }
+
+    function resetStatsBoxSize() {
+        localStorage.removeItem(getStatsBoxSizeStorageKey());
     }
 
     function clamp(value, min, max) {
@@ -2084,16 +2317,6 @@
 
     function normalizeName(name) {
         return (name || '').trim().toLowerCase();
-    }
-
-    function formatNumberInputValue(value, max = MAX_STATS_BOTTOM_PERCENT) {
-        return String(clamp(Number(value) || 0, 0, max));
-    }
-
-    function parsePercentInput(value, fallback, max = MAX_STATS_BOTTOM_PERCENT) {
-        const num = Number(String(value).trim().replace(',', '.'));
-        if (Number.isNaN(num)) return fallback;
-        return clamp(num, 0, max);
     }
 
     function parseBlinkSecondsInput(value, fallback = DEFAULT_MENTION_BLINK_SECONDS) {
@@ -2753,7 +2976,7 @@
 
         if (isMiniMode) {
             return `
-                <div style="display:flex;align-items:center;gap:10px;white-space:nowrap;">
+                <div data-tm-stats-drag-handle="1" style="display:flex;align-items:center;gap:10px;white-space:nowrap;cursor:move;user-select:none;">
                     <div style="font-size:12px;color:#cfcfcf;">
                         Total : <span style="color:#fff;font-weight:700;">${total}</span>
                     </div>
@@ -2766,7 +2989,7 @@
         }
 
         let html = `
-            <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px;">
+            <div data-tm-stats-drag-handle="1" style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px;cursor:move;user-select:none;">
                 <div style="font-weight:700;font-size:13px;color:#fff;">
                     Messages bloqués
                 </div>
@@ -3860,13 +4083,113 @@
 
     function applyBoxPosition(position = null) {
         if (!statsBox) return;
-        const pos = position || loadPosition();
+        const pos = normalizeStatsBoxPosition(position) || loadPosition();
+
+        if (Object.prototype.hasOwnProperty.call(pos, 'leftPx') && Object.prototype.hasOwnProperty.call(pos, 'topPx')) {
+            statsBox.style.left = `${Math.max(0, pos.leftPx)}px`;
+            statsBox.style.top = `${Math.max(0, pos.topPx)}px`;
+            statsBox.style.right = 'auto';
+            statsBox.style.bottom = 'auto';
+            return;
+        }
+
+        statsBox.style.left = 'auto';
+        statsBox.style.top = 'auto';
         statsBox.style.right = `${clamp(pos.rightPercent, 0, MAX_STATS_RIGHT_PERCENT)}%`;
         statsBox.style.bottom = `${clamp(pos.bottomPercent, 0, MAX_STATS_BOTTOM_PERCENT)}%`;
     }
 
+    function applyStatsBoxSize(size = null) {
+        if (!statsBox) return;
+
+        const normalizedSize = normalizeStatsBoxSize(size) || loadStatsBoxSize();
+        statsBox.style.width = `${normalizedSize?.widthPx || DEFAULT_STATS_BOX_WIDTH_PX}px`;
+
+        if (normalizedSize?.heightPx) {
+            statsBox.style.height = `${normalizedSize.heightPx}px`;
+            return;
+        }
+
+        statsBox.style.removeProperty('height');
+    }
+
+    function constrainStatsBoxToViewport(persistPosition = true, persistSize = false) {
+        if (!(statsBox instanceof HTMLElement)) return;
+        if (statsBox.style.display === 'none') return;
+
+        const margin = 12;
+        const maxWidth = Math.max(MIN_STATS_BOX_WIDTH_PX, window.innerWidth - margin * 2);
+        const maxHeight = Math.max(MIN_STATS_BOX_HEIGHT_PX, window.innerHeight - margin * 2);
+
+        if (statsDisplayMode !== STATS_DISPLAY_MODE_MINI) {
+            const currentWidth = Math.max(MIN_STATS_BOX_WIDTH_PX, Math.round(statsBox.offsetWidth || Number.parseFloat(statsBox.style.width) || DEFAULT_STATS_BOX_WIDTH_PX));
+            const nextWidth = clamp(currentWidth, MIN_STATS_BOX_WIDTH_PX, maxWidth);
+            statsBox.style.width = `${nextWidth}px`;
+
+            if (statsBox.style.height && statsBox.style.height !== 'auto') {
+                const currentHeight = Math.max(MIN_STATS_BOX_HEIGHT_PX, Math.round(statsBox.offsetHeight || Number.parseFloat(statsBox.style.height) || MIN_STATS_BOX_HEIGHT_PX));
+                const nextHeight = clamp(currentHeight, MIN_STATS_BOX_HEIGHT_PX, maxHeight);
+                statsBox.style.height = `${nextHeight}px`;
+
+                if (persistSize) {
+                    saveStatsBoxSize({
+                        widthPx: nextWidth,
+                        heightPx: nextHeight
+                    });
+                }
+            }
+        }
+
+        const rect = statsBox.getBoundingClientRect();
+        const currentLeft = statsBox.style.left && statsBox.style.left !== 'auto'
+            ? Number.parseFloat(statsBox.style.left) || rect.left
+            : rect.left;
+        const currentTop = statsBox.style.top && statsBox.style.top !== 'auto'
+            ? Number.parseFloat(statsBox.style.top) || rect.top
+            : rect.top;
+        const nextLeft = clamp(currentLeft, margin, Math.max(margin, window.innerWidth - rect.width - margin));
+        const nextTop = clamp(currentTop, margin, Math.max(margin, window.innerHeight - rect.height - margin));
+
+        statsBox.style.left = `${nextLeft}px`;
+        statsBox.style.top = `${nextTop}px`;
+        statsBox.style.right = 'auto';
+        statsBox.style.bottom = 'auto';
+
+        if (persistPosition) {
+            savePosition({
+                leftPx: nextLeft,
+                topPx: nextTop
+            });
+        }
+    }
+
+    function ensureStatsBoxResizeHandle() {
+        if (!(statsBox instanceof HTMLElement)) return null;
+
+        let resizeHandle = statsBox.querySelector('[data-tm-stats-resize-handle="1"]');
+        if (resizeHandle instanceof HTMLElement) return resizeHandle;
+
+        resizeHandle = document.createElement('div');
+        resizeHandle.setAttribute('data-tm-stats-resize-handle', '1');
+        resizeHandle.title = 'Redimensionner la stats box';
+        resizeHandle.style.position = 'absolute';
+        resizeHandle.style.right = '2px';
+        resizeHandle.style.bottom = '2px';
+        resizeHandle.style.width = '16px';
+        resizeHandle.style.height = '16px';
+        resizeHandle.style.borderRadius = '0 0 12px 0';
+        resizeHandle.style.cursor = 'nwse-resize';
+        resizeHandle.style.background = 'linear-gradient(135deg, transparent 0 44%, rgba(255,255,255,0.14) 44% 56%, transparent 56% 100%)';
+        resizeHandle.style.opacity = '0.9';
+        resizeHandle.style.zIndex = '2';
+
+        statsBox.appendChild(resizeHandle);
+        return resizeHandle;
+    }
+
     function applyStatsBoxDisplayModeState() {
         if (!statsBox) return;
+        const resizeHandle = ensureStatsBoxResizeHandle();
 
         if (statsDisplayMode === STATS_DISPLAY_MODE_MINI) {
             statsBox.style.width = 'auto';
@@ -3875,19 +4198,30 @@
             statsBox.style.overflow = 'hidden';
             statsBox.style.overflowY = 'hidden';
             statsBox.style.overflowX = 'hidden';
+            statsBox.style.height = 'auto';
+            statsBox.style.minWidth = '0';
+            statsBox.style.minHeight = '0';
             statsBox.style.padding = '8px 10px';
             statsBox.style.borderRadius = '999px';
+            if (resizeHandle instanceof HTMLElement) {
+                resizeHandle.style.display = 'none';
+            }
             return;
         }
 
-        statsBox.style.width = '240px';
+        statsBox.style.minWidth = `${MIN_STATS_BOX_WIDTH_PX}px`;
+        statsBox.style.minHeight = `${MIN_STATS_BOX_HEIGHT_PX}px`;
         statsBox.style.maxWidth = 'calc(100vw - 24px)';
-        statsBox.style.maxHeight = '50vh';
+        statsBox.style.maxHeight = 'calc(100vh - 24px)';
         statsBox.style.overflow = 'hidden';
         statsBox.style.overflowY = 'auto';
         statsBox.style.overflowX = 'hidden';
         statsBox.style.padding = '12px';
         statsBox.style.borderRadius = '14px';
+        if (resizeHandle instanceof HTMLElement) {
+            resizeHandle.style.display = 'block';
+        }
+        applyStatsBoxSize();
     }
 
     function applyStatsBoxVisibilityState() {
@@ -3902,11 +4236,13 @@
         if (existing) {
             statsBox = existing;
             statsContent = existing.firstElementChild;
+            ensureStatsBoxResizeHandle();
             bindStatsBoxEvents();
             applyStatsBoxDisplayModeState();
             applyStatsBoxVisibilityState();
             applyBoxPosition();
             updateStatsBox();
+            constrainStatsBoxToViewport(false, false);
             return;
         }
 
@@ -3914,7 +4250,7 @@
         statsBox.id = PANEL_ID;
         statsBox.style.position = 'fixed';
         statsBox.style.zIndex = '999999';
-        statsBox.style.width = '240px';
+        statsBox.style.width = `${DEFAULT_STATS_BOX_WIDTH_PX}px`;
         statsBox.style.maxWidth = 'calc(100vw - 24px)';
         statsBox.style.maxHeight = '50vh';
         statsBox.style.overflowY = 'auto';
@@ -3925,9 +4261,11 @@
         statsBox.style.border = '1px solid rgba(255,255,255,0.08)';
         statsBox.style.boxShadow = '0 10px 30px rgba(0,0,0,0.35)';
         statsBox.style.fontFamily = 'Inter, Arial, sans-serif';
+        statsBox.style.boxSizing = 'border-box';
 
         statsContent = document.createElement('div');
         statsBox.appendChild(statsContent);
+        ensureStatsBoxResizeHandle();
 
         document.body.appendChild(statsBox);
 
@@ -3936,12 +4274,18 @@
         applyStatsBoxVisibilityState();
         applyBoxPosition();
         updateStatsBox();
+        constrainStatsBoxToViewport(false, false);
     }
 
     function removeStatsBox() {
         if (statsUpdateFrame !== null) {
             window.cancelAnimationFrame(statsUpdateFrame);
             statsUpdateFrame = null;
+        }
+
+        if (statsBoxResizeObserver) {
+            statsBoxResizeObserver.disconnect();
+            statsBoxResizeObserver = null;
         }
 
         const existing = document.getElementById(PANEL_ID);
@@ -3955,6 +4299,116 @@
 
         statsBox.dataset.tmBound = '1';
         statsBox.addEventListener('click', handleStatsBoxActionClick);
+
+        let dragState = null;
+        let resizeState = null;
+
+        function stopPointerInteractions() {
+            dragState = null;
+            resizeState = null;
+            document.removeEventListener('mousemove', handlePointerMove, true);
+            document.removeEventListener('mouseup', finishPointerInteraction, true);
+        }
+
+        function finishPointerInteraction() {
+            if (resizeState) {
+                saveStatsBoxSize({
+                    widthPx: Math.round(statsBox.offsetWidth || DEFAULT_STATS_BOX_WIDTH_PX),
+                    heightPx: Math.round(statsBox.offsetHeight || MIN_STATS_BOX_HEIGHT_PX)
+                });
+                constrainStatsBoxToViewport(true, false);
+                stopPointerInteractions();
+                return;
+            }
+
+            if (dragState) {
+                constrainStatsBoxToViewport(true, false);
+            }
+
+            stopPointerInteractions();
+        }
+
+        function handlePointerMove(event) {
+            if (resizeState) {
+                const nextWidth = clamp(
+                    resizeState.startWidth + (event.clientX - resizeState.startX),
+                    MIN_STATS_BOX_WIDTH_PX,
+                    Math.max(MIN_STATS_BOX_WIDTH_PX, window.innerWidth - 24)
+                );
+                const nextHeight = clamp(
+                    resizeState.startHeight + (event.clientY - resizeState.startY),
+                    MIN_STATS_BOX_HEIGHT_PX,
+                    Math.max(MIN_STATS_BOX_HEIGHT_PX, window.innerHeight - 24)
+                );
+
+                statsBox.style.width = `${Math.round(nextWidth)}px`;
+                statsBox.style.height = `${Math.round(nextHeight)}px`;
+                return;
+            }
+
+            if (!dragState) return;
+
+            const nextLeft = dragState.startLeft + (event.clientX - dragState.startX);
+            const nextTop = dragState.startTop + (event.clientY - dragState.startY);
+
+            statsBox.style.left = `${Math.round(nextLeft)}px`;
+            statsBox.style.top = `${Math.round(nextTop)}px`;
+            statsBox.style.right = 'auto';
+            statsBox.style.bottom = 'auto';
+        }
+
+        statsBox.addEventListener('mousedown', (event) => {
+            if (event.button !== 0) return;
+
+            const target = event.target instanceof Element ? event.target : null;
+            if (!target) return;
+
+            const resizeHandle = target.closest('[data-tm-stats-resize-handle="1"]');
+            if (resizeHandle && statsDisplayMode !== STATS_DISPLAY_MODE_MINI) {
+                const rect = statsBox.getBoundingClientRect();
+                resizeState = {
+                    startX: event.clientX,
+                    startY: event.clientY,
+                    startWidth: rect.width,
+                    startHeight: rect.height
+                };
+
+                document.addEventListener('mousemove', handlePointerMove, true);
+                document.addEventListener('mouseup', finishPointerInteraction, true);
+                event.preventDefault();
+                return;
+            }
+
+            const dragHandle = target.closest('[data-tm-stats-drag-handle="1"]');
+            if (!dragHandle) return;
+            if (target.closest('button, input, textarea, select, a, label')) return;
+
+            const rect = statsBox.getBoundingClientRect();
+            dragState = {
+                startX: event.clientX,
+                startY: event.clientY,
+                startLeft: rect.left,
+                startTop: rect.top
+            };
+
+            document.addEventListener('mousemove', handlePointerMove, true);
+            document.addEventListener('mouseup', finishPointerInteraction, true);
+            event.preventDefault();
+        });
+
+        if ('ResizeObserver' in window) {
+            statsBoxResizeObserver = new ResizeObserver(() => {
+                if (!(statsBox instanceof HTMLElement)) return;
+                if (statsDisplayMode === STATS_DISPLAY_MODE_MINI) return;
+                if (!statsBox.style.height || statsBox.style.height === 'auto') return;
+
+                saveStatsBoxSize({
+                    widthPx: Math.round(statsBox.offsetWidth || DEFAULT_STATS_BOX_WIDTH_PX),
+                    heightPx: Math.round(statsBox.offsetHeight || MIN_STATS_BOX_HEIGHT_PX)
+                });
+            });
+            statsBoxResizeObserver.observe(statsBox);
+        }
     }
 
     function getLogicalUsername(messageEl) {
@@ -4605,6 +5059,7 @@
         applyStatsBoxVisibilityState();
         syncHomepageCollapseUi(true);
         applyBoxPosition(loadPosition());
+        constrainStatsBoxToViewport(false, false);
         updateStatsBox();
     }
 
@@ -6368,6 +6823,7 @@
 
         saveStatsDisplayMode(normalizedMode);
         applyStatsBoxDisplayModeState();
+        constrainStatsBoxToViewport(true, false);
         updateStatsBox();
 
         if (statsDisplayMode === STATS_DISPLAY_MODE_MINI) {
@@ -6430,7 +6886,6 @@
         modalOpen = true;
         hideImagePreview();
 
-        const currentPos = loadPosition();
         const currentPageLabel = getCurrentPageLabel();
         const homeView = isHomePage();
         const settingsColumnCount = window.innerWidth >= 780 ? 2 : 1;
@@ -6445,6 +6900,15 @@
             box-sizing:border-box;
             break-inside:avoid;
             vertical-align:top;
+        `;
+        const settingsFullWidthCardStyle = `
+            width:100%;
+            padding:12px;
+            margin:0 0 14px 0;
+            border-radius:14px;
+            background:rgba(255,255,255,0.03);
+            border:1px solid rgba(255,255,255,0.06);
+            box-sizing:border-box;
         `;
         const settingsCheckboxLabelStyle = `
             display:flex;
@@ -6512,6 +6976,63 @@
             ">×</button>
         </div>
 
+        <div style="${settingsFullWidthCardStyle}">
+            <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Astuces</div>
+
+            <div style="display:grid;gap:10px;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));">
+                <div style="padding:10px 12px;border-radius:12px;background:rgba(37,99,235,0.12);border:1px solid rgba(37,99,235,0.24);">
+                    <div style="font-size:12px;font-weight:700;color:#dbeafe;">Ctrl+Alt+C ou Ctrl+Cmd+C</div>
+                    <div style="margin-top:4px;font-size:11px;color:#93c5fd;line-height:1.45;">
+                        Ouvre directement cette page de paramètres.
+                    </div>
+                </div>
+
+                <div style="padding:10px 12px;border-radius:12px;background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.24);">
+                    <div style="font-size:12px;font-weight:700;color:#bbf7d0;">${formatAfkShortcutLabel()}</div>
+                    <div style="margin-top:4px;font-size:11px;color:#86efac;line-height:1.45;">
+                        Active ou coupe le mode AFK sur le chat en cours, avec historique dédié des mentions et réponses.
+                    </div>
+                </div>
+
+                <div style="padding:10px 12px;border-radius:12px;background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.24);">
+                    <div style="font-size:12px;font-weight:700;color:#fde68a;">Alt+clic sur un pseudo</div>
+                    <div style="margin-top:4px;font-size:11px;color:#fcd34d;line-height:1.45;">
+                        Ajoute ou retire rapidement un utilisateur de la blacklist.
+                    </div>
+                </div>
+
+                <div style="padding:10px 12px;border-radius:12px;background:rgba(124,58,237,0.14);border:1px solid rgba(139,92,246,0.26);">
+                    <div style="font-size:12px;font-weight:700;color:#ddd6fe;">Exporter la config avant nettoyage navigateur</div>
+                    <div style="margin-top:4px;font-size:11px;color:#c4b5fd;line-height:1.45;">
+                        Pense à exporter la configuration du script avant de supprimer les données du navigateur, changer de profil ou réinstaller Tampermonkey.
+                    </div>
+                </div>
+
+                ${isChatPage() ? `
+                <div style="padding:10px 12px;border-radius:12px;background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.24);">
+                    <div style="font-size:12px;font-weight:700;color:#bbf7d0;">Double-clic sur un message</div>
+                    <div style="margin-top:4px;font-size:11px;color:#86efac;line-height:1.45;">
+                        Lance la réponse au message sans passer par le bouton d’action.
+                    </div>
+                </div>
+
+                <div style="padding:10px 12px;border-radius:12px;background:rgba(6,182,212,0.12);border:1px solid rgba(6,182,212,0.24);">
+                    <div style="font-size:12px;font-weight:700;color:#a5f3fc;">Clic long sur un message</div>
+                    <div style="margin-top:4px;font-size:11px;color:#67e8f9;line-height:1.45;">
+                        Ouvre les réactions, avec le picker repositionné à droite du pointeur.
+                    </div>
+                </div>
+                ` : `
+                <div style="padding:10px 12px;border-radius:12px;background:rgba(63,63,70,0.6);border:1px solid rgba(255,255,255,0.08);">
+                    <div style="font-size:12px;font-weight:700;color:#f4f4f5;">Raccourcis du chat dédié</div>
+                    <div style="margin-top:4px;font-size:11px;color:#a1a1aa;line-height:1.45;">
+                        Les gestes double-clic pour répondre et clic long pour réagir ne sont actifs que sur la page chat, pas sur la shout de l’accueil.
+                    </div>
+                </div>
+                `}
+            </div>
+        </div>
+
         <div style="
             column-count:${settingsColumnCount};
             column-gap:14px;
@@ -6532,34 +7053,10 @@
             ` : ''}
 
             <div style="${settingsCardStyle}">
-                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Position de la stats box (${currentPageLabel})</div>
+                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Stats box (${currentPageLabel})</div>
 
-                <div style="display:grid;gap:12px;">
-                    <label style="display:flex;flex-direction:column;gap:6px;">
-                        <span style="display:flex;justify-content:space-between;gap:12px;font-size:12px;color:#c4c4c8;">
-                            <span>Position horizontale (0 = gauche ; 100 = droite)</span>
-                            <span id="tm-right-value">${formatNumberInputValue(currentPos.rightPercent, MAX_STATS_RIGHT_PERCENT)}%</span>
-                        </span>
-                        <input id="tm-right-input" type="range" min="0" max="${MAX_STATS_RIGHT_PERCENT}" step="0.5" value="${formatNumberInputValue(currentPos.rightPercent, MAX_STATS_RIGHT_PERCENT)}"
-                            style="
-                                width:100%;
-                                accent-color:#38bdf8;
-                                cursor:pointer;
-                            ">
-                    </label>
-
-                    <label style="display:flex;flex-direction:column;gap:6px;">
-                        <span style="display:flex;justify-content:space-between;gap:12px;font-size:12px;color:#c4c4c8;">
-                            <span>Bas</span>
-                            <span id="tm-bottom-value">${formatNumberInputValue(currentPos.bottomPercent, MAX_STATS_BOTTOM_PERCENT)}%</span>
-                        </span>
-                        <input id="tm-bottom-input" type="range" min="0" max="${MAX_STATS_BOTTOM_PERCENT}" step="0.5" value="${formatNumberInputValue(currentPos.bottomPercent, MAX_STATS_BOTTOM_PERCENT)}"
-                            style="
-                                width:100%;
-                                accent-color:#38bdf8;
-                                cursor:pointer;
-                            ">
-                    </label>
+                <div style="font-size:11px;color:#71717a;line-height:1.5;">
+                    Glisse l’en-tête de la stats box pour la déplacer, puis attrape son coin inférieur droit pour la redimensionner. La position et la taille sont mémorisées séparément pour ${currentPageLabel}.
                 </div>
 
                 <label style="${settingsCheckboxLabelWithMarginStyle}">
@@ -6568,7 +7065,7 @@
                 </label>
 
                 <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
-                    <button id="tm-reset-position" style="
+                    <button id="tm-reset-stats-layout" style="
                         border:none;
                         background:#3f3f46;
                         color:#fff;
@@ -6576,7 +7073,7 @@
                         padding:10px 12px;
                         cursor:pointer;
                         font-weight:600;
-                    ">Réinitialiser la position</button>
+                    ">Réinitialiser taille et position</button>
                 </div>
 
             </div>
@@ -6749,6 +7246,38 @@
             </div>
 
             <div style="${settingsCardStyle}">
+                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Sauvegarde configuration</div>
+
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <button id="tm-script-config-export" style="
+                        border:none;
+                        background:#2563eb;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">Exporter la config</button>
+
+                    <button id="tm-script-config-import" style="
+                        border:none;
+                        background:#3f3f46;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">Importer une config</button>
+                </div>
+
+                <input id="tm-script-config-import-file" type="file" accept="application/json,.json" style="display:none;">
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                    Sauvegarde tes réglages principaux, ta blacklist, tes mises en avant, tes réponses rapides ainsi que les positions et tailles mémorisées. L’historique AFK temporaire n’est pas repris.
+                </div>
+            </div>
+
+            <div style="${settingsCardStyle}">
                 <div style="font-size:13px;font-weight:700;margin-bottom:10px;">GIF Klipy</div>
 
                 <label style="${settingsCheckboxLabelStyle}">
@@ -6758,56 +7287,6 @@
 
                 <div style="margin-top:10px;font-size:12px;color:#a1a1aa;line-height:1.5;">
                     Permet d’utiliser un picker GIF directement depuis le chat.
-                </div>
-            </div>
-
-            <div style="${settingsCardStyle}">
-                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Astuces</div>
-
-                <div style="display:grid;gap:10px;">
-                    <div style="padding:10px 12px;border-radius:12px;background:rgba(37,99,235,0.12);border:1px solid rgba(37,99,235,0.24);">
-                        <div style="font-size:12px;font-weight:700;color:#dbeafe;">Ctrl+Alt+C ou Ctrl+Cmd+C</div>
-                        <div style="margin-top:4px;font-size:11px;color:#93c5fd;line-height:1.45;">
-                            Ouvre directement cette page de paramètres.
-                        </div>
-                    </div>
-
-                    <div style="padding:10px 12px;border-radius:12px;background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.24);">
-                        <div style="font-size:12px;font-weight:700;color:#bbf7d0;">${formatAfkShortcutLabel()}</div>
-                        <div style="margin-top:4px;font-size:11px;color:#86efac;line-height:1.45;">
-                            Active ou coupe le mode AFK sur le chat en cours, avec historique dédié des mentions et réponses.
-                        </div>
-                    </div>
-
-                    <div style="padding:10px 12px;border-radius:12px;background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.24);">
-                        <div style="font-size:12px;font-weight:700;color:#fde68a;">Alt+clic sur un pseudo</div>
-                        <div style="margin-top:4px;font-size:11px;color:#fcd34d;line-height:1.45;">
-                            Ajoute ou retire rapidement un utilisateur de la blacklist.
-                        </div>
-                    </div>
-
-                    ${isChatPage() ? `
-                    <div style="padding:10px 12px;border-radius:12px;background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.24);">
-                        <div style="font-size:12px;font-weight:700;color:#bbf7d0;">Double-clic sur un message</div>
-                        <div style="margin-top:4px;font-size:11px;color:#86efac;line-height:1.45;">
-                            Lance la réponse au message sans passer par le bouton d’action.
-                        </div>
-                    </div>
-
-                    <div style="padding:10px 12px;border-radius:12px;background:rgba(6,182,212,0.12);border:1px solid rgba(6,182,212,0.24);">
-                        <div style="font-size:12px;font-weight:700;color:#a5f3fc;">Clic long sur un message</div>
-                        <div style="margin-top:4px;font-size:11px;color:#67e8f9;line-height:1.45;">
-                            Ouvre les réactions, avec le picker repositionné à droite du pointeur.
-                        </div>
-                    </div>
-                    ` : `
-                    <div style="padding:10px 12px;border-radius:12px;background:rgba(63,63,70,0.6);border:1px solid rgba(255,255,255,0.08);">
-                        <div style="font-size:12px;font-weight:700;color:#f4f4f5;">Raccourcis du chat dédié</div>
-                        <div style="margin-top:4px;font-size:11px;color:#a1a1aa;line-height:1.45;">
-                            Les gestes double-clic pour répondre et clic long pour réagir ne sont actifs que sur la page chat, pas sur la shout de l’accueil.
-                        </div>
-                    </div>
-                    `}
                 </div>
             </div>
 
@@ -7205,6 +7684,9 @@
         const userInput = modal.querySelector('#tm-user-input');
         const phrasesConfigureBtn = modal.querySelector('#tm-phrases-configure');
         const phrasesSummary = modal.querySelector('#tm-phrases-summary');
+        const scriptConfigExportBtn = modal.querySelector('#tm-script-config-export');
+        const scriptConfigImportBtn = modal.querySelector('#tm-script-config-import');
+        const scriptConfigImportFileInput = modal.querySelector('#tm-script-config-import-file');
         const toggleBtn = modal.querySelector('#tm-user-toggle');
         const phrasesEnabledToggle = modal.querySelector('#tm-phrases-enabled-toggle');
         const klipyGifsToggle = modal.querySelector('#tm-klipy-gifs-toggle');
@@ -7250,11 +7732,7 @@
         const hideChatFooterToggle = modal.querySelector('#tm-hide-chat-footer-toggle');
         const embedUrlImagesToggle = modal.querySelector('#tm-embed-url-images-toggle');
         const lightThemeToggle = modal.querySelector('#tm-light-theme-toggle');
-        const rightInput = modal.querySelector('#tm-right-input');
-        const rightValue = modal.querySelector('#tm-right-value');
-        const bottomInput = modal.querySelector('#tm-bottom-input');
-        const bottomValue = modal.querySelector('#tm-bottom-value');
-        const resetPositionBtn = modal.querySelector('#tm-reset-position');
+        const resetStatsLayoutBtn = modal.querySelector('#tm-reset-stats-layout');
         const hideStatsToggle = modal.querySelector('#tm-hide-stats-toggle');
         const debugToggle = modal.querySelector('#tm-debug-toggle');
         const homeCollapseToggle = modal.querySelector('#tm-home-collapse-toggle-setting');
@@ -7464,41 +7942,6 @@
             }
         }
 
-        function getPreviewPosition() {
-            const fallback = loadPosition();
-            return {
-                rightPercent: parsePercentInput(rightInput.value, fallback.rightPercent, MAX_STATS_RIGHT_PERCENT),
-                bottomPercent: parsePercentInput(bottomInput.value, fallback.bottomPercent, MAX_STATS_BOTTOM_PERCENT)
-            };
-        }
-
-        function syncPositionValueLabels(position) {
-            if (rightValue) rightValue.textContent = `${formatNumberInputValue(position.rightPercent, MAX_STATS_RIGHT_PERCENT)}%`;
-            if (bottomValue) bottomValue.textContent = `${formatNumberInputValue(position.bottomPercent, MAX_STATS_BOTTOM_PERCENT)}%`;
-        }
-
-        function previewPosition() {
-            const preview = getPreviewPosition();
-            syncPositionValueLabels(preview);
-            applyBoxPosition(preview);
-        }
-
-        function commitPreviewPosition(showMessage = true) {
-            const newPos = getPreviewPosition();
-
-            rightInput.value = formatNumberInputValue(newPos.rightPercent, MAX_STATS_RIGHT_PERCENT);
-            bottomInput.value = formatNumberInputValue(newPos.bottomPercent, MAX_STATS_BOTTOM_PERCENT);
-            syncPositionValueLabels(newPos);
-
-            savePosition(newPos);
-            applyBoxPosition(newPos);
-            updateStatsBox();
-
-            if (showMessage) {
-                setFeedback(`Position enregistrée pour ${currentPageLabel}.`);
-            }
-        }
-
         function syncFontSizeValueLabel() {
             if (fontSizeValue && fontSizeRange) {
                 fontSizeValue.textContent = `${fontSizeRange.value}%`;
@@ -7690,6 +8133,41 @@
             openSavedPhrasesConfigModal();
         });
 
+        scriptConfigExportBtn?.addEventListener('click', () => {
+            const result = downloadScriptConfigExport();
+            setFeedback(result.message, !result.ok);
+        });
+
+        scriptConfigImportBtn?.addEventListener('click', () => {
+            scriptConfigImportFileInput?.click();
+        });
+
+        scriptConfigImportFileInput?.addEventListener('change', async () => {
+            const selectedFile = scriptConfigImportFileInput instanceof HTMLInputElement
+                ? scriptConfigImportFileInput.files?.[0]
+                : null;
+            if (!selectedFile) return;
+
+            try {
+                const fileContent = await selectedFile.text();
+                const parsedContent = JSON.parse(fileContent);
+                const result = importScriptConfiguration(parsedContent);
+
+                if (result.ok) {
+                    closeSettingsModal();
+                    showToast(result.message);
+                } else {
+                    setFeedback(result.message, true);
+                }
+            } catch (e) {
+                setFeedback('Import impossible : fichier JSON invalide.', true);
+            } finally {
+                if (scriptConfigImportFileInput instanceof HTMLInputElement) {
+                    scriptConfigImportFileInput.value = '';
+                }
+            }
+        });
+
         phrasesEnabledToggle?.addEventListener('change', () => {
             saveSavedPhrasesEnabled(phrasesEnabledToggle.checked);
             syncSavedPhrasesMainSummary();
@@ -7789,25 +8267,20 @@
             setFeedback(lightThemeEnabled ? `Thème clair activé pour ${currentPageLabel}.` : `Thème clair désactivé pour ${currentPageLabel}.`);
         });
 
-        rightInput.addEventListener('input', previewPosition);
-        bottomInput.addEventListener('input', previewPosition);
-        rightInput.addEventListener('change', () => commitPreviewPosition(false));
-        bottomInput.addEventListener('change', () => commitPreviewPosition(false));
-
         hideStatsToggle?.addEventListener('change', () => {
             saveStatsHidden(hideStatsToggle.checked);
             applyStatsBoxVisibilityState();
             setFeedback(statsHidden ? `Stats box masquée pour ${currentPageLabel}.` : `Stats box affichée pour ${currentPageLabel}.`);
         });
 
-        resetPositionBtn.addEventListener('click', () => {
+        resetStatsLayoutBtn?.addEventListener('click', () => {
             resetPosition();
-            const pos = loadPosition();
-            rightInput.value = formatNumberInputValue(pos.rightPercent, MAX_STATS_RIGHT_PERCENT);
-            bottomInput.value = formatNumberInputValue(pos.bottomPercent, MAX_STATS_BOTTOM_PERCENT);
-            applyBoxPosition(pos);
+            resetStatsBoxSize();
+            applyStatsBoxDisplayModeState();
+            applyBoxPosition(loadPosition());
+            constrainStatsBoxToViewport(false, false);
             updateStatsBox();
-            setFeedback(`Position réinitialisée pour ${currentPageLabel}.`);
+            setFeedback(`Taille et position de la stats box réinitialisées pour ${currentPageLabel}.`);
         });
 
         debugToggle.addEventListener('change', () => {
@@ -11260,6 +11733,10 @@
             const afkPanel = document.getElementById(AFK_PANEL_ID);
             if (afkPanel instanceof HTMLElement) {
                 constrainAfkPanelToViewport(afkPanel);
+            }
+
+            if (statsBox instanceof HTMLElement) {
+                constrainStatsBoxToViewport(true, false);
             }
 
             if (!isChatPage() || !messageActionsLeftEnabled) return;
