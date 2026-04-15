@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torr9 Chat - Shoutbox 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.62
+// @version      2.63
 // @description  Blacklist, mise en avant, mentions, réponses rapides contextuelles, Gif et confort avancé pour la shoutbox Torr9
 // @icon         https://torr9.net/favicon.ico?favicon.71918ed5.ico`
 // @author       Butchered
@@ -37,12 +37,15 @@
     const STORAGE_KEY_EMBED_URL_IMAGES = 'tm_torr9_embed_url_images';
     const STORAGE_KEY_SAVED_PHRASES = 'tm_torr9_saved_phrases';
     const STORAGE_KEY_SAVED_PHRASES_ENABLED = 'tm_torr9_saved_phrases_enabled';
+    const STORAGE_KEY_SAVED_PHRASES_REPLACE_INPUT = 'tm_torr9_saved_phrases_replace_input';
     const STORAGE_KEY_KLIPY_GIFS_ENABLED = 'tm_torr9_klipy_gifs_enabled';
+    const STORAGE_KEY_CHAT_INPUT_TOOLBAR_INLINE = 'tm_torr9_chat_input_toolbar_inline';
     const STORAGE_KEY_CHAT_INPUT_TOOLBAR_ALIGN_RIGHT = 'tm_torr9_chat_input_toolbar_align_right';
     const STORAGE_KEY_AFK_STATE = 'tm_torr9_afk_state';
     const STORAGE_KEY_AFK_ACTIVITY = 'tm_torr9_afk_activity';
     const STORAGE_KEY_AFK_PANEL_POSITION = 'tm_torr9_afk_panel_position';
     const STORAGE_KEY_AFK_PANEL_HIDDEN = 'tm_torr9_afk_panel_hidden';
+    const SESSION_STORAGE_KEY_AFK_TAB_ID = 'tm_torr9_afk_tab_id';
     const SCRIPT_CONFIG_EXPORT_VERSION = 1;
     const SCRIPT_CONFIG_STORAGE_KEYS = [
         STORAGE_KEY_USERS,
@@ -68,7 +71,9 @@
         STORAGE_KEY_EMBED_URL_IMAGES,
         STORAGE_KEY_SAVED_PHRASES,
         STORAGE_KEY_SAVED_PHRASES_ENABLED,
+        STORAGE_KEY_SAVED_PHRASES_REPLACE_INPUT,
         STORAGE_KEY_KLIPY_GIFS_ENABLED,
+        STORAGE_KEY_CHAT_INPUT_TOOLBAR_INLINE,
         STORAGE_KEY_CHAT_INPUT_TOOLBAR_ALIGN_RIGHT,
         STORAGE_KEY_AFK_PANEL_POSITION
     ];
@@ -87,6 +92,9 @@
     const MODAL_SCROLLBAR_STYLE_ID = 'tm-torr9-modal-scrollbar-style';
     const CHAT_SCROLLBAR_STYLE_ID = 'tm-torr9-chat-scrollbar-style';
     const DEFAULT_YOUTUBE_PLAYER_TITLE = 'Player YouTube';
+    const DEFAULT_YOUTUBE_PLAYER_WIDTH_PX = 420;
+    const DEFAULT_YOUTUBE_PLAYER_HEIGHT_PX = 260;
+    const MINIMIZED_YOUTUBE_PLAYER_WIDTH_PX = 260;
     const DEFAULT_AFK_AUTO_REPLY_MESSAGE = 'Je suis AFK quelques minutes, je reviens rapidement.';
     const DEFAULT_HIGHLIGHT_COLOR = '#f59e0b';
     const DEFAULT_HIGHLIGHT_OPACITY = 14;
@@ -142,6 +150,7 @@
     const NATIVE_CHAT_INPUT_POPOVER_STYLE_ID = 'tm-torr9-native-chat-input-popover-style';
     const CHAT_INPUT_TOOLBAR_RAIL_ATTR = 'data-tm-chat-input-toolbar-rail';
     const CHAT_INPUT_TOOLBAR_SPACE_ATTR = 'data-tm-chat-input-toolbar-space';
+    const CHAT_INPUT_TOOLBAR_SYNC_BOUND_ATTR = 'data-tm-chat-input-toolbar-sync-bound';
     const CHAT_INPUT_TOOLBAR_RESERVED_HEIGHT_PX = 46;
     const HOME_CHAT_POPOVER_SURFACE_ATTR = 'data-tm-home-chat-popover-surface';
     const HOME_CHAT_POPOVER_PARENT_ATTR = 'data-tm-home-chat-popover-parent';
@@ -195,7 +204,9 @@
     let linkifyUrlsEnabled = loadLinkifyUrlsEnabled();
     let embedUrlImagesEnabled = loadEmbedUrlImagesEnabled();
     let savedPhrasesEnabled = loadSavedPhrasesEnabled();
+    let savedPhrasesReplaceInput = loadSavedPhrasesReplaceInput();
     let klipyGifsEnabled = loadKlipyGifsEnabled();
+    let chatInputToolbarInline = loadChatInputToolbarInline();
     let chatInputToolbarAlignRight = loadChatInputToolbarAlignRight();
     let mentionSoundContext = null;
     let mentionSoundElement = null;
@@ -218,6 +229,7 @@
     let afkActivityRecords = loadAfkActivityRecords();
     let afkPanelPosition = loadAfkPanelPosition();
     let afkPanelHidden = loadAfkPanelHidden();
+    const afkTabId = loadAfkTabId();
 
     const savedPhrases = loadSavedPhrases();
     if (savedPhrasesStorageNeedsRepair) {
@@ -473,6 +485,19 @@
         localStorage.setItem(STORAGE_KEY_SAVED_PHRASES_ENABLED, savedPhrasesEnabled ? '1' : '0');
     }
 
+    function loadSavedPhrasesReplaceInput() {
+        try {
+            return localStorage.getItem(STORAGE_KEY_SAVED_PHRASES_REPLACE_INPUT) === '1';
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function saveSavedPhrasesReplaceInput(value) {
+        savedPhrasesReplaceInput = !!value;
+        localStorage.setItem(STORAGE_KEY_SAVED_PHRASES_REPLACE_INPUT, savedPhrasesReplaceInput ? '1' : '0');
+    }
+
     function loadKlipyGifsEnabled() {
         try {
             const rawValue = localStorage.getItem(STORAGE_KEY_KLIPY_GIFS_ENABLED);
@@ -486,6 +511,19 @@
     function saveKlipyGifsEnabled(value) {
         klipyGifsEnabled = !!value;
         localStorage.setItem(STORAGE_KEY_KLIPY_GIFS_ENABLED, klipyGifsEnabled ? '1' : '0');
+    }
+
+    function loadChatInputToolbarInline() {
+        try {
+            return localStorage.getItem(STORAGE_KEY_CHAT_INPUT_TOOLBAR_INLINE) === '1';
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function saveChatInputToolbarInline(value) {
+        chatInputToolbarInline = !!value;
+        localStorage.setItem(STORAGE_KEY_CHAT_INPUT_TOOLBAR_INLINE, chatInputToolbarInline ? '1' : '0');
     }
 
     function loadChatInputToolbarAlignRight() {
@@ -524,6 +562,8 @@
             return {
                 enabled: false,
                 autoReplyEnabled: false,
+                muteMentionSound: false,
+                ownerTabId: '',
                 contextKey: '',
                 contextLabel: '',
                 username: normalizeName(mentionSettings?.username || ''),
@@ -537,6 +577,8 @@
         return {
             enabled: value.enabled === true,
             autoReplyEnabled: value.autoReplyEnabled === true,
+            muteMentionSound: value.muteMentionSound === true,
+            ownerTabId: String(value.ownerTabId || '').trim(),
             contextKey: String(value.contextKey || '').trim(),
             contextLabel: String(value.contextLabel || '').trim(),
             username: normalizeName(value.username || mentionSettings?.username || ''),
@@ -552,6 +594,27 @@
             return normalizeAfkState(JSON.parse(localStorage.getItem(STORAGE_KEY_AFK_STATE) || 'null'));
         } catch (e) {
             return normalizeAfkState(null);
+        }
+    }
+
+    function createAfkTabId() {
+        if (window.crypto?.randomUUID) {
+            return window.crypto.randomUUID();
+        }
+
+        return `afk-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    }
+
+    function loadAfkTabId() {
+        try {
+            const existingValue = String(sessionStorage.getItem(SESSION_STORAGE_KEY_AFK_TAB_ID) || '').trim();
+            if (existingValue) return existingValue;
+
+            const nextValue = createAfkTabId();
+            sessionStorage.setItem(SESSION_STORAGE_KEY_AFK_TAB_ID, nextValue);
+            return nextValue;
+        } catch (e) {
+            return createAfkTabId();
         }
     }
 
@@ -1164,7 +1227,8 @@
             source: 'Torr9 Chat - Shoutbox 2.0',
             storage,
             afkConfig: {
-                autoReplyMessage: normalizeAfkAutoReplyMessage(afkState.autoReplyMessage)
+                autoReplyMessage: normalizeAfkAutoReplyMessage(afkState.autoReplyMessage),
+                muteMentionSound: afkState.muteMentionSound === true
             }
         };
     }
@@ -1209,7 +1273,9 @@
         linkifyUrlsEnabled = loadLinkifyUrlsEnabled();
         embedUrlImagesEnabled = loadEmbedUrlImagesEnabled();
         savedPhrasesEnabled = loadSavedPhrasesEnabled();
+        savedPhrasesReplaceInput = loadSavedPhrasesReplaceInput();
         klipyGifsEnabled = loadKlipyGifsEnabled();
+        chatInputToolbarInline = loadChatInputToolbarInline();
         chatInputToolbarAlignRight = loadChatInputToolbarAlignRight();
         afkState = loadAfkState();
         afkPanelPosition = loadAfkPanelPosition();
@@ -1284,7 +1350,8 @@
         saveAfkState({
             ...normalizeAfkState(null),
             username: normalizeName(mentionSettings?.username || ''),
-            autoReplyMessage: normalizeAfkAutoReplyMessage(payload?.afkConfig?.autoReplyMessage)
+            autoReplyMessage: normalizeAfkAutoReplyMessage(payload?.afkConfig?.autoReplyMessage),
+            muteMentionSound: payload?.afkConfig?.muteMentionSound === true
         });
 
         afkActivityRecords = [];
@@ -1991,7 +2058,7 @@
             [${HOME_CHAT_POPOVER_SURFACE_ATTR}="1"] {
                 position: relative !important;
                 overflow: visible !important;
-                z-index: 90 !important;
+                z-index: 1 !important;
                 isolation: isolate;
             }
 
@@ -3126,7 +3193,38 @@
     }
 
     function isAfkEnabledForCurrentContext() {
-        return afkState.enabled === true && afkState.contextKey === getCurrentChatContextKey();
+        return afkState.enabled === true &&
+            afkState.ownerTabId === afkTabId &&
+            afkState.contextKey === getCurrentChatContextKey();
+    }
+
+    function doesCurrentTabOwnAfkState() {
+        return !!afkState.ownerTabId && afkState.ownerTabId === afkTabId;
+    }
+
+    function hasAfkActivityForContext(contextKey = getCurrentChatContextKey()) {
+        const normalizedContextKey = String(contextKey || '').trim();
+        if (!normalizedContextKey) return false;
+
+        return afkActivityRecords.some((record) => String(record?.contextKey || '').trim() === normalizedContextKey);
+    }
+
+    function shouldDisplayAfkPanelForCurrentPage() {
+        if (!isSupportedPage()) return false;
+        if (!doesCurrentTabOwnAfkState()) return false;
+
+        const currentContextKey = getCurrentChatContextKey();
+        if (!currentContextKey) return false;
+
+        if (afkState.enabled === true) {
+            return afkState.contextKey === currentContextKey;
+        }
+
+        return hasAfkActivityForContext(currentContextKey);
+    }
+
+    function isAfkMentionSoundMutedForCurrentContext() {
+        return isAfkEnabledForCurrentContext() && afkState.muteMentionSound === true;
     }
 
     function isAfkAutoReplyEnabled() {
@@ -3284,6 +3382,34 @@
         renderAfkPanel();
     }
 
+    function markAllAfkActivityRecordsRead() {
+        let updatedCount = 0;
+        const readAt = Date.now();
+
+        afkActivityRecords = afkActivityRecords.map((record) => {
+            if (record.isRead === true) return record;
+
+            updatedCount += 1;
+            return normalizeAfkActivityRecord({
+                ...record,
+                isRead: true,
+                readAt
+            });
+        }).filter(Boolean);
+
+        if (updatedCount === 0) {
+            return { ok: false, message: 'Aucun message AFK non lu.' };
+        }
+
+        saveAfkActivityRecords();
+        renderAfkPanel();
+
+        return {
+            ok: true,
+            message: `${updatedCount} message${updatedCount > 1 ? 's' : ''} AFK marqué${updatedCount > 1 ? 's' : ''} comme lu${updatedCount > 1 ? 's' : ''}.`
+        };
+    }
+
     function updateAfkAutoReplyMessage(value) {
         afkMessageDraft = null;
         saveAfkState({
@@ -3313,6 +3439,21 @@
         };
     }
 
+    function updateAfkMuteMentionSound(value) {
+        saveAfkState({
+            ...afkState,
+            muteMentionSound: value === true
+        });
+        renderAfkPanel();
+
+        return {
+            ok: true,
+            message: value === true
+                ? 'Son des alertes coupé pendant l’AFK.'
+                : 'Son des alertes réactivé pendant l’AFK.'
+        };
+    }
+
     function disableAfkModeForCurrentContext(reasonLabel = 'après envoi manuel') {
         if (!isAfkEnabledForCurrentContext()) {
             return { ok: false, message: '' };
@@ -3324,6 +3465,7 @@
             ...afkState,
             enabled: false,
             autoReplyEnabled: false,
+            ownerTabId: afkState.ownerTabId || afkTabId,
             contextKey: '',
             contextLabel: '',
             activatedAt: 0,
@@ -3422,13 +3564,12 @@
     }
 
     function renderAfkPanel() {
-        const shouldDisplayPanel = afkState.enabled || afkActivityRecords.length > 0;
-        if (!shouldDisplayPanel) {
+        if (!shouldDisplayAfkPanelForCurrentPage()) {
             removeAfkPanel();
             return;
         }
 
-        if (afkState.enabled && afkPanelHidden) {
+        if (isAfkEnabledForCurrentContext() && afkPanelHidden) {
             saveAfkPanelHidden(false);
         }
 
@@ -3524,9 +3665,21 @@
                         ? 'Active d’abord le mode AFK pour pouvoir autoriser les réponses automatiques.'
                         : !autoReplyEnabled
                             ? 'Réponses automatiques désactivées. Le panneau continue simplement à enregistrer les messages à relire.'
-                            : autoReplyWindowExpired
+                        : autoReplyWindowExpired
                         ? 'Les réponses automatiques sont coupées après 30 minutes d’inactivité, mais les messages continuent d’être enregistrés.'
                         : 'Les réponses automatiques s’arrêtent d’elles-mêmes après 30 minutes d’inactivité, mais le suivi des messages continue.'}
+                </div>
+                <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:12px;color:#e4e4e7;cursor:pointer;">
+                    <input
+                        id="tm-afk-mute-mention-sound-enabled"
+                        type="checkbox"
+                        ${afkState.muteMentionSound === true ? 'checked' : ''}
+                        style="width:14px;height:14px;cursor:pointer;"
+                    >
+                    <span>Couper le son des alertes pendant l’AFK</span>
+                </label>
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                    Les mentions restent enregistrées dans le suivi AFK, mais le son n’est plus joué tant que cette option est active sur le contexte AFK courant.
                 </div>
                 <textarea id="tm-afk-message-input" rows="3" maxlength="${MAX_AFK_AUTO_REPLY_MESSAGE_LENGTH}" style="
                     width:100%;
@@ -3585,8 +3738,26 @@
 
             <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px;">
                 <div style="font-size:12px;font-weight:700;color:#d4d4d8;">Messages à relire</div>
-                <div style="font-size:11px;color:#a1a1aa;text-align:right;line-height:1.4;">
-                    ${unreadCount} non lu${unreadCount > 1 ? 's' : ''} · ${readCount} lu${readCount > 1 ? 's' : ''}
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
+                    ${unreadCount > 2 ? `
+                        <button
+                            type="button"
+                            data-tm-afk-action="mark-all-read"
+                            style="
+                                border:none;
+                                background:#3b82f6;
+                                color:#fff;
+                                border-radius:999px;
+                                padding:6px 10px;
+                                cursor:pointer;
+                                font-size:11px;
+                                font-weight:600;
+                            "
+                        >Marquer tout lu</button>
+                    ` : ''}
+                    <div style="font-size:11px;color:#a1a1aa;text-align:right;line-height:1.4;">
+                        ${unreadCount} non lu${unreadCount > 1 ? 's' : ''} · ${readCount} lu${readCount > 1 ? 's' : ''}
+                    </div>
                 </div>
             </div>
 
@@ -3641,9 +3812,11 @@
         const saveMessageBtn = panel.querySelector('[data-tm-afk-action="save-message"]');
         const toggleBtn = panel.querySelector('[data-tm-afk-action="toggle"]');
         const clearBtn = panel.querySelector('[data-tm-afk-action="clear"]');
+        const markAllReadBtn = panel.querySelector('[data-tm-afk-action="mark-all-read"]');
         const hidePanelBtn = panel.querySelector('[data-tm-afk-action="hide-panel"]');
         const afkMessageInput = panel.querySelector('#tm-afk-message-input');
         const autoReplyEnabledInput = panel.querySelector('#tm-afk-auto-reply-enabled');
+        const muteMentionSoundInput = panel.querySelector('#tm-afk-mute-mention-sound-enabled');
         const dragHandle = panel.querySelector('[data-tm-afk-drag-handle="1"]');
 
         saveMessageBtn?.addEventListener('click', () => {
@@ -3661,9 +3834,20 @@
             showToast('Historique AFK effacé.');
         });
 
+        markAllReadBtn?.addEventListener('click', () => {
+            const result = markAllAfkActivityRecordsRead();
+            showToast(result.message, !result.ok);
+        });
+
         autoReplyEnabledInput?.addEventListener('change', () => {
             if (!(autoReplyEnabledInput instanceof HTMLInputElement)) return;
             const result = updateAfkAutoReplyEnabled(autoReplyEnabledInput.checked);
+            showToast(result.message, !result.ok);
+        });
+
+        muteMentionSoundInput?.addEventListener('change', () => {
+            if (!(muteMentionSoundInput instanceof HTMLInputElement)) return;
+            const result = updateAfkMuteMentionSound(muteMentionSoundInput.checked);
             showToast(result.message, !result.ok);
         });
 
@@ -3762,7 +3946,7 @@
         const currentContextKey = getCurrentChatContextKey();
         const currentContextLabel = getCurrentContextLabel();
 
-        if (afkState.enabled && afkState.contextKey === currentContextKey) {
+        if (isAfkEnabledForCurrentContext()) {
             return disableAfkModeForCurrentContext();
         }
 
@@ -3770,6 +3954,7 @@
             ...afkState,
             enabled: true,
             autoReplyEnabled: false,
+            ownerTabId: afkTabId,
             contextKey: currentContextKey,
             contextLabel: currentContextLabel,
             username: watchedUsername,
@@ -4690,6 +4875,11 @@
 
     function maybeNotifyMention(messageEl) {
         if (!(messageEl instanceof HTMLElement)) return;
+        if (isAfkMentionSoundMutedForCurrentContext()) {
+            mentionSoundNotifiedMessages.add(messageEl);
+            logMentionDebug('skip: muted by AFK setting, message recorded as handled');
+            return;
+        }
         if (!isMentionSoundEnabledForCurrentPage()) {
             logMentionDebug('skip: sound disabled or out of scope');
             return;
@@ -4846,6 +5036,7 @@
         const allowMentionAndHighlight = options.allowMentionAndHighlight !== false;
         applyMessageTypography(messageEl);
         syncMessageActionsAnchorVars(messageEl);
+        syncMessageReplyContextHover(messageEl);
         updateMessageTextBlockUrls(messageEl);
 
         const username = getLogicalUsername(messageEl);
@@ -5101,6 +5292,78 @@
         }
     }
 
+    function isYouTubePlayerCollapsed(player = document.getElementById(YOUTUBE_PLAYER_ID)) {
+        return player instanceof HTMLElement && player.dataset.tmYoutubeCollapsed === '1';
+    }
+
+    function updateYouTubePlayerCollapseButton(button, collapsed) {
+        if (!(button instanceof HTMLButtonElement)) return;
+
+        button.title = collapsed ? 'Réafficher la vidéo' : 'Masquer la vidéo sans couper le son';
+        button.setAttribute('aria-label', button.title);
+        button.innerHTML = collapsed
+            ? `
+                <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
+                    <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+                    <circle cx="12" cy="12" r="2.8" fill="none" stroke="currentColor" stroke-width="1.8"></circle>
+                </svg>
+            `
+            : `
+                <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
+                    <path d="M3 3l18 18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+                    <path d="M10.6 5.3A11.5 11.5 0 0 1 12 5.2c6.5 0 10 6 10 6a17.6 17.6 0 0 1-3.3 4.1" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+                    <path d="M6.6 6.7C3.8 8.4 2 11.2 2 11.2s3.5 6 10 6c1.2 0 2.4-.2 3.4-.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+                    <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+                </svg>
+            `;
+    }
+
+    function setYouTubePlayerCollapsed(collapsed, player = document.getElementById(YOUTUBE_PLAYER_ID)) {
+        if (!(player instanceof HTMLElement)) return;
+
+        const header = player.querySelector('[data-tm-youtube-player-header="1"]');
+        const body = player.querySelector('[data-tm-youtube-player-body="1"]');
+        const collapseBtn = player.querySelector('[data-tm-youtube-player-collapse="1"]');
+
+        if (!(header instanceof HTMLElement) || !(body instanceof HTMLElement) || !(collapseBtn instanceof HTMLButtonElement)) {
+            return;
+        }
+
+        if (collapsed) {
+            if (!isYouTubePlayerCollapsed(player)) {
+                player.dataset.tmYoutubeExpandedWidth = String(
+                    Math.round(player.offsetWidth || Number.parseFloat(player.style.width) || DEFAULT_YOUTUBE_PLAYER_WIDTH_PX)
+                );
+                player.dataset.tmYoutubeExpandedHeight = String(
+                    Math.round(player.offsetHeight || Number.parseFloat(player.style.height) || DEFAULT_YOUTUBE_PLAYER_HEIGHT_PX)
+                );
+            }
+
+            player.dataset.tmYoutubeCollapsed = '1';
+            body.style.display = 'none';
+            header.style.borderBottom = 'none';
+            player.style.width = `${MINIMIZED_YOUTUBE_PLAYER_WIDTH_PX}px`;
+            player.style.height = 'auto';
+            player.style.minWidth = '220px';
+            player.style.minHeight = '0';
+            player.style.resize = 'none';
+            updateYouTubePlayerCollapseButton(collapseBtn, true);
+            constrainYouTubePlayerToViewport(player);
+            return;
+        }
+
+        player.dataset.tmYoutubeCollapsed = '0';
+        body.style.display = 'block';
+        header.style.borderBottom = '1px solid rgba(255,255,255,0.06)';
+        player.style.width = `${Math.max(320, Number(player.dataset.tmYoutubeExpandedWidth) || DEFAULT_YOUTUBE_PLAYER_WIDTH_PX)}px`;
+        player.style.height = `${Math.max(220, Number(player.dataset.tmYoutubeExpandedHeight) || DEFAULT_YOUTUBE_PLAYER_HEIGHT_PX)}px`;
+        player.style.minWidth = '320px';
+        player.style.minHeight = '220px';
+        player.style.resize = 'both';
+        updateYouTubePlayerCollapseButton(collapseBtn, false);
+        constrainYouTubePlayerToViewport(player);
+    }
+
     function constrainYouTubePlayerToViewport(player) {
         if (!(player instanceof HTMLElement)) return;
 
@@ -5145,8 +5408,8 @@
         player.style.zIndex = '1000001';
         player.style.display = 'flex';
         player.style.flexDirection = 'column';
-        player.style.width = '420px';
-        player.style.height = '260px';
+        player.style.width = `${DEFAULT_YOUTUBE_PLAYER_WIDTH_PX}px`;
+        player.style.height = `${DEFAULT_YOUTUBE_PLAYER_HEIGHT_PX}px`;
         player.style.minWidth = '320px';
         player.style.minHeight = '220px';
         player.style.maxWidth = 'calc(100vw - 24px)';
@@ -5160,6 +5423,7 @@
         player.style.resize = 'both';
 
         const header = document.createElement('div');
+        header.setAttribute('data-tm-youtube-player-header', '1');
         header.style.display = 'flex';
         header.style.alignItems = 'center';
         header.style.justifyContent = 'space-between';
@@ -5174,9 +5438,35 @@
         title.textContent = DEFAULT_YOUTUBE_PLAYER_TITLE;
         title.setAttribute('data-tm-youtube-player-title', '1');
         title.title = DEFAULT_YOUTUBE_PLAYER_TITLE;
+        title.style.flex = '1';
+        title.style.minWidth = '0';
+        title.style.overflow = 'hidden';
+        title.style.textOverflow = 'ellipsis';
+        title.style.whiteSpace = 'nowrap';
         title.style.fontSize = '12px';
         title.style.fontWeight = '700';
         title.style.color = '#f4f4f5';
+
+        const headerActions = document.createElement('div');
+        headerActions.style.display = 'flex';
+        headerActions.style.alignItems = 'center';
+        headerActions.style.gap = '8px';
+        headerActions.style.flexShrink = '0';
+
+        const collapseBtn = document.createElement('button');
+        collapseBtn.type = 'button';
+        collapseBtn.setAttribute('data-tm-youtube-player-collapse', '1');
+        collapseBtn.style.border = 'none';
+        collapseBtn.style.background = '#27272a';
+        collapseBtn.style.color = '#fff';
+        collapseBtn.style.width = '30px';
+        collapseBtn.style.height = '30px';
+        collapseBtn.style.borderRadius = '9px';
+        collapseBtn.style.cursor = 'pointer';
+        collapseBtn.style.display = 'inline-flex';
+        collapseBtn.style.alignItems = 'center';
+        collapseBtn.style.justifyContent = 'center';
+        updateYouTubePlayerCollapseButton(collapseBtn, false);
 
         const closeBtn = document.createElement('button');
         closeBtn.type = 'button';
@@ -5192,6 +5482,7 @@
         closeBtn.style.lineHeight = '1';
 
         const body = document.createElement('div');
+        body.setAttribute('data-tm-youtube-player-body', '1');
         body.style.flex = '1';
         body.style.minHeight = '0';
         body.style.background = '#09090b';
@@ -5208,9 +5499,15 @@
 
         body.appendChild(iframe);
         header.appendChild(title);
-        header.appendChild(closeBtn);
+        headerActions.appendChild(collapseBtn);
+        headerActions.appendChild(closeBtn);
+        header.appendChild(headerActions);
         player.appendChild(header);
         player.appendChild(body);
+
+        collapseBtn.addEventListener('click', () => {
+            setYouTubePlayerCollapsed(!isYouTubePlayerCollapsed(player), player);
+        });
 
         closeBtn.addEventListener('click', () => {
             closeYouTubePlayer();
@@ -7178,12 +7475,21 @@
                 </div>
 
                 <label style="${settingsCheckboxLabelWithMarginStyle}">
+                    <input id="tm-chat-input-toolbar-inline-toggle" type="checkbox" ${chatInputToolbarInline ? 'checked' : ''} style="${settingsCheckboxInputStyle(accessibilityCheckboxAccentColor)}">
+                    <span>Boutons du chat sur la même ligne que l’input</span>
+                </label>
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                    Désactivé par défaut : la barre d’outils reste au-dessus du champ. Active cette option pour placer les boutons à côté de l’input.
+                </div>
+
+                <label style="${settingsCheckboxLabelWithMarginStyle}">
                     <input id="tm-chat-input-toolbar-align-right-toggle" type="checkbox" ${chatInputToolbarAlignRight ? 'checked' : ''} style="${settingsCheckboxInputStyle(accessibilityCheckboxAccentColor)}">
                     <span>Aligner les boutons du chat à droite</span>
                 </label>
 
                 <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
-                    Par défaut, les boutons au-dessus de l'input du chat sont alignés à gauche. Active cette option pour les pousser à droite.
+                    Décoché : boutons à gauche. Coché : boutons à droite, que la barre soit au-dessus du champ ou sur la même ligne.
                 </div>
 
                 ${isChatPage() ? `
@@ -7728,6 +8034,7 @@
         const linkifyUrlsToggle = modal.querySelector('#tm-linkify-urls-toggle');
         const chatScrollbarToggle = modal.querySelector('#tm-chat-scrollbar-toggle');
         const messageActionsLeftToggle = modal.querySelector('#tm-message-actions-left-toggle');
+        const chatInputToolbarInlineToggle = modal.querySelector('#tm-chat-input-toolbar-inline-toggle');
         const chatInputToolbarAlignRightToggle = modal.querySelector('#tm-chat-input-toolbar-align-right-toggle');
         const hideChatFooterToggle = modal.querySelector('#tm-hide-chat-footer-toggle');
         const embedUrlImagesToggle = modal.querySelector('#tm-embed-url-images-toggle');
@@ -8227,13 +8534,27 @@
             );
         });
 
+        chatInputToolbarInlineToggle?.addEventListener('change', () => {
+            saveChatInputToolbarInline(chatInputToolbarInlineToggle.checked);
+            applyChatInputToolbarAlignmentState();
+            setFeedback(
+                chatInputToolbarInline
+                    ? 'Barre d’outils du chat déplacée sur la même ligne que l’input.'
+                    : 'Barre d’outils du chat replacée au-dessus de l’input.'
+            );
+        });
+
         chatInputToolbarAlignRightToggle?.addEventListener('change', () => {
             saveChatInputToolbarAlignRight(chatInputToolbarAlignRightToggle.checked);
             applyChatInputToolbarAlignmentState();
             setFeedback(
                 chatInputToolbarAlignRight
-                    ? 'Barre d’outils du chat alignée à droite.'
-                    : 'Barre d’outils du chat alignée à gauche.'
+                    ? (chatInputToolbarInline
+                        ? 'Barre d’outils du chat alignée à droite de l’input.'
+                        : 'Barre d’outils du chat alignée à droite au-dessus de l’input.')
+                    : (chatInputToolbarInline
+                        ? 'Barre d’outils du chat alignée à gauche de l’input.'
+                        : 'Barre d’outils du chat alignée à gauche au-dessus de l’input.')
             );
         });
 
@@ -8309,7 +8630,6 @@
         syncMentionSoundControlsState();
         syncMentionOpacityPreview();
         syncFontSizeValueLabel();
-        previewPosition();
     }
 
     function isScriptUiElement(element) {
@@ -8586,6 +8906,8 @@
     function getChatInputToolbarMountContext(input = getChatInput()) {
         if (!(input instanceof HTMLElement)) {
             return {
+                input: null,
+                controlsRow: null,
                 mountParent: null,
                 inputWrapper: null,
                 directWrapper: null,
@@ -8593,6 +8915,7 @@
             };
         }
 
+        const controlsRow = getChatInputControlsRow(input);
         const inputWrapper = input.closest('.relative.flex-1');
         const directWrapper = input.parentElement instanceof HTMLElement ? input.parentElement : null;
         const fallbackArea = input.closest('form');
@@ -8602,6 +8925,8 @@
             (fallbackArea instanceof HTMLElement ? fallbackArea : null);
 
         return {
+            input,
+            controlsRow: controlsRow instanceof HTMLElement ? controlsRow : null,
             mountParent,
             inputWrapper: inputWrapper instanceof HTMLElement ? inputWrapper : null,
             directWrapper,
@@ -8611,9 +8936,38 @@
 
     function ensureChatInputToolbarMountVisibility(context) {
         const mountParent = context?.mountParent;
+        const controlsRow = context?.controlsRow;
+        const input = context?.input;
+
+        if (
+            input instanceof HTMLElement &&
+            input.getAttribute(CHAT_INPUT_TOOLBAR_SYNC_BOUND_ATTR) !== '1'
+        ) {
+            input.setAttribute(CHAT_INPUT_TOOLBAR_SYNC_BOUND_ATTR, '1');
+            input.addEventListener('input', () => {
+                syncChatInputToolbarReservedSpace(input);
+            });
+        }
+
+        if (chatInputToolbarInline && controlsRow instanceof HTMLElement) {
+            if (!/flex/i.test(window.getComputedStyle(controlsRow).display)) {
+                controlsRow.style.display = 'flex';
+            }
+            controlsRow.style.alignItems = 'flex-end';
+            controlsRow.style.flexWrap = 'nowrap';
+            controlsRow.style.gap = '8px';
+            controlsRow.style.minWidth = '0';
+            controlsRow.style.overflow = 'visible';
+        }
+
         if (mountParent instanceof HTMLElement) {
-            if (window.getComputedStyle(mountParent).position === 'static') {
-                mountParent.style.position = 'relative';
+            if (chatInputToolbarInline) {
+                mountParent.style.flex = '1 1 auto';
+                mountParent.style.minWidth = '0';
+            } else {
+                if (window.getComputedStyle(mountParent).position === 'static') {
+                    mountParent.style.position = 'relative';
+                }
             }
             mountParent.style.overflow = 'visible';
         }
@@ -8626,6 +8980,18 @@
         }
     }
 
+    function getChatInputToolbarRailHost(context) {
+        if (chatInputToolbarInline && context?.controlsRow instanceof HTMLElement) {
+            return context.controlsRow;
+        }
+
+        if (context?.mountParent instanceof HTMLElement) {
+            return context.mountParent;
+        }
+
+        return null;
+    }
+
     function getChatInputToolbarRail(mountParent) {
         if (!(mountParent instanceof HTMLElement)) return null;
 
@@ -8636,6 +9002,23 @@
         return rail instanceof HTMLElement ? rail : null;
     }
 
+    function getExistingChatInputToolbarRail(context) {
+        const hosts = [
+            context?.controlsRow,
+            context?.mountParent
+        ].filter((host) => host instanceof HTMLElement);
+
+        for (const host of hosts) {
+            const rail = getChatInputToolbarRail(host);
+            if (rail instanceof HTMLElement) {
+                return rail;
+            }
+        }
+
+        const globalRail = document.querySelector(`[${CHAT_INPUT_TOOLBAR_RAIL_ATTR}="1"]`);
+        return globalRail instanceof HTMLElement ? globalRail : null;
+    }
+
     function hasVisibleChatInputToolbar(rail) {
         if (!(rail instanceof HTMLElement)) return false;
 
@@ -8644,12 +9027,117 @@
         );
     }
 
+    function getInlineChatInputToolbarOffset(context, rail) {
+        if (!(rail instanceof HTMLElement) || !chatInputToolbarInline) return 0;
+
+        const inputEl = context?.input instanceof HTMLElement ? context.input : null;
+        const inputWrapper = context?.inputWrapper;
+        const inlineInputHost =
+            (inputWrapper instanceof HTMLElement && inputWrapper) ||
+            (context?.directWrapper instanceof HTMLElement && context.directWrapper) ||
+            (context?.mountParent instanceof HTMLElement && context.mountParent) ||
+            null;
+        const referenceEl = inputEl || inlineInputHost;
+
+        if (!(referenceEl instanceof HTMLElement)) return 0;
+
+        const referenceHeight = Math.round(referenceEl.getBoundingClientRect().height);
+        const railHeight = Math.round(rail.getBoundingClientRect().height);
+        if (referenceHeight <= 0 || railHeight <= 0) return 0;
+
+        return Math.max(0, referenceHeight - railHeight);
+    }
+
+    function positionChatInputToolbarRail(context, rail) {
+        if (!(rail instanceof HTMLElement)) return;
+
+        const railHost = getChatInputToolbarRailHost(context);
+        if (!(railHost instanceof HTMLElement)) return;
+
+        rail.style.display = 'flex';
+        rail.style.alignItems = 'center';
+        rail.style.gap = '8px';
+        rail.style.pointerEvents = 'none';
+        rail.style.zIndex = '50';
+        rail.style.overflow = 'visible';
+
+        const controlsRow = context?.controlsRow;
+        const inputWrapper = context?.inputWrapper;
+        const inlineInputHost =
+            (inputWrapper instanceof HTMLElement && inputWrapper) ||
+            (context?.directWrapper instanceof HTMLElement && context.directWrapper) ||
+            (context?.mountParent instanceof HTMLElement && context.mountParent) ||
+            null;
+
+        if (
+            chatInputToolbarInline &&
+            controlsRow instanceof HTMLElement &&
+            inlineInputHost instanceof HTMLElement &&
+            inlineInputHost.parentElement === controlsRow
+        ) {
+            rail.style.position = 'relative';
+            rail.style.top = 'auto';
+            rail.style.bottom = '6px';
+            rail.style.left = 'auto';
+            rail.style.right = 'auto';
+            rail.style.justifyContent = 'flex-start';
+            rail.style.flexWrap = 'nowrap';
+            rail.style.flexShrink = '0';
+            rail.style.minWidth = '0';
+            rail.style.alignSelf = 'flex-end';
+            inlineInputHost.style.flex = '1 1 0%';
+            inlineInputHost.style.minWidth = '0';
+            inlineInputHost.style.width = '0';
+            inlineInputHost.style.maxWidth = 'none';
+
+            if (rail.parentElement !== controlsRow) {
+                controlsRow.appendChild(rail);
+            }
+
+            if (chatInputToolbarAlignRight) {
+                if (inlineInputHost.nextElementSibling !== rail) {
+                    controlsRow.insertBefore(rail, inlineInputHost.nextElementSibling);
+                }
+            } else if (rail.nextElementSibling !== inlineInputHost) {
+                controlsRow.insertBefore(rail, inlineInputHost);
+            }
+
+            const inlineOffset = getInlineChatInputToolbarOffset(context, rail);
+            rail.style.transform = inlineOffset > 0
+                ? `translateY(-${inlineOffset}px)`
+                : 'translateY(0)';
+
+            return;
+        }
+
+        if (inlineInputHost instanceof HTMLElement) {
+            inlineInputHost.style.removeProperty('width');
+            inlineInputHost.style.removeProperty('max-width');
+        }
+
+        rail.style.position = 'absolute';
+        rail.style.top = '0';
+        rail.style.bottom = 'auto';
+        rail.style.left = '0';
+        rail.style.right = '0';
+        rail.style.justifyContent = chatInputToolbarAlignRight ? 'flex-end' : 'flex-start';
+        rail.style.flexWrap = 'nowrap';
+        rail.style.flexShrink = '0';
+        rail.style.minWidth = '0';
+        rail.style.alignSelf = 'auto';
+        rail.style.transform = 'translateY(0)';
+
+        if (rail.parentElement !== railHost) {
+            railHost.appendChild(rail);
+        }
+    }
+
     function syncChatInputToolbarReservedSpace(input = getChatInput()) {
         document.querySelectorAll(`[${CHAT_INPUT_TOOLBAR_SPACE_ATTR}="1"]`).forEach((element) => {
             if (!(element instanceof HTMLElement)) return;
 
             const rail = getChatInputToolbarRail(element);
-            if (hasVisibleChatInputToolbar(rail)) {
+            if (!chatInputToolbarInline && hasVisibleChatInputToolbar(rail)) {
                 element.style.paddingTop = `${CHAT_INPUT_TOOLBAR_RESERVED_HEIGHT_PX}px`;
                 return;
             }
@@ -8662,55 +9150,55 @@
         });
 
         const context = getChatInputToolbarMountContext(input);
-        if (!(context.mountParent instanceof HTMLElement)) return;
+        const railHost = getChatInputToolbarRailHost(context);
+        if (!(railHost instanceof HTMLElement)) return;
 
-        const rail = getChatInputToolbarRail(context.mountParent);
+        const rail = getExistingChatInputToolbarRail(context);
         if (hasVisibleChatInputToolbar(rail)) {
-            context.mountParent.style.paddingTop = `${CHAT_INPUT_TOOLBAR_RESERVED_HEIGHT_PX}px`;
-            context.mountParent.setAttribute(CHAT_INPUT_TOOLBAR_SPACE_ATTR, '1');
+            positionChatInputToolbarRail(context, rail);
+            if (!chatInputToolbarInline && context.mountParent instanceof HTMLElement) {
+                context.mountParent.style.paddingTop = `${CHAT_INPUT_TOOLBAR_RESERVED_HEIGHT_PX}px`;
+                context.mountParent.setAttribute(CHAT_INPUT_TOOLBAR_SPACE_ATTR, '1');
+                return;
+            }
+
+            if (context.mountParent instanceof HTMLElement) {
+                context.mountParent.style.removeProperty('padding-top');
+                context.mountParent.removeAttribute(CHAT_INPUT_TOOLBAR_SPACE_ATTR);
+            }
             return;
         }
 
         if (rail instanceof HTMLElement && rail.children.length === 0) {
             rail.remove();
         }
-        context.mountParent.style.removeProperty('padding-top');
-        context.mountParent.removeAttribute(CHAT_INPUT_TOOLBAR_SPACE_ATTR);
+        if (context.mountParent instanceof HTMLElement) {
+            context.mountParent.style.removeProperty('padding-top');
+            context.mountParent.removeAttribute(CHAT_INPUT_TOOLBAR_SPACE_ATTR);
+        }
     }
 
     function getOrCreateChatInputToolbarRail(context) {
-        if (!(context?.mountParent instanceof HTMLElement)) return null;
+        const railHost = getChatInputToolbarRailHost(context);
+        if (!(railHost instanceof HTMLElement)) return null;
 
         ensureChatInputToolbarMountVisibility(context);
 
-        let rail = getChatInputToolbarRail(context.mountParent);
+        let rail = getExistingChatInputToolbarRail(context);
         if (!rail) {
             rail = document.createElement('div');
             rail.setAttribute(CHAT_INPUT_TOOLBAR_RAIL_ATTR, '1');
-            rail.style.position = 'absolute';
-            rail.style.top = '0';
-            rail.style.left = '0';
-            rail.style.right = '0';
-            rail.style.display = 'flex';
-            rail.style.alignItems = 'center';
-            rail.style.justifyContent = chatInputToolbarAlignRight ? 'flex-end' : 'flex-start';
-            rail.style.gap = '8px';
-            rail.style.pointerEvents = 'none';
-            rail.style.zIndex = '50';
-            rail.style.overflow = 'visible';
-            context.mountParent.appendChild(rail);
+            railHost.appendChild(rail);
         }
 
+        positionChatInputToolbarRail(context, rail);
         return rail;
     }
 
     function applyChatInputToolbarAlignmentState() {
-        document.querySelectorAll(`[${CHAT_INPUT_TOOLBAR_RAIL_ATTR}="1"]`).forEach((rail) => {
-            if (!(rail instanceof HTMLElement)) return;
-            rail.style.justifyContent = chatInputToolbarAlignRight ? 'flex-end' : 'flex-start';
-        });
-
+        syncChatInputToolbarReservedSpace();
         applyKlipyGifMenuAlignmentState();
+        scheduleMovedNativeChatInputActionPopoversSync();
     }
 
     function shouldUseChatInputToolbarRail() {
@@ -8718,6 +9206,44 @@
             klipyGifsEnabled ||
             (savedPhrasesEnabled && savedPhrases.length > 0)
         );
+    }
+
+    function isChatInputToolbarLayoutStable(context) {
+        if (!shouldUseChatInputToolbarRail()) return true;
+
+        const rail = getExistingChatInputToolbarRail(context);
+        if (!(rail instanceof HTMLElement)) return false;
+
+        const railHost = getChatInputToolbarRailHost(context);
+        if (!(railHost instanceof HTMLElement) || rail.parentElement !== railHost) {
+            return false;
+        }
+
+        if (!chatInputToolbarInline) {
+            return true;
+        }
+
+        const controlsRow = context?.controlsRow;
+        const inputWrapper = context?.inputWrapper;
+        const inlineInputHost =
+            (inputWrapper instanceof HTMLElement && inputWrapper) ||
+            (context?.directWrapper instanceof HTMLElement && context.directWrapper) ||
+            (context?.mountParent instanceof HTMLElement && context.mountParent) ||
+            null;
+
+        if (
+            !(controlsRow instanceof HTMLElement) ||
+            !(inlineInputHost instanceof HTMLElement) ||
+            inlineInputHost.parentElement !== controlsRow
+        ) {
+            return false;
+        }
+
+        if (chatInputToolbarAlignRight) {
+            return inlineInputHost.nextElementSibling === rail;
+        }
+
+        return rail.nextElementSibling === inlineInputHost;
     }
 
     function getChatInputControlsRow(input = getChatInput()) {
@@ -8832,6 +9358,15 @@
             });
 
         return Array.from(new Set([...explicitMatches, ...fallbackMatches])).slice(0, 2);
+    }
+
+    function isProtonPassManagingChatInput(input = getChatInput()) {
+        if (!(input instanceof HTMLElement)) return false;
+
+        return (
+            input.closest('[data-protonpass-form]') instanceof HTMLElement ||
+            getChatInputControlsRow(input)?.hasAttribute('data-protonpass-form') === true
+        );
     }
 
     function restoreNativeChatInputActionButtons() {
@@ -8983,8 +9518,15 @@
             return;
         }
 
+        // Proton Pass mutates the chat action row aggressively. Keeping the native
+        // emoji/image buttons in place avoids a tug-of-war over that DOM subtree.
+        if (isProtonPassManagingChatInput(input)) {
+            restoreNativeChatInputActionButtons();
+            return;
+        }
+
         const context = getChatInputToolbarMountContext(input);
-        const rail = getChatInputToolbarRail(context.mountParent);
+        const rail = getExistingChatInputToolbarRail(context);
         if (!(rail instanceof HTMLElement)) {
             restoreNativeChatInputActionButtons();
             return;
@@ -9221,7 +9763,7 @@
         return { ok: true, message: 'Message envoyé.' };
     }
 
-    function insertTextIntoChatInput(input, textToInsert, successMessage = 'Texte inséré.') {
+    function insertTextIntoChatInput(input, textToInsert, successMessage = 'Texte inséré.', options = {}) {
         if (!(input instanceof HTMLElement)) {
             return { ok: false, message: 'Champ de texte non trouvé.' };
         }
@@ -9232,12 +9774,13 @@
         }
 
         input.focus();
+        const replaceExistingText = options?.replaceExistingText === true;
 
         const currentValue = input.isContentEditable
             ? (input.textContent || '')
             : ('value' in input ? (input.value || '') : '');
-        const prefix = currentValue.length > 0 && !/\s$/.test(currentValue) ? ' ' : '';
-        const nextValue = currentValue + prefix + text;
+        const prefix = !replaceExistingText && currentValue.length > 0 && !/\s$/.test(currentValue) ? ' ' : '';
+        const nextValue = replaceExistingText ? text : (currentValue + prefix + text);
         const maxLength = getChatInputMaxLength(input);
 
         if (maxLength > 0 && nextValue.length > maxLength) {
@@ -9338,13 +9881,13 @@
         }, true);
     }
 
-    function insertSavedPhraseIntoChatInput(input, phraseText) {
+    function insertSavedPhraseIntoChatInput(input, phraseText, options = {}) {
         const phrase = normalizeSavedPhraseText(phraseText);
         if (!phrase) {
             return { ok: false, message: 'Phrase vide.' };
         }
 
-        return insertTextIntoChatInput(input, phrase, 'Phrase insérée.');
+        return insertTextIntoChatInput(input, phrase, 'Phrase insérée.', options);
     }
 
     function insertGifIntoChatInput(input, gifUrl) {
@@ -9365,14 +9908,83 @@
         const visiblePhraseCount = Math.min(rankedPhrases.length, MAX_VISIBLE_SAVED_PHRASES_IN_MENU);
         const contextualSortingActive = rankedPhrases.length > 0 && rankedPhrases[0].score > 0;
 
+        const header = document.createElement('div');
+        header.style.display = 'flex';
+        header.style.justifyContent = 'space-between';
+        header.style.alignItems = 'center';
+        header.style.gap = '10px';
+        header.style.padding = '6px 10px 8px';
+
+        const headerTitle = document.createElement('div');
+        headerTitle.textContent = contextualSortingActive ? 'Suggestions rapides' : 'Réponses rapides';
+        headerTitle.style.fontSize = '11px';
+        headerTitle.style.fontWeight = '700';
+        headerTitle.style.color = contextualSortingActive ? '#c4b5fd' : '#d4d4d8';
+        headerTitle.style.opacity = '0.95';
+
+        const replaceControls = document.createElement('div');
+        replaceControls.style.display = 'inline-flex';
+        replaceControls.style.alignItems = 'center';
+        replaceControls.style.justifyContent = 'flex-end';
+        replaceControls.style.gap = '6px';
+        replaceControls.style.flexShrink = '0';
+
+        const replaceInfo = document.createElement('span');
+        replaceInfo.textContent = 'i';
+        replaceInfo.title = 'Si cette option est cochée, le texte déjà présent dans l’input sera entièrement remplacé par la réponse rapide sélectionnée.';
+        replaceInfo.setAttribute('aria-label', replaceInfo.title);
+        replaceInfo.style.display = 'inline-flex';
+        replaceInfo.style.alignItems = 'center';
+        replaceInfo.style.justifyContent = 'center';
+        replaceInfo.style.width = '16px';
+        replaceInfo.style.height = '16px';
+        replaceInfo.style.borderRadius = '999px';
+        replaceInfo.style.background = 'rgba(59,130,246,0.18)';
+        replaceInfo.style.border = '1px solid rgba(96,165,250,0.26)';
+        replaceInfo.style.color = '#bfdbfe';
+        replaceInfo.style.fontSize = '10px';
+        replaceInfo.style.fontWeight = '700';
+        replaceInfo.style.cursor = 'help';
+        replaceInfo.style.lineHeight = '1';
+        replaceInfo.style.userSelect = 'none';
+
+        const replaceToggleLabel = document.createElement('label');
+        replaceToggleLabel.style.display = 'inline-flex';
+        replaceToggleLabel.style.alignItems = 'center';
+        replaceToggleLabel.style.cursor = 'pointer';
+
+        const replaceToggle = document.createElement('input');
+        replaceToggle.type = 'checkbox';
+        replaceToggle.checked = savedPhrasesReplaceInput === true;
+        replaceToggle.style.margin = '0';
+        replaceToggle.style.cursor = 'pointer';
+        replaceToggle.style.accentColor = '#8b5cf6';
+        replaceToggle.title = 'Vider complètement l’input avant insertion';
+        replaceToggle.setAttribute('aria-label', replaceToggle.title);
+
+        replaceToggle.addEventListener('click', (event) => {
+            event.stopPropagation();
+        });
+
+        replaceToggle.addEventListener('change', (event) => {
+            const nextValue = event.target instanceof HTMLInputElement && event.target.checked;
+            saveSavedPhrasesReplaceInput(nextValue);
+        });
+
+        replaceToggleLabel.appendChild(replaceToggle);
+        replaceControls.appendChild(replaceInfo);
+        replaceControls.appendChild(replaceToggleLabel);
+        header.appendChild(headerTitle);
+        header.appendChild(replaceControls);
+        menu.appendChild(header);
+
         if (contextualSortingActive) {
             const helperLabel = document.createElement('div');
-            helperLabel.textContent = 'Suggestions contextuelles';
-            helperLabel.style.padding = '6px 10px 8px';
+            helperLabel.textContent = 'Tri contextuel actif';
+            helperLabel.style.padding = '0 10px 8px';
             helperLabel.style.fontSize = '11px';
-            helperLabel.style.fontWeight = '700';
-            helperLabel.style.color = '#c4b5fd';
-            helperLabel.style.opacity = '0.95';
+            helperLabel.style.color = '#a78bfa';
+            helperLabel.style.opacity = '0.92';
             menu.appendChild(helperLabel);
         }
 
@@ -9458,7 +10070,9 @@
                     return;
                 }
 
-                const result = insertSavedPhraseIntoChatInput(nextInput, phraseText);
+                const result = insertSavedPhraseIntoChatInput(nextInput, phraseText, {
+                    replaceExistingText: savedPhrasesReplaceInput === true
+                });
                 if (!result.ok) {
                     if (typeof showToast === 'function') showToast(result.message, true);
                     return;
@@ -9547,7 +10161,6 @@
             rail.appendChild(wrapper);
         }
 
-        wrapper.innerHTML = '';
         if (savedPhrases.length === 0) {
             wrapper.style.display = 'none';
             syncChatInputToolbarReservedSpace(textInput);
@@ -9555,6 +10168,13 @@
         }
 
         wrapper.style.display = 'flex';
+        if (wrapper.dataset.tmInitialized === '1') {
+            syncChatInputToolbarReservedSpace(textInput);
+            syncNativeChatInputActionButtons(textInput);
+            return;
+        }
+
+        wrapper.innerHTML = '';
 
         const toggleBtn = document.createElement('button');
         toggleBtn.type = 'button';
@@ -9669,6 +10289,7 @@
         wrapper.appendChild(toggleBtn);
         wrapper.appendChild(quickAddBtn);
         wrapper.appendChild(menu);
+        wrapper.dataset.tmInitialized = '1';
         syncChatInputToolbarReservedSpace(textInput);
         syncNativeChatInputActionButtons(textInput);
     }
@@ -9708,28 +10329,21 @@
         const anchor = menu.parentElement;
         if (!(anchor instanceof HTMLElement)) return;
 
-        const anchorRect = anchor.getBoundingClientRect();
-        if (anchorRect.width <= 0 || anchorRect.height <= 0) return;
-
-        menu.style.setProperty('position', 'fixed', 'important');
-        menu.style.setProperty('right', 'auto', 'important');
-        menu.style.setProperty('bottom', 'auto', 'important');
-        menu.style.setProperty('left', '-9999px', 'important');
-        menu.style.setProperty('top', '-9999px', 'important');
+        menu.style.setProperty('position', 'absolute', 'important');
+        menu.style.setProperty('top', 'auto', 'important');
+        menu.style.setProperty('bottom', 'calc(100% + 8px)', 'important');
         menu.style.setProperty('z-index', isHomePage() ? '1400' : '1200', 'important');
 
-        const menuRect = menu.getBoundingClientRect();
-        if (menuRect.width <= 0 || menuRect.height <= 0) return;
+        if (chatInputToolbarAlignRight) {
+            menu.style.setProperty('left', 'auto', 'important');
+            menu.style.setProperty('right', '0', 'important');
+            menu.style.transformOrigin = 'bottom right';
+            return;
+        }
 
-        const maxLeft = Math.max(8, window.innerWidth - menuRect.width - 8);
-        const maxTop = Math.max(8, window.innerHeight - menuRect.height - 8);
-        const nextLeft = chatInputToolbarAlignRight
-            ? clamp(anchorRect.right - menuRect.width, 8, maxLeft)
-            : clamp(anchorRect.left, 8, maxLeft);
-        const nextTop = clamp(anchorRect.top - menuRect.height - 8, 8, maxTop);
-
-        menu.style.setProperty('left', `${nextLeft}px`, 'important');
-        menu.style.setProperty('top', `${nextTop}px`, 'important');
+        menu.style.setProperty('left', '0', 'important');
+        menu.style.setProperty('right', 'auto', 'important');
+        menu.style.transformOrigin = 'bottom left';
     }
 
     function clearKlipyGifSearchDebounce() {
@@ -10100,8 +10714,15 @@
             rail.insertBefore(wrapper, phrasesWrapper);
         }
 
-        wrapper.innerHTML = '';
         wrapper.style.display = 'flex';
+        if (wrapper.dataset.tmInitialized === '1') {
+            applyKlipyGifMenuAlignmentState();
+            syncChatInputToolbarReservedSpace(textInput);
+            syncNativeChatInputActionButtons(textInput);
+            return;
+        }
+
+        wrapper.innerHTML = '';
 
         const toggleBtn = document.createElement('button');
         toggleBtn.type = 'button';
@@ -10298,6 +10919,7 @@
 
         wrapper.appendChild(toggleBtn);
         wrapper.appendChild(menu);
+        wrapper.dataset.tmInitialized = '1';
         syncChatInputToolbarReservedSpace(textInput);
         syncNativeChatInputActionButtons(textInput);
     }
@@ -10447,6 +11069,33 @@
 
         const replyButton = messageEl.querySelector(':scope > .flex-1.min-w-0 > .flex.items-center.gap-2.mb-1.text-xs button[type="button"]');
         return String(replyButton?.textContent || '').trim();
+    }
+
+    function getMessageReplyContextRow(messageEl) {
+        if (!(messageEl instanceof HTMLElement) || !isChatPage()) return null;
+
+        return messageEl.querySelector(':scope > .flex-1.min-w-0 > .flex.items-center.gap-2.mb-1.text-xs');
+    }
+
+    function syncMessageReplyContextHover(messageEl) {
+        const replyRow = getMessageReplyContextRow(messageEl);
+        if (!(replyRow instanceof HTMLElement)) return;
+
+        const replyTargetText = getMessageReplyContextText(messageEl);
+        const previewEl = replyRow.querySelector('span:last-child');
+        if (!(previewEl instanceof HTMLElement)) return;
+
+        const previewText = String(previewEl.textContent || '').trim();
+        const hoverText = [replyTargetText, previewText].filter(Boolean).join('\n');
+
+        if (!hoverText) {
+            replyRow.removeAttribute('title');
+            previewEl.removeAttribute('title');
+            return;
+        }
+
+        replyRow.title = hoverText;
+        previewEl.title = hoverText;
     }
 
     function getButtonSearchLabel(button) {
@@ -11680,25 +12329,30 @@
                 const textInput = getChatInput();
                 if (textInput) {
                     const mountContext = getChatInputToolbarMountContext(textInput);
-                    const mountParent = mountContext.mountParent;
+                    const toolbarHost = getChatInputToolbarRailHost(mountContext) || mountContext.mountParent;
                     const phrasesWrapper = document.getElementById(PHRASES_MENU_WRAPPER_ID);
                     const gifWrapper = document.getElementById(GIF_MENU_WRAPPER_ID);
+                    let toolbarNeedsSync = !isChatInputToolbarLayoutStable(mountContext);
 
                     if (
                         savedPhrasesEnabled &&
                         savedPhrases.length > 0 &&
-                        mountParent &&
-                        (!phrasesWrapper || !mountParent.contains(phrasesWrapper))
+                        toolbarHost &&
+                        (!phrasesWrapper || !toolbarHost.contains(phrasesWrapper))
                     ) {
                         injectSavedPhrasesToolbar();
+                        toolbarNeedsSync = true;
                     }
 
-                    if (klipyGifsEnabled && mountParent && (!gifWrapper || !mountParent.contains(gifWrapper))) {
+                    if (klipyGifsEnabled && toolbarHost && (!gifWrapper || !toolbarHost.contains(gifWrapper))) {
                         injectKlipyGifToolbar();
+                        toolbarNeedsSync = true;
                     }
 
-                    applyChatInputToolbarAlignmentState();
-                    syncNativeChatInputActionButtons(textInput);
+                    if (toolbarNeedsSync) {
+                        applyChatInputToolbarAlignmentState();
+                        syncNativeChatInputActionButtons(textInput);
+                    }
                 }
 
                 renderAfkPanel();
@@ -11742,6 +12396,31 @@
             if (!isChatPage() || !messageActionsLeftEnabled) return;
             processAllMessages();
         });
+
+        window.addEventListener('storage', (event) => {
+            if (
+                event.key !== STORAGE_KEY_AFK_STATE &&
+                event.key !== STORAGE_KEY_AFK_ACTIVITY &&
+                event.key !== STORAGE_KEY_AFK_PANEL_POSITION &&
+                event.key !== STORAGE_KEY_AFK_PANEL_HIDDEN
+            ) {
+                return;
+            }
+
+            afkState = loadAfkState();
+            afkActivityRecords = loadAfkActivityRecords();
+            afkPanelPosition = loadAfkPanelPosition();
+            afkPanelHidden = loadAfkPanelHidden();
+
+            if (isAfkEnabledForCurrentContext()) {
+                startAfkReplayProtectionForCurrentContext();
+                seedAfkSeenMessagesFromCurrentRoot();
+            } else {
+                clearAfkReplayProtection();
+            }
+
+            renderAfkPanel();
+        });
     }
 
     document.addEventListener('keydown', function (e) {
@@ -11764,7 +12443,7 @@
             if (imageViewerOpen) return;
             e.preventDefault();
 
-            if (!afkState.enabled && afkPanelHidden && afkActivityRecords.length > 0) {
+            if (!afkState.enabled && afkPanelHidden && shouldDisplayAfkPanelForCurrentPage()) {
                 saveAfkPanelHidden(false);
                 renderAfkPanel();
                 showToast('Panneau AFK réouvert.');

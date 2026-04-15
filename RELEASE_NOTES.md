@@ -10,7 +10,16 @@ Ce fichier suit l'état fonctionnel du userscript à partir de la version actuel
 
 ## Version en préparation
 
-- Rien à signaler pour l’instant.
+- Rien pour le moment.
+
+## v2.63 - 2026-04-15
+
+- Ajout d’un mode inline pour placer la barre d’outils du chat sur la même ligne que l’input, tout en conservant le placement historique au-dessus en option.
+- Divers Fix visuel et probleme de z-index
+- Ajout d’une option AFK pour couper le son des alertes tout en continuant à marquer les mentions concernées comme déjà notifiées.
+- Ajout d’un bouton œil sur le lecteur YouTube pour masquer la vidéo et réduire la fenêtre sans couper le son en cours.
+- Ajout d’un bouton `Marquer tout lu` dans le panneau AFK quand plus de deux messages restent en attente.
+- Ajout d’une option compacte dans la popup des réponses rapides pour vider entièrement l’input avant d’insérer la réponse sélectionnée.
 
 ## v2.62 - 2026-04-14
 
