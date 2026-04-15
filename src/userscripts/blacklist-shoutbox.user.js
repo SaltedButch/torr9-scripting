@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torr9 Chat - Shoutbox 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.63
+// @version      2.64
 // @description  Blacklist, mise en avant, mentions, réponses rapides contextuelles, Gif et confort avancé pour la shoutbox Torr9
 // @icon         https://torr9.net/favicon.ico?favicon.71918ed5.ico`
 // @author       Butchered
@@ -9053,12 +9053,13 @@
 
         const railHost = getChatInputToolbarRailHost(context);
         if (!(railHost instanceof HTMLElement)) return;
+        const railStackZIndex = isChatPage() ? '260' : '50';
 
         rail.style.display = 'flex';
         rail.style.alignItems = 'center';
         rail.style.gap = '8px';
         rail.style.pointerEvents = 'none';
-        rail.style.zIndex = '50';
+        rail.style.zIndex = railStackZIndex;
         rail.style.overflow = 'visible';
 
         const controlsRow = context?.controlsRow;
@@ -9075,9 +9076,10 @@
             inlineInputHost instanceof HTMLElement &&
             inlineInputHost.parentElement === controlsRow
         ) {
+            const inlineRailBottomOffsetPx = isHomePage() ? 0 : 6;
             rail.style.position = 'relative';
             rail.style.top = 'auto';
-            rail.style.bottom = '6px';
+            rail.style.bottom = `${inlineRailBottomOffsetPx}px`;
             rail.style.left = 'auto';
             rail.style.right = 'auto';
             rail.style.justifyContent = 'flex-start';
@@ -10295,11 +10297,13 @@
     }
 
     function getKlipyGifMenu() {
-        const wrapper = document.getElementById(GIF_MENU_WRAPPER_ID);
-        if (!(wrapper instanceof HTMLElement)) return null;
-
-        const menu = wrapper.querySelector('[data-tm-klipy-gif-menu="1"]');
+        const menu = document.querySelector('[data-tm-klipy-gif-menu="1"]');
         return menu instanceof HTMLElement ? menu : null;
+    }
+
+    function getKlipyGifMenuAnchor() {
+        const wrapper = document.getElementById(GIF_MENU_WRAPPER_ID);
+        return wrapper instanceof HTMLElement ? wrapper : null;
     }
 
     function applyKlipyGifMenuAlignmentState(menu = getKlipyGifMenu()) {
@@ -10326,13 +10330,46 @@
     function positionKlipyGifMenu(menu) {
         if (!(menu instanceof HTMLElement)) return;
 
-        const anchor = menu.parentElement;
+        const anchor = getKlipyGifMenuAnchor();
         if (!(anchor instanceof HTMLElement)) return;
+
+        if (isChatPage() && document.body instanceof HTMLElement) {
+            if (menu.parentElement !== document.body) {
+                document.body.appendChild(menu);
+            }
+
+            menu.style.setProperty('position', 'fixed', 'important');
+            menu.style.setProperty('right', 'auto', 'important');
+            menu.style.setProperty('bottom', 'auto', 'important');
+            menu.style.setProperty('left', '-9999px', 'important');
+            menu.style.setProperty('top', '-9999px', 'important');
+            menu.style.setProperty('z-index', '1600', 'important');
+
+            const anchorRect = anchor.getBoundingClientRect();
+            const menuRect = menu.getBoundingClientRect();
+            if (anchorRect.width <= 0 || anchorRect.height <= 0 || menuRect.width <= 0 || menuRect.height <= 0) return;
+
+            const maxLeft = Math.max(8, window.innerWidth - menuRect.width - 8);
+            const maxTop = Math.max(8, window.innerHeight - menuRect.height - 8);
+            const nextLeft = chatInputToolbarAlignRight
+                ? clamp(anchorRect.right - menuRect.width, 8, maxLeft)
+                : clamp(anchorRect.left, 8, maxLeft);
+            const nextTop = clamp(anchorRect.top - menuRect.height - 8, 8, maxTop);
+
+            menu.style.setProperty('left', `${nextLeft}px`, 'important');
+            menu.style.setProperty('top', `${nextTop}px`, 'important');
+            menu.style.transformOrigin = chatInputToolbarAlignRight ? 'bottom right' : 'bottom left';
+            return;
+        }
+
+        if (menu.parentElement !== anchor) {
+            anchor.appendChild(menu);
+        }
 
         menu.style.setProperty('position', 'absolute', 'important');
         menu.style.setProperty('top', 'auto', 'important');
         menu.style.setProperty('bottom', 'calc(100% + 8px)', 'important');
-        menu.style.setProperty('z-index', isHomePage() ? '1400' : '1200', 'important');
+        menu.style.setProperty('z-index', isHomePage() ? '1400' : '1500', 'important');
 
         if (chatInputToolbarAlignRight) {
             menu.style.setProperty('left', 'auto', 'important');
@@ -10406,6 +10443,7 @@
         const menu = getKlipyGifMenu();
         if (menu) {
             clearKlipyGifMenuHideTimer(menu);
+            menu.remove();
         }
 
         const wrapper = document.getElementById(GIF_MENU_WRAPPER_ID);
@@ -10424,8 +10462,10 @@
 
         document.addEventListener('click', (event) => {
             const wrapper = document.getElementById(GIF_MENU_WRAPPER_ID);
+            const menu = getKlipyGifMenu();
             if (!(wrapper instanceof HTMLElement)) return;
             if (event.target instanceof Node && wrapper.contains(event.target)) return;
+            if (menu instanceof HTMLElement && event.target instanceof Node && menu.contains(event.target)) return;
 
             closeKlipyGifMenu();
         });
@@ -10703,6 +10743,8 @@
             wrapper.style.pointerEvents = 'auto';
         }
 
+        wrapper.style.zIndex = isChatPage() ? '280' : '50';
+
         const phrasesWrapper = document.getElementById(PHRASES_MENU_WRAPPER_ID);
         if (wrapper.parentNode !== rail) {
             if (phrasesWrapper instanceof HTMLElement && phrasesWrapper.parentElement === rail) {
@@ -10790,7 +10832,7 @@
         title.style.color = '#f8fafc';
 
         const subtitle = document.createElement('div');
-        subtitle.textContent = 'Insertion via balise [img][/img]';
+        subtitle.textContent = '';
         subtitle.style.fontSize = '10px';
         subtitle.style.color = '#94a3b8';
 
@@ -10856,7 +10898,7 @@
         loadMoreBtn.style.cursor = 'pointer';
 
         const footer = document.createElement('div');
-        footer.textContent = 'Le bouton colle une balise BBCode [img]URL[/img] dans le champ du chat.';
+        footer.textContent = '';
         footer.style.fontSize = '10px';
         footer.style.lineHeight = '1.45';
         footer.style.color = '#64748b';
