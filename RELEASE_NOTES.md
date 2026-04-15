@@ -11,6 +11,9 @@ Ce fichier suit l'état fonctionnel du userscript à partir de la version actuel
 ## Version en préparation
 
 - Rien pour le moment.
+## v2.64 - 2026-04-15
+
+- Correction du z-index du picker GIF sur la page chat pour éviter qu’il passe derrière le menu de message privé sur les petites fenêtres.
 
 ## v2.63 - 2026-04-15
 
