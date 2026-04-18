@@ -9601,6 +9601,25 @@
         scheduleMovedNativeChatInputActionPopoversSync();
     }
 
+    function scheduleChatInputToolbarResync(frameCount = 4) {
+        let remainingFrames = Math.max(1, Number(frameCount) || 1);
+
+        const tick = () => {
+            const input = getChatInput();
+            if (input instanceof HTMLElement) {
+                applyChatInputToolbarAlignmentState();
+                syncNativeChatInputActionButtons(input);
+            }
+
+            remainingFrames -= 1;
+            if (remainingFrames > 0) {
+                window.requestAnimationFrame(tick);
+            }
+        };
+
+        window.requestAnimationFrame(tick);
+    }
+
     function shouldUseChatInputToolbarRail() {
         return isSupportedPage() && (
             klipyGifsEnabled ||
@@ -9616,6 +9635,10 @@
 
         const railHost = getChatInputToolbarRailHost(context);
         if (!(railHost instanceof HTMLElement) || rail.parentElement !== railHost) {
+            return false;
+        }
+
+        if (getNativeChatInputActionButtons(context?.input).length > 0) {
             return false;
         }
 
@@ -10870,6 +10893,44 @@
         }
     }
 
+    function clearKlipyGifMenuRepositionFrame(menu) {
+        if (!(menu instanceof HTMLElement)) return;
+
+        const frameId = Number(menu.dataset.tmPositionFrameId || 0);
+        if (frameId > 0) {
+            window.cancelAnimationFrame(frameId);
+            delete menu.dataset.tmPositionFrameId;
+        }
+    }
+
+    function scheduleKlipyGifMenuReposition(menu, frameCount = 2) {
+        if (!(menu instanceof HTMLElement)) return;
+
+        clearKlipyGifMenuRepositionFrame(menu);
+
+        let remainingFrames = Math.max(1, Number(frameCount) || 1);
+        const tick = () => {
+            if (!(menu instanceof HTMLElement) || menu.dataset.tmOpen !== '1') {
+                delete menu.dataset.tmPositionFrameId;
+                return;
+            }
+
+            positionKlipyGifMenu(menu);
+            remainingFrames -= 1;
+
+            if (remainingFrames <= 0) {
+                delete menu.dataset.tmPositionFrameId;
+                return;
+            }
+
+            const nextFrameId = window.requestAnimationFrame(tick);
+            menu.dataset.tmPositionFrameId = String(nextFrameId);
+        };
+
+        const initialFrameId = window.requestAnimationFrame(tick);
+        menu.dataset.tmPositionFrameId = String(initialFrameId);
+    }
+
     function showKlipyGifMenu(menu) {
         if (!(menu instanceof HTMLElement)) return;
 
@@ -10877,6 +10938,7 @@
         menu.style.display = 'flex';
         menu.dataset.tmOpen = '1';
         positionKlipyGifMenu(menu);
+        scheduleKlipyGifMenuReposition(menu, 3);
         void menu.offsetWidth;
         menu.style.opacity = '1';
         menu.style.transform = 'translateY(0) scale(1)';
@@ -10887,6 +10949,7 @@
 
         clearKlipyGifSearchDebounce();
         clearKlipyGifMenuHideTimer(menu);
+        clearKlipyGifMenuRepositionFrame(menu);
         menu.dataset.tmOpen = '0';
         menu.style.opacity = '0';
         menu.style.transform = 'translateY(10px) scale(0.95)';
@@ -10914,6 +10977,7 @@
         const menu = getKlipyGifMenu();
         if (menu) {
             clearKlipyGifMenuHideTimer(menu);
+            clearKlipyGifMenuRepositionFrame(menu);
             menu.remove();
         }
 
@@ -11170,6 +11234,7 @@
             }
 
             updateKlipyGifMoreButton(menu, !!payload.next, false);
+            scheduleKlipyGifMenuReposition(menu, append ? 2 : 3);
         } catch (error) {
             if (menu.dataset.tmKlipyRequestId !== requestId) return;
 
@@ -11183,6 +11248,7 @@
                 `Erreur Klipy: ${error instanceof Error ? error.message : 'chargement impossible.'}`,
                 true
             );
+            scheduleKlipyGifMenuReposition(menu, 2);
         }
     }
 
@@ -12586,6 +12652,7 @@
             if (clickedButton !== replyButton && !replyButton.contains(clickedButton)) return;
 
             setSavedPhrasesReplyContextFromMessage(messageEl);
+            scheduleChatInputToolbarResync();
         }, true);
     }
 
