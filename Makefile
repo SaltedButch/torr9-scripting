@@ -1,6 +1,9 @@
 PYTHON ?= python3
 
-.PHONY: build check clean list bump release
+.PHONY: audit build check clean list bump release
+
+audit:
+	$(PYTHON) tools/audit_userscripts.py
 
 build:
 	$(PYTHON) tools/build_userscripts.py
