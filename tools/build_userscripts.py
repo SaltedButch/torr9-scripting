@@ -9,6 +9,7 @@ import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "userscripts.json"
@@ -23,6 +24,7 @@ DEFAULT_NAMESPACE_VALUES = {
     "https://tampermonkey.net/",
 }
 REQUIRED_KEYS = {"name", "version", "description"}
+URL_METADATA_KEYS = {"icon", "homepageURL", "supportURL", "updateURL", "downloadURL"}
 
 
 @dataclass(frozen=True)
@@ -182,6 +184,27 @@ def validate_metadata(values: dict[str, str], source_path: Path) -> None:
     if not re.fullmatch(r"\d+(?:\.\d+)*", version):
         raise BuildError(
             f"{source_path}: invalid @version '{version}'. Use numeric segments like 2.15 or 2.15.1."
+        )
+
+    for key in sorted(URL_METADATA_KEYS & values.keys()):
+        validate_metadata_url(key, values[key], source_path)
+
+
+def validate_metadata_url(key: str, raw_value: str, source_path: Path) -> None:
+    value = raw_value.strip()
+    if not value:
+        raise BuildError(f"{source_path}: invalid @{key} URL: value is empty")
+
+    if any(char.isspace() for char in value):
+        raise BuildError(f"{source_path}: invalid @{key} URL '{value}': whitespace is not allowed")
+
+    if "`" in value:
+        raise BuildError(f"{source_path}: invalid @{key} URL '{value}': unexpected backtick")
+
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise BuildError(
+            f"{source_path}: invalid @{key} URL '{value}': expected an absolute http(s) URL"
         )
 
 

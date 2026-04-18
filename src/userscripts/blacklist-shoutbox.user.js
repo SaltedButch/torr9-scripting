@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Torr9 Chat - Shoutbox 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.64
+// @version      2.65
 // @description  Blacklist, mise en avant, mentions, réponses rapides contextuelles, Gif et confort avancé pour la shoutbox Torr9
-// @icon         https://torr9.net/favicon.ico?favicon.71918ed5.ico`
+// @icon         https://torr9.net/favicon.ico?favicon.71918ed5.ico
 // @author       Butchered
 // @match        https://torr9.net/*
 // @grant        none
@@ -139,6 +139,7 @@
     const LONG_PRESS_REACTION_MOVE_THRESHOLD_PX = 10;
     const LONG_PRESS_REACTION_PICKER_OFFSET_X = 18;
     const LONG_PRESS_REACTION_PICKER_OFFSET_Y = 0;
+    const REACTION_PICKER_Z_INDEX = 320;
     const MENTION_STYLE_ID = 'tm-torr9-mention-style';
     const LIGHT_THEME_STYLE_ID = 'tm-torr9-light-theme-style';
     const LINKIFIED_URL_STYLE_ID = 'tm-torr9-linkified-url-style';
@@ -245,6 +246,101 @@
     const youtubeVideoTitleCache = new Map();
     const afkSeenMessageKeys = new Set();
 
+    /**
+     * @typedef {Object} SavedPhraseRecord
+     * @property {string} id
+     * @property {string} text
+     * @property {string[]} keywords
+     */
+
+    /**
+     * @typedef {Object} RankedSavedPhraseEntry
+     * @property {SavedPhraseRecord} phrase
+     * @property {number} score
+     * @property {string[]} matchedKeywords
+     * @property {number} matchPercent
+     */
+
+    /**
+     * @typedef {Object} MentionSettings
+     * @property {string} username
+     * @property {string} color
+     * @property {number} opacityPercent
+     * @property {number} blinkSeconds
+     * @property {boolean} keepHighlightAfterBlink
+     * @property {boolean} includeReplyContext
+     * @property {string} soundScope
+     * @property {string} soundStyle
+     * @property {string} soundCustomUrl
+     * @property {number} soundCooldownSeconds
+     */
+
+    /**
+     * @typedef {Object} AfkState
+     * @property {boolean} enabled
+     * @property {boolean} autoReplyEnabled
+     * @property {boolean} muteMentionSound
+     * @property {string} ownerTabId
+     * @property {string} contextKey
+     * @property {string} contextLabel
+     * @property {string} username
+     * @property {string} autoReplyMessage
+     * @property {number} activatedAt
+     * @property {number} lastAutoReplyAt
+     * @property {Object.<string, number>} perUserReplyAt
+     */
+
+    /**
+     * @typedef {Object} AfkActivityRecord
+     * @property {string} id
+     * @property {string} contextKey
+     * @property {string} contextLabel
+     * @property {string} username
+     * @property {string} displayUsername
+     * @property {string} messageText
+     * @property {string} replyContextText
+     * @property {string} reason
+     * @property {string} messageTimestamp
+     * @property {number} capturedAt
+     * @property {boolean} isRead
+     * @property {number} readAt
+     * @property {boolean} autoReplySent
+     * @property {string} autoReplyStatus
+     * @property {string} autoReplyText
+     * @property {string} signatureHash
+     * @property {number} signatureTimestampKey
+     */
+
+    /**
+     * @typedef {Object} AfkPanelViewModel
+     * @property {string} statusLabel
+     * @property {string} currentAfkMessage
+     * @property {number} activityCount
+     * @property {number} unreadCount
+     * @property {number} readCount
+     * @property {boolean} autoReplyEnabled
+     * @property {boolean} autoReplyWindowExpired
+     * @property {string} toggleLabel
+     */
+
+    /**
+     * @typedef {Object} KlipyGifResult
+     * @property {string} id
+     * @property {string} title
+     * @property {string} gifUrl
+     * @property {string} previewUrl
+     * @property {string} itemUrl
+     * @property {number} width
+     * @property {number} height
+     * @property {string[]} tags
+     */
+
+    /**
+     * @typedef {Object} KlipyGifFeedPayload
+     * @property {KlipyGifResult[]} results
+     * @property {string} next
+     */
+
     function isChatPage() {
         return location.pathname.startsWith('/chat');
     }
@@ -297,18 +393,104 @@
         return isChatPage() ? STORAGE_KEY_LIGHT_THEME_CHAT : STORAGE_KEY_LIGHT_THEME_HOME;
     }
 
-    function loadHiddenUsers() {
+    /**
+     * Lit une valeur brute depuis un stockage navigateur sans interrompre le script.
+     *
+     * @param {string} key
+     * @param {Storage} [storage=localStorage]
+     * @returns {string|null}
+     */
+    function readStorageItem(key, storage = localStorage) {
         try {
-            const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY_USERS) || '[]');
-            if (!Array.isArray(parsed)) return new Set();
-            return new Set(parsed.map(normalizeName).filter(Boolean));
+            return storage.getItem(key);
         } catch (e) {
-            return new Set();
+            return null;
         }
     }
 
+    /**
+     * Écrit une valeur brute dans un stockage navigateur.
+     *
+     * @param {string} key
+     * @param {string} value
+     * @param {Storage} [storage=localStorage]
+     * @returns {boolean}
+     */
+    function writeStorageItem(key, value, storage = localStorage) {
+        try {
+            storage.setItem(key, value);
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    /**
+     * Supprime une clé de stockage sans laisser remonter d'exception.
+     *
+     * @param {string} key
+     * @param {Storage} [storage=localStorage]
+     * @returns {boolean}
+     */
+    function removeStorageItem(key, storage = localStorage) {
+        try {
+            storage.removeItem(key);
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    /**
+     * Lit et parse un JSON stocké, avec valeur de repli en cas d'absence ou d'erreur.
+     *
+     * @template T
+     * @param {string} key
+     * @param {T} fallbackValue
+     * @param {Storage} [storage=localStorage]
+     * @returns {T}
+     */
+    function readStorageJson(key, fallbackValue, storage = localStorage) {
+        const rawValue = readStorageItem(key, storage);
+        if (rawValue === null) return fallbackValue;
+
+        try {
+            return JSON.parse(rawValue);
+        } catch (e) {
+            return fallbackValue;
+        }
+    }
+
+    /**
+     * Sérialise puis écrit une valeur JSON.
+     *
+     * @param {string} key
+     * @param {unknown} value
+     * @param {Storage} [storage=localStorage]
+     * @returns {boolean}
+     */
+    function writeStorageJson(key, value, storage = localStorage) {
+        return writeStorageItem(key, JSON.stringify(value), storage);
+    }
+
+    function readStorageBoolean(key, defaultValue = false, storage = localStorage) {
+        const rawValue = readStorageItem(key, storage);
+        if (rawValue === null) return !!defaultValue;
+        return rawValue === '1';
+    }
+
+    function writeStorageBoolean(key, value, storage = localStorage) {
+        return writeStorageItem(key, value ? '1' : '0', storage);
+    }
+
+    function loadHiddenUsers() {
+        const parsed = readStorageJson(STORAGE_KEY_USERS, []);
+        if (!Array.isArray(parsed)) return new Set();
+        return new Set(parsed.map(normalizeName).filter(Boolean));
+    }
+
     function saveHiddenUsers() {
-        localStorage.setItem(STORAGE_KEY_USERS, JSON.stringify([...hiddenUsers]));
+        writeStorageJson(STORAGE_KEY_USERS, [...hiddenUsers]);
     }
 
     function extractSavedPhraseStringValue(value, depth = 0) {
@@ -387,6 +569,13 @@
         return normalizeSavedPhraseKeywords(mergedKeywords);
     }
 
+    /**
+     * Normalise une entrée de réponse rapide en structure stable exploitable partout dans le script.
+     *
+     * @param {unknown} record
+     * @param {boolean} [truncateText=true]
+     * @returns {SavedPhraseRecord|null}
+     */
     function normalizeSavedPhraseRecord(record, truncateText = true) {
         if (typeof record === 'string' || typeof record === 'number' || typeof record === 'boolean') {
             const text = normalizeSavedPhraseText(record, truncateText);
@@ -410,46 +599,44 @@
     }
 
     function loadSavedPhrases() {
-        try {
-            const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY_SAVED_PHRASES) || '[]');
-            if (!Array.isArray(parsed)) return [];
-
-            savedPhrasesStorageNeedsRepair = false;
-
-            const normalizedEntries = [];
-            const seenTexts = new Set();
-
-            parsed.forEach((entry) => {
-                const normalizedEntry = normalizeSavedPhraseRecord(entry, true);
-                if (!normalizedEntry) {
-                    savedPhrasesStorageNeedsRepair = true;
-                    return;
-                }
-
-                if (
-                    typeof entry !== 'object' ||
-                    entry === null ||
-                    Array.isArray(entry) ||
-                    typeof entry.text !== 'string' ||
-                    !Array.isArray(entry.keywords)
-                ) {
-                    savedPhrasesStorageNeedsRepair = true;
-                }
-
-                if (seenTexts.has(normalizedEntry.text)) {
-                    savedPhrasesStorageNeedsRepair = true;
-                    return;
-                }
-
-                seenTexts.add(normalizedEntry.text);
-                normalizedEntries.push(normalizedEntry);
-            });
-
-            return normalizedEntries;
-        } catch (e) {
+        const parsed = readStorageJson(STORAGE_KEY_SAVED_PHRASES, []);
+        if (!Array.isArray(parsed)) {
             savedPhrasesStorageNeedsRepair = false;
             return [];
         }
+
+        savedPhrasesStorageNeedsRepair = false;
+
+        const normalizedEntries = [];
+        const seenTexts = new Set();
+
+        parsed.forEach((entry) => {
+            const normalizedEntry = normalizeSavedPhraseRecord(entry, true);
+            if (!normalizedEntry) {
+                savedPhrasesStorageNeedsRepair = true;
+                return;
+            }
+
+            if (
+                typeof entry !== 'object' ||
+                entry === null ||
+                Array.isArray(entry) ||
+                typeof entry.text !== 'string' ||
+                !Array.isArray(entry.keywords)
+            ) {
+                savedPhrasesStorageNeedsRepair = true;
+            }
+
+            if (seenTexts.has(normalizedEntry.text)) {
+                savedPhrasesStorageNeedsRepair = true;
+                return;
+            }
+
+            seenTexts.add(normalizedEntry.text);
+            normalizedEntries.push(normalizedEntry);
+        });
+
+        return normalizedEntries;
     }
 
     function saveSavedPhrases() {
@@ -459,84 +646,60 @@
 
         savedPhrases.splice(0, savedPhrases.length, ...normalizedEntries);
 
-        localStorage.setItem(
+        writeStorageJson(
             STORAGE_KEY_SAVED_PHRASES,
-            JSON.stringify(normalizedEntries.map((phrase) => ({
+            normalizedEntries.map((phrase) => ({
                 text: phrase.text,
                 keywords: [...phrase.keywords]
-            })))
+            }))
         );
 
         savedPhrasesStorageNeedsRepair = false;
     }
 
     function loadSavedPhrasesEnabled() {
-        try {
-            const rawValue = localStorage.getItem(STORAGE_KEY_SAVED_PHRASES_ENABLED);
-            if (rawValue === null) return false;
-            return rawValue === '1';
-        } catch (e) {
-            return false;
-        }
+        return readStorageBoolean(STORAGE_KEY_SAVED_PHRASES_ENABLED, false);
     }
 
     function saveSavedPhrasesEnabled(value) {
         savedPhrasesEnabled = !!value;
-        localStorage.setItem(STORAGE_KEY_SAVED_PHRASES_ENABLED, savedPhrasesEnabled ? '1' : '0');
+        writeStorageBoolean(STORAGE_KEY_SAVED_PHRASES_ENABLED, savedPhrasesEnabled);
     }
 
     function loadSavedPhrasesReplaceInput() {
-        try {
-            return localStorage.getItem(STORAGE_KEY_SAVED_PHRASES_REPLACE_INPUT) === '1';
-        } catch (e) {
-            return false;
-        }
+        return readStorageBoolean(STORAGE_KEY_SAVED_PHRASES_REPLACE_INPUT, false);
     }
 
     function saveSavedPhrasesReplaceInput(value) {
         savedPhrasesReplaceInput = !!value;
-        localStorage.setItem(STORAGE_KEY_SAVED_PHRASES_REPLACE_INPUT, savedPhrasesReplaceInput ? '1' : '0');
+        writeStorageBoolean(STORAGE_KEY_SAVED_PHRASES_REPLACE_INPUT, savedPhrasesReplaceInput);
     }
 
     function loadKlipyGifsEnabled() {
-        try {
-            const rawValue = localStorage.getItem(STORAGE_KEY_KLIPY_GIFS_ENABLED);
-            if (rawValue === null) return DEFAULT_KLIPY_GIFS_ENABLED;
-            return rawValue === '1';
-        } catch (e) {
-            return DEFAULT_KLIPY_GIFS_ENABLED;
-        }
+        return readStorageBoolean(STORAGE_KEY_KLIPY_GIFS_ENABLED, DEFAULT_KLIPY_GIFS_ENABLED);
     }
 
     function saveKlipyGifsEnabled(value) {
         klipyGifsEnabled = !!value;
-        localStorage.setItem(STORAGE_KEY_KLIPY_GIFS_ENABLED, klipyGifsEnabled ? '1' : '0');
+        writeStorageBoolean(STORAGE_KEY_KLIPY_GIFS_ENABLED, klipyGifsEnabled);
     }
 
     function loadChatInputToolbarInline() {
-        try {
-            return localStorage.getItem(STORAGE_KEY_CHAT_INPUT_TOOLBAR_INLINE) === '1';
-        } catch (e) {
-            return false;
-        }
+        return readStorageBoolean(STORAGE_KEY_CHAT_INPUT_TOOLBAR_INLINE, false);
     }
 
     function saveChatInputToolbarInline(value) {
         chatInputToolbarInline = !!value;
-        localStorage.setItem(STORAGE_KEY_CHAT_INPUT_TOOLBAR_INLINE, chatInputToolbarInline ? '1' : '0');
+        writeStorageBoolean(STORAGE_KEY_CHAT_INPUT_TOOLBAR_INLINE, chatInputToolbarInline);
     }
 
     function loadChatInputToolbarAlignRight() {
-        try {
-            return localStorage.getItem(STORAGE_KEY_CHAT_INPUT_TOOLBAR_ALIGN_RIGHT) === '1';
-        } catch (e) {
-            return false;
-        }
+        return readStorageBoolean(STORAGE_KEY_CHAT_INPUT_TOOLBAR_ALIGN_RIGHT, false);
     }
 
     function saveChatInputToolbarAlignRight(value) {
         chatInputToolbarAlignRight = !!value;
-        localStorage.setItem(STORAGE_KEY_CHAT_INPUT_TOOLBAR_ALIGN_RIGHT, chatInputToolbarAlignRight ? '1' : '0');
+        writeStorageBoolean(STORAGE_KEY_CHAT_INPUT_TOOLBAR_ALIGN_RIGHT, chatInputToolbarAlignRight);
     }
 
     function normalizeAfkAutoReplyMessage(value) {
@@ -557,6 +720,12 @@
         );
     }
 
+    /**
+     * Garantit une forme cohérente de l'état AFK, quelle que soit la source des données.
+     *
+     * @param {unknown} value
+     * @returns {AfkState}
+     */
     function normalizeAfkState(value) {
         if (!value || typeof value !== 'object' || Array.isArray(value)) {
             return {
@@ -590,11 +759,7 @@
     }
 
     function loadAfkState() {
-        try {
-            return normalizeAfkState(JSON.parse(localStorage.getItem(STORAGE_KEY_AFK_STATE) || 'null'));
-        } catch (e) {
-            return normalizeAfkState(null);
-        }
+        return normalizeAfkState(readStorageJson(STORAGE_KEY_AFK_STATE, null));
     }
 
     function createAfkTabId() {
@@ -606,21 +771,20 @@
     }
 
     function loadAfkTabId() {
-        try {
-            const existingValue = String(sessionStorage.getItem(SESSION_STORAGE_KEY_AFK_TAB_ID) || '').trim();
-            if (existingValue) return existingValue;
+        const existingValue = String(readStorageItem(SESSION_STORAGE_KEY_AFK_TAB_ID, sessionStorage) || '').trim();
+        if (existingValue) return existingValue;
 
-            const nextValue = createAfkTabId();
-            sessionStorage.setItem(SESSION_STORAGE_KEY_AFK_TAB_ID, nextValue);
-            return nextValue;
-        } catch (e) {
+        const nextValue = createAfkTabId();
+        if (!writeStorageItem(SESSION_STORAGE_KEY_AFK_TAB_ID, nextValue, sessionStorage)) {
             return createAfkTabId();
         }
+
+        return nextValue;
     }
 
     function saveAfkState(nextState) {
         afkState = normalizeAfkState(nextState);
-        localStorage.setItem(STORAGE_KEY_AFK_STATE, JSON.stringify(afkState));
+        writeStorageJson(STORAGE_KEY_AFK_STATE, afkState);
     }
 
     function buildAfkMessageKey(signature) {
@@ -633,6 +797,12 @@
         return `${hash}:${timestampKey}`;
     }
 
+    /**
+     * Convertit une entrée AFK brute en enregistrement complet, filtré et prêt au rendu.
+     *
+     * @param {unknown} value
+     * @returns {AfkActivityRecord|null}
+     */
     function normalizeAfkActivityRecord(value) {
         if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
 
@@ -698,20 +868,16 @@
     }
 
     function loadAfkActivityRecords() {
-        try {
-            const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY_AFK_ACTIVITY) || '[]');
-            if (!Array.isArray(parsed)) return [];
+        const parsed = readStorageJson(STORAGE_KEY_AFK_ACTIVITY, []);
+        if (!Array.isArray(parsed)) return [];
 
-            return pruneAfkActivityRecords(parsed);
-        } catch (e) {
-            return [];
-        }
+        return pruneAfkActivityRecords(parsed);
     }
 
     function saveAfkActivityRecords() {
         afkActivityRecords = pruneAfkActivityRecords(afkActivityRecords);
 
-        localStorage.setItem(STORAGE_KEY_AFK_ACTIVITY, JSON.stringify(afkActivityRecords));
+        writeStorageJson(STORAGE_KEY_AFK_ACTIVITY, afkActivityRecords);
     }
 
     function normalizeAfkPanelPosition(value) {
@@ -726,41 +892,29 @@
     }
 
     function loadAfkPanelPosition() {
-        try {
-            return normalizeAfkPanelPosition(JSON.parse(localStorage.getItem(STORAGE_KEY_AFK_PANEL_POSITION) || 'null'));
-        } catch (e) {
-            return null;
-        }
+        return normalizeAfkPanelPosition(readStorageJson(STORAGE_KEY_AFK_PANEL_POSITION, null));
     }
 
     function saveAfkPanelPosition(position) {
         const normalizedPosition = normalizeAfkPanelPosition(position);
         afkPanelPosition = normalizedPosition;
 
-        try {
-            if (!normalizedPosition) {
-                localStorage.removeItem(STORAGE_KEY_AFK_PANEL_POSITION);
-                return;
-            }
+        if (!normalizedPosition) {
+            removeStorageItem(STORAGE_KEY_AFK_PANEL_POSITION);
+            return;
+        }
 
-            localStorage.setItem(STORAGE_KEY_AFK_PANEL_POSITION, JSON.stringify(normalizedPosition));
-        } catch (e) {}
+        writeStorageJson(STORAGE_KEY_AFK_PANEL_POSITION, normalizedPosition);
     }
 
     function loadAfkPanelHidden() {
-        try {
-            return localStorage.getItem(STORAGE_KEY_AFK_PANEL_HIDDEN) === '1';
-        } catch (e) {
-            return false;
-        }
+        return readStorageBoolean(STORAGE_KEY_AFK_PANEL_HIDDEN, false);
     }
 
     function saveAfkPanelHidden(value) {
         afkPanelHidden = !!value;
 
-        try {
-            localStorage.setItem(STORAGE_KEY_AFK_PANEL_HIDDEN, afkPanelHidden ? '1' : '0');
-        } catch (e) {}
+        writeStorageBoolean(STORAGE_KEY_AFK_PANEL_HIDDEN, afkPanelHidden);
     }
 
     function applyAfkPanelPosition(panel) {
@@ -1025,6 +1179,12 @@
         return clamp(Math.round((1 - Math.exp(-numericScore / 14)) * 100), 0, 100);
     }
 
+    /**
+     * Retourne les réponses rapides triées selon le contexte courant du chat.
+     *
+     * @param {HTMLElement|null} [input=getChatInput()]
+     * @returns {RankedSavedPhraseEntry[]}
+     */
     function getRankedSavedPhrases(input = getChatInput()) {
         const rankingContext = getSavedPhrasesRankingContext(input);
         const rankedPhrases = savedPhrases
@@ -1215,7 +1375,7 @@
         const storage = {};
 
         SCRIPT_CONFIG_STORAGE_KEYS.forEach((storageKey) => {
-            const rawValue = localStorage.getItem(storageKey);
+            const rawValue = readStorageItem(storageKey);
             if (rawValue !== null) {
                 storage[storageKey] = rawValue;
             }
@@ -1338,11 +1498,11 @@
         SCRIPT_CONFIG_STORAGE_KEYS.forEach((storageKey) => {
             const rawValue = importedStorage[storageKey];
             if (typeof rawValue === 'string') {
-                localStorage.setItem(storageKey, rawValue);
+                writeStorageItem(storageKey, rawValue);
                 return;
             }
 
-            localStorage.removeItem(storageKey);
+            removeStorageItem(storageKey);
         });
 
         reloadScriptConfigurationFromStorage();
@@ -1355,7 +1515,7 @@
         });
 
         afkActivityRecords = [];
-        localStorage.removeItem(STORAGE_KEY_AFK_ACTIVITY);
+        removeStorageItem(STORAGE_KEY_AFK_ACTIVITY);
         clearAfkReplayProtection();
         applyReloadedScriptConfiguration();
 
@@ -1467,29 +1627,21 @@
     }
 
     function loadDebugMode() {
-        try {
-            return localStorage.getItem(STORAGE_KEY_DEBUG) === '1';
-        } catch (e) {
-            return false;
-        }
+        return readStorageBoolean(STORAGE_KEY_DEBUG, false);
     }
 
     function saveDebugMode(value) {
         debugMode = !!value;
-        localStorage.setItem(STORAGE_KEY_DEBUG, debugMode ? '1' : '0');
+        writeStorageBoolean(STORAGE_KEY_DEBUG, debugMode);
     }
 
     function loadHomeChatCollapsed() {
-        try {
-            return localStorage.getItem(STORAGE_KEY_HOME_COLLAPSED) === '1';
-        } catch (e) {
-            return false;
-        }
+        return readStorageBoolean(STORAGE_KEY_HOME_COLLAPSED, false);
     }
 
     function saveHomeChatCollapsed(value) {
         homeChatCollapsed = !!value;
-        localStorage.setItem(STORAGE_KEY_HOME_COLLAPSED, homeChatCollapsed ? '1' : '0');
+        writeStorageBoolean(STORAGE_KEY_HOME_COLLAPSED, homeChatCollapsed);
     }
 
     function normalizeStatsDisplayMode(value) {
@@ -1507,132 +1659,89 @@
     }
 
     function loadStatsDisplayMode() {
-        try {
-            return normalizeStatsDisplayMode(localStorage.getItem(getStatsCollapsedStorageKey()));
-        } catch (e) {
-            return STATS_DISPLAY_MODE_EXPANDED;
-        }
+        return normalizeStatsDisplayMode(readStorageItem(getStatsCollapsedStorageKey()));
     }
 
     function saveStatsDisplayMode(value) {
         statsDisplayMode = normalizeStatsDisplayMode(value);
-        localStorage.setItem(getStatsCollapsedStorageKey(), statsDisplayMode);
+        writeStorageItem(getStatsCollapsedStorageKey(), statsDisplayMode);
     }
 
     function loadStatsHidden() {
-        try {
-            return localStorage.getItem(getStatsHiddenStorageKey()) === '1';
-        } catch (e) {
-            return false;
-        }
+        return readStorageBoolean(getStatsHiddenStorageKey(), false);
     }
 
     function saveStatsHidden(value) {
         statsHidden = !!value;
-        localStorage.setItem(getStatsHiddenStorageKey(), statsHidden ? '1' : '0');
+        writeStorageBoolean(getStatsHiddenStorageKey(), statsHidden);
+    }
+
+    function getDefaultMentionSettings() {
+        return {
+            username: '',
+            color: DEFAULT_MENTION_COLOR,
+            opacityPercent: DEFAULT_MENTION_OPACITY,
+            blinkSeconds: DEFAULT_MENTION_BLINK_SECONDS,
+            keepHighlightAfterBlink: DEFAULT_MENTION_KEEP_HIGHLIGHT,
+            includeReplyContext: DEFAULT_MENTION_INCLUDE_REPLY_CONTEXT,
+            soundEnabled: DEFAULT_MENTION_SOUND_ENABLED,
+            soundScope: DEFAULT_MENTION_SOUND_SCOPE,
+            soundStyle: DEFAULT_MENTION_SOUND_STYLE,
+            soundCustomUrl: DEFAULT_MENTION_SOUND_CUSTOM_URL,
+            soundCooldownSeconds: DEFAULT_MENTION_SOUND_COOLDOWN_SECONDS
+        };
+    }
+
+    function normalizeMentionSettings(value) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+            return getDefaultMentionSettings();
+        }
+
+        const soundScope = normalizeMentionSoundScope(
+            value.soundScope ?? (value.soundEnabled === true ? 'both' : 'off')
+        );
+
+        return {
+            username: normalizeName(value.username || ''),
+            color: normalizeHexColor(value.color, DEFAULT_MENTION_COLOR),
+            opacityPercent: parseOpacityPercentInput(value.opacityPercent, DEFAULT_MENTION_OPACITY),
+            blinkSeconds: clamp(Number(value.blinkSeconds) || 0, 0, 30),
+            keepHighlightAfterBlink: value.keepHighlightAfterBlink !== false,
+            includeReplyContext: value.includeReplyContext === true,
+            soundEnabled: isMentionSoundScopeEnabled(soundScope),
+            soundScope,
+            soundStyle: normalizeMentionSoundStyle(value.soundStyle),
+            soundCustomUrl: normalizeMentionSoundCustomUrl(value.soundCustomUrl),
+            soundCooldownSeconds: clamp(Number(value.soundCooldownSeconds) || 0, 0, 300)
+        };
     }
 
     function loadHighlightedUsers() {
-        try {
-            const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY_HIGHLIGHTED_USERS) || '{}');
-            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+        const parsed = readStorageJson(STORAGE_KEY_HIGHLIGHTED_USERS, {});
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
 
-            return Object.fromEntries(
-                Object.entries(parsed)
-                    .map(([username, value]) => [normalizeName(username), normalizeHighlightUserConfig(value)])
-                    .filter(([username]) => !!username)
-            );
-        } catch (e) {
-            return {};
-        }
+        return Object.fromEntries(
+            Object.entries(parsed)
+                .map(([username, value]) => [normalizeName(username), normalizeHighlightUserConfig(value)])
+                .filter(([username]) => !!username)
+        );
     }
 
     function saveHighlightedUsers() {
-        localStorage.setItem(STORAGE_KEY_HIGHLIGHTED_USERS, JSON.stringify(highlightedUsers));
+        writeStorageJson(STORAGE_KEY_HIGHLIGHTED_USERS, highlightedUsers);
     }
 
     function loadMentionSettings() {
-        try {
-            const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY_MENTION_SETTINGS) || '{}');
-            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-                return {
-                    username: '',
-                    color: DEFAULT_MENTION_COLOR,
-                    opacityPercent: DEFAULT_MENTION_OPACITY,
-                    blinkSeconds: DEFAULT_MENTION_BLINK_SECONDS,
-                    keepHighlightAfterBlink: DEFAULT_MENTION_KEEP_HIGHLIGHT,
-                    includeReplyContext: DEFAULT_MENTION_INCLUDE_REPLY_CONTEXT,
-                    soundEnabled: DEFAULT_MENTION_SOUND_ENABLED,
-                    soundScope: DEFAULT_MENTION_SOUND_SCOPE,
-                    soundStyle: DEFAULT_MENTION_SOUND_STYLE,
-                    soundCustomUrl: DEFAULT_MENTION_SOUND_CUSTOM_URL,
-                    soundCooldownSeconds: DEFAULT_MENTION_SOUND_COOLDOWN_SECONDS
-                };
-            }
-
-            const soundScope = normalizeMentionSoundScope(
-                parsed.soundScope ?? (parsed.soundEnabled === true ? 'both' : 'off')
-            );
-
-            return {
-                username: normalizeName(parsed.username || ''),
-                color: normalizeHexColor(parsed.color, DEFAULT_MENTION_COLOR),
-                opacityPercent: parseOpacityPercentInput(parsed.opacityPercent, DEFAULT_MENTION_OPACITY),
-                blinkSeconds: clamp(Number(parsed.blinkSeconds) || 0, 0, 30),
-                keepHighlightAfterBlink: parsed.keepHighlightAfterBlink !== false,
-                includeReplyContext: parsed.includeReplyContext === true,
-                soundEnabled: isMentionSoundScopeEnabled(soundScope),
-                soundScope,
-                soundStyle: normalizeMentionSoundStyle(parsed.soundStyle),
-                soundCustomUrl: normalizeMentionSoundCustomUrl(parsed.soundCustomUrl),
-                soundCooldownSeconds: clamp(Number(parsed.soundCooldownSeconds) || 0, 0, 300)
-            };
-        } catch (e) {
-            return {
-                username: '',
-                color: DEFAULT_MENTION_COLOR,
-                opacityPercent: DEFAULT_MENTION_OPACITY,
-                blinkSeconds: DEFAULT_MENTION_BLINK_SECONDS,
-                keepHighlightAfterBlink: DEFAULT_MENTION_KEEP_HIGHLIGHT,
-                includeReplyContext: DEFAULT_MENTION_INCLUDE_REPLY_CONTEXT,
-                soundEnabled: DEFAULT_MENTION_SOUND_ENABLED,
-                soundScope: DEFAULT_MENTION_SOUND_SCOPE,
-                soundStyle: DEFAULT_MENTION_SOUND_STYLE,
-                soundCustomUrl: DEFAULT_MENTION_SOUND_CUSTOM_URL,
-                soundCooldownSeconds: DEFAULT_MENTION_SOUND_COOLDOWN_SECONDS
-            };
-        }
+        return normalizeMentionSettings(readStorageJson(STORAGE_KEY_MENTION_SETTINGS, null));
     }
 
     function saveMentionSettings(nextSettings) {
-        const soundScope = normalizeMentionSoundScope(
-            nextSettings?.soundScope ?? (nextSettings?.soundEnabled === true ? 'both' : 'off')
-        );
-
-        mentionSettings = {
-            username: normalizeName(nextSettings?.username || ''),
-            color: normalizeHexColor(nextSettings?.color, DEFAULT_MENTION_COLOR),
-            opacityPercent: parseOpacityPercentInput(nextSettings?.opacityPercent, DEFAULT_MENTION_OPACITY),
-            blinkSeconds: clamp(Number(nextSettings?.blinkSeconds) || 0, 0, 30),
-            keepHighlightAfterBlink: nextSettings?.keepHighlightAfterBlink !== false,
-            includeReplyContext: nextSettings?.includeReplyContext === true,
-            soundEnabled: isMentionSoundScopeEnabled(soundScope),
-            soundScope,
-            soundStyle: normalizeMentionSoundStyle(nextSettings?.soundStyle),
-            soundCustomUrl: normalizeMentionSoundCustomUrl(nextSettings?.soundCustomUrl),
-            soundCooldownSeconds: clamp(Number(nextSettings?.soundCooldownSeconds) || 0, 0, 300)
-        };
-
-        localStorage.setItem(STORAGE_KEY_MENTION_SETTINGS, JSON.stringify(mentionSettings));
+        mentionSettings = normalizeMentionSettings(nextSettings);
+        writeStorageJson(STORAGE_KEY_MENTION_SETTINGS, mentionSettings);
     }
 
     function loadLastMentionSoundRecord() {
-        try {
-            const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY_LAST_MENTION_SOUND_NOTIFICATION) || 'null');
-            return normalizeMentionSoundRecord(parsed);
-        } catch (e) {
-            return null;
-        }
+        return normalizeMentionSoundRecord(readStorageJson(STORAGE_KEY_LAST_MENTION_SOUND_NOTIFICATION, null));
     }
 
     function normalizeMentionSoundRecord(record) {
@@ -1654,16 +1763,14 @@
     }
 
     function loadRecentMentionSoundRecords(fallbackRecord = null) {
-        try {
-            const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY_RECENT_MENTION_SOUND_NOTIFICATIONS) || '[]');
-            const records = Array.isArray(parsed)
-                ? parsed.map(normalizeMentionSoundRecord).filter(Boolean)
-                : [];
+        const parsed = readStorageJson(STORAGE_KEY_RECENT_MENTION_SOUND_NOTIFICATIONS, []);
+        const records = Array.isArray(parsed)
+            ? parsed.map(normalizeMentionSoundRecord).filter(Boolean)
+            : [];
 
-            if (records.length > 0) {
-                return records.slice(-MAX_RECENT_MENTION_SOUND_RECORDS);
-            }
-        } catch (e) {}
+        if (records.length > 0) {
+            return records.slice(-MAX_RECENT_MENTION_SOUND_RECORDS);
+        }
 
         return fallbackRecord ? [fallbackRecord] : [];
     }
@@ -1673,18 +1780,18 @@
 
         if (!normalizedRecord) {
             lastMentionSoundRecord = null;
-            localStorage.removeItem(STORAGE_KEY_LAST_MENTION_SOUND_NOTIFICATION);
+            removeStorageItem(STORAGE_KEY_LAST_MENTION_SOUND_NOTIFICATION);
             return;
         }
 
         lastMentionSoundRecord = normalizedRecord;
-        localStorage.setItem(STORAGE_KEY_LAST_MENTION_SOUND_NOTIFICATION, JSON.stringify(lastMentionSoundRecord));
+        writeStorageJson(STORAGE_KEY_LAST_MENTION_SOUND_NOTIFICATION, lastMentionSoundRecord);
     }
 
     function saveRecentMentionSoundRecords() {
-        localStorage.setItem(
+        writeStorageJson(
             STORAGE_KEY_RECENT_MENTION_SOUND_NOTIFICATIONS,
-            JSON.stringify(recentMentionSoundRecords.slice(-MAX_RECENT_MENTION_SOUND_RECORDS))
+            recentMentionSoundRecords.slice(-MAX_RECENT_MENTION_SOUND_RECORDS)
         );
     }
 
@@ -1717,103 +1824,71 @@
     }
 
     function loadChatFontScale() {
-        try {
-            const rawValue = localStorage.getItem(STORAGE_KEY_CHAT_FONT_SCALE);
-            if (!rawValue) return DEFAULT_CHAT_FONT_SCALE;
+        const rawValue = readStorageItem(STORAGE_KEY_CHAT_FONT_SCALE);
+        if (!rawValue) return DEFAULT_CHAT_FONT_SCALE;
 
-            const parsed = Number(String(rawValue).trim().replace(',', '.'));
-            if (Number.isNaN(parsed)) return DEFAULT_CHAT_FONT_SCALE;
-            return clampChatFontScale(parsed);
-        } catch (e) {
-            return DEFAULT_CHAT_FONT_SCALE;
-        }
+        const parsed = Number(String(rawValue).trim().replace(',', '.'));
+        if (Number.isNaN(parsed)) return DEFAULT_CHAT_FONT_SCALE;
+        return clampChatFontScale(parsed);
     }
 
     function saveChatFontScale(value) {
         chatFontScale = clampChatFontScale(value);
-        localStorage.setItem(STORAGE_KEY_CHAT_FONT_SCALE, String(chatFontScale));
+        writeStorageItem(STORAGE_KEY_CHAT_FONT_SCALE, String(chatFontScale));
     }
 
     function loadLightThemeEnabled() {
-        try {
-            return localStorage.getItem(getLightThemeStorageKey()) === '1';
-        } catch (e) {
-            return false;
-        }
+        return readStorageBoolean(getLightThemeStorageKey(), false);
     }
 
     function loadChatScrollbarEnabled() {
-        try {
-            return localStorage.getItem(STORAGE_KEY_CHAT_SCROLLBAR_ENABLED) === '1';
-        } catch (e) {
-            return false;
-        }
+        return readStorageBoolean(STORAGE_KEY_CHAT_SCROLLBAR_ENABLED, false);
     }
 
     function saveChatScrollbarEnabled(value) {
         chatScrollbarEnabled = !!value;
-        localStorage.setItem(STORAGE_KEY_CHAT_SCROLLBAR_ENABLED, chatScrollbarEnabled ? '1' : '0');
+        writeStorageBoolean(STORAGE_KEY_CHAT_SCROLLBAR_ENABLED, chatScrollbarEnabled);
     }
 
     function loadMessageActionsLeftEnabled() {
-        try {
-            return localStorage.getItem(STORAGE_KEY_MESSAGE_ACTIONS_LEFT_ENABLED) === '1';
-        } catch (e) {
-            return false;
-        }
+        return readStorageBoolean(STORAGE_KEY_MESSAGE_ACTIONS_LEFT_ENABLED, false);
     }
 
     function saveMessageActionsLeftEnabled(value) {
         messageActionsLeftEnabled = !!value;
-        localStorage.setItem(STORAGE_KEY_MESSAGE_ACTIONS_LEFT_ENABLED, messageActionsLeftEnabled ? '1' : '0');
+        writeStorageBoolean(STORAGE_KEY_MESSAGE_ACTIONS_LEFT_ENABLED, messageActionsLeftEnabled);
     }
 
     function loadHideChatFooterEnabled() {
-        try {
-            return localStorage.getItem(STORAGE_KEY_HIDE_CHAT_FOOTER_ENABLED) === '1';
-        } catch (e) {
-            return false;
-        }
+        return readStorageBoolean(STORAGE_KEY_HIDE_CHAT_FOOTER_ENABLED, false);
     }
 
     function saveHideChatFooterEnabled(value) {
         hideChatFooterEnabled = !!value;
-        localStorage.setItem(STORAGE_KEY_HIDE_CHAT_FOOTER_ENABLED, hideChatFooterEnabled ? '1' : '0');
+        writeStorageBoolean(STORAGE_KEY_HIDE_CHAT_FOOTER_ENABLED, hideChatFooterEnabled);
     }
 
     function saveLightThemeEnabled(value) {
         lightThemeEnabled = !!value;
-        localStorage.setItem(getLightThemeStorageKey(), lightThemeEnabled ? '1' : '0');
+        writeStorageBoolean(getLightThemeStorageKey(), lightThemeEnabled);
     }
 
     function loadLinkifyUrlsEnabled() {
-        try {
-            const rawValue = localStorage.getItem(STORAGE_KEY_LINKIFY_URLS);
-            if (rawValue === null) return true;
-            return rawValue === '1';
-        } catch (e) {
-            return true;
-        }
+        return readStorageBoolean(STORAGE_KEY_LINKIFY_URLS, true);
     }
 
     function saveLinkifyUrlsEnabled(value) {
         linkifyUrlsEnabled = !!value;
-        localStorage.setItem(STORAGE_KEY_LINKIFY_URLS, linkifyUrlsEnabled ? '1' : '0');
+        writeStorageBoolean(STORAGE_KEY_LINKIFY_URLS, linkifyUrlsEnabled);
     }
 
     function loadEmbedUrlImagesEnabled() {
-        try {
-            const rawValue = localStorage.getItem(STORAGE_KEY_EMBED_URL_IMAGES);
-            if (rawValue === null) return true;
-            return rawValue === '1';
-        } catch (e) {
-            return true;
-        }
+        return readStorageBoolean(STORAGE_KEY_EMBED_URL_IMAGES, true);
     }
 
     function saveEmbedUrlImagesEnabled(value) {
         embedUrlImagesEnabled = !!value;
-        localStorage.setItem(STORAGE_KEY_EMBED_URL_IMAGES, embedUrlImagesEnabled ? '1' : '0');
+        writeStorageBoolean(STORAGE_KEY_EMBED_URL_IMAGES, embedUrlImagesEnabled);
     }
 
     function formatChatFontScalePercent(value = chatFontScale) {
@@ -2300,19 +2375,16 @@
     }
 
     function loadPosition() {
-        try {
-            return normalizeStatsBoxPosition(JSON.parse(localStorage.getItem(getPositionStorageKey()) || 'null')) || { ...DEFAULT_POSITION };
-        } catch (e) {}
-        return { ...DEFAULT_POSITION };
+        return normalizeStatsBoxPosition(readStorageJson(getPositionStorageKey(), null)) || { ...DEFAULT_POSITION };
     }
 
     function savePosition(position) {
         const normalizedPosition = normalizeStatsBoxPosition(position) || { ...DEFAULT_POSITION };
-        localStorage.setItem(getPositionStorageKey(), JSON.stringify(normalizedPosition));
+        writeStorageJson(getPositionStorageKey(), normalizedPosition);
     }
 
     function resetPosition() {
-        localStorage.removeItem(getPositionStorageKey());
+        removeStorageItem(getPositionStorageKey());
     }
 
     function normalizeStatsBoxSize(value) {
@@ -2327,27 +2399,21 @@
     }
 
     function loadStatsBoxSize() {
-        try {
-            return normalizeStatsBoxSize(JSON.parse(localStorage.getItem(getStatsBoxSizeStorageKey()) || 'null'));
-        } catch (e) {
-            return null;
-        }
+        return normalizeStatsBoxSize(readStorageJson(getStatsBoxSizeStorageKey(), null));
     }
 
     function saveStatsBoxSize(size) {
         const normalizedSize = normalizeStatsBoxSize(size);
-        try {
-            if (!normalizedSize) {
-                localStorage.removeItem(getStatsBoxSizeStorageKey());
-                return;
-            }
+        if (!normalizedSize) {
+            removeStorageItem(getStatsBoxSizeStorageKey());
+            return;
+        }
 
-            localStorage.setItem(getStatsBoxSizeStorageKey(), JSON.stringify(normalizedSize));
-        } catch (e) {}
+        writeStorageJson(getStatsBoxSizeStorageKey(), normalizedSize);
     }
 
     function resetStatsBoxSize() {
-        localStorage.removeItem(getStatsBoxSizeStorageKey());
+        removeStorageItem(getStatsBoxSizeStorageKey());
     }
 
     function clamp(value, min, max) {
@@ -2477,6 +2543,7 @@
         return raw;
     }
 
+    // Klipy GIF picker - API/data helpers
     function buildKlipyGifEmbedMarkup(gifUrl) {
         const normalizedGifUrl = normalizeUrlForChatInsertion(gifUrl);
         if (!normalizedGifUrl) return '';
@@ -2533,6 +2600,12 @@
         }
     }
 
+    /**
+     * Convertit un résultat Klipy brut en objet minimal et sûr pour le picker GIF.
+     *
+     * @param {unknown} result
+     * @returns {KlipyGifResult|null}
+     */
     function normalizeKlipyGifResult(result) {
         const gifUrl = normalizeUrlForChatInsertion(result?.media_formats?.gif?.url || result?.url);
         const previewUrl = normalizeUrlForChatInsertion(result?.media_formats?.tinygif?.url || gifUrl);
@@ -2559,6 +2632,12 @@
         };
     }
 
+    /**
+     * Charge une page de résultats Klipy, en tendances ou en recherche, avec mise en cache locale.
+     *
+     * @param {{ query?: string, pos?: string }} [options]
+     * @returns {Promise<KlipyGifFeedPayload>}
+     */
     async function fetchKlipyGifFeed({ query = '', pos = '' } = {}) {
         const normalizedQuery = String(query || '').trim();
         const endpoint = normalizedQuery ? 'search' : 'featured';
@@ -3563,88 +3642,85 @@
         afkMessageDraft = null;
     }
 
-    function renderAfkPanel() {
-        if (!shouldDisplayAfkPanelForCurrentPage()) {
-            removeAfkPanel();
-            return;
-        }
-
-        if (isAfkEnabledForCurrentContext() && afkPanelHidden) {
-            saveAfkPanelHidden(false);
-        }
-
-        if (!afkState.enabled && afkPanelHidden) {
-            removeAfkPanel();
-            return;
-        }
-
-        const panel = getOrCreateAfkPanel();
-        if (!(panel instanceof HTMLElement)) return;
-        const existingAfkMessageInput = panel.querySelector('#tm-afk-message-input');
-        if (
-            existingAfkMessageInput instanceof HTMLTextAreaElement &&
-            document.activeElement === existingAfkMessageInput
-        ) {
-            afkMessageDraft = existingAfkMessageInput.value.slice(0, MAX_AFK_AUTO_REPLY_MESSAGE_LENGTH);
-            return;
-        }
-
-        const statusLabel = afkState.enabled
-            ? `Actif sur ${escapeHtml(afkState.contextLabel || 'ce chat')}`
-            : 'Inactif';
-        const currentAfkMessage = escapeHtml(
-            afkMessageDraft !== null
-                ? String(afkMessageDraft).slice(0, MAX_AFK_AUTO_REPLY_MESSAGE_LENGTH)
-                : (afkState.autoReplyMessage || DEFAULT_AFK_AUTO_REPLY_MESSAGE)
-        );
+    /**
+     * Prépare les données dérivées utilisées par le rendu du panneau AFK.
+     *
+     * @returns {AfkPanelViewModel}
+     */
+    function getAfkPanelViewModel() {
         const activityCount = afkActivityRecords.length;
         const unreadCount = afkActivityRecords.filter((record) => !record.isRead).length;
         const readCount = Math.max(0, activityCount - unreadCount);
         const autoReplyEnabled = isAfkAutoReplyEnabled();
         const autoReplyWindowExpired = autoReplyEnabled && isAfkAutoReplyWindowExpired();
-        const toggleLabel = isAfkEnabledForCurrentContext()
-            ? 'Désactiver ici'
-            : (afkState.enabled ? 'Basculer ici' : 'Activer ici');
-        const closeButtonHtml = afkState.enabled
-            ? ''
-            : `
-                <button
-                    type="button"
-                    data-tm-afk-action="hide-panel"
-                    title="Masquer le panneau AFK"
-                    aria-label="Masquer le panneau AFK"
-                    style="
-                        border:none;
-                        background:#27272a;
-                        color:#fff;
-                        width:30px;
-                        height:30px;
-                        border-radius:10px;
-                        cursor:pointer;
-                        font-size:18px;
-                        line-height:1;
-                        flex:0 0 auto;
-                    "
-                >×</button>
-            `;
 
-        panel.innerHTML = `
+        return {
+            statusLabel: afkState.enabled
+                ? `Actif sur ${escapeHtml(afkState.contextLabel || 'ce chat')}`
+                : 'Inactif',
+            currentAfkMessage: escapeHtml(
+                afkMessageDraft !== null
+                    ? String(afkMessageDraft).slice(0, MAX_AFK_AUTO_REPLY_MESSAGE_LENGTH)
+                    : (afkState.autoReplyMessage || DEFAULT_AFK_AUTO_REPLY_MESSAGE)
+            ),
+            activityCount,
+            unreadCount,
+            readCount,
+            autoReplyEnabled,
+            autoReplyWindowExpired,
+            toggleLabel: isAfkEnabledForCurrentContext()
+                ? 'Désactiver ici'
+                : (afkState.enabled ? 'Basculer ici' : 'Activer ici')
+        };
+    }
+
+    function renderAfkPanelCloseButton() {
+        if (afkState.enabled) return '';
+
+        return `
+            <button
+                type="button"
+                data-tm-afk-action="hide-panel"
+                title="Masquer le panneau AFK"
+                aria-label="Masquer le panneau AFK"
+                style="
+                    border:none;
+                    background:#27272a;
+                    color:#fff;
+                    width:30px;
+                    height:30px;
+                    border-radius:10px;
+                    cursor:pointer;
+                    font-size:18px;
+                    line-height:1;
+                    flex:0 0 auto;
+                "
+            >×</button>
+        `;
+    }
+
+    function renderAfkPanelHeader(viewModel) {
+        return `
             <div
                 data-tm-afk-drag-handle="1"
                 style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:12px;cursor:move;user-select:none;"
             >
                 <div style="flex:1 1 auto;min-width:0;">
                     <div style="font-size:15px;font-weight:700;">Mode AFK</div>
-                    <div style="margin-top:4px;font-size:11px;color:${afkState.enabled ? '#86efac' : '#a1a1aa'};">${statusLabel}</div>
+                    <div style="margin-top:4px;font-size:11px;color:${afkState.enabled ? '#86efac' : '#a1a1aa'};">${viewModel.statusLabel}</div>
                 </div>
                 <div style="display:flex;align-items:flex-start;gap:8px;flex:0 0 auto;">
                     <div style="font-size:11px;color:#a1a1aa;text-align:right;line-height:1.4;">
                         ${formatAfkShortcutLabel()}
                     </div>
-                    ${closeButtonHtml}
+                    ${renderAfkPanelCloseButton()}
                 </div>
             </div>
+        `;
+    }
 
+    function renderAfkPanelReplySection(viewModel) {
+        return `
             <div style="padding:12px;border-radius:14px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);margin-bottom:12px;">
                 <div style="font-size:12px;font-weight:700;color:#d4d4d8;">Réponse automatique</div>
                 <div style="margin-top:8px;font-size:11px;color:#a1a1aa;line-height:1.45;">
@@ -3654,20 +3730,20 @@
                     <input
                         id="tm-afk-auto-reply-enabled"
                         type="checkbox"
-                        ${autoReplyEnabled ? 'checked' : ''}
+                        ${viewModel.autoReplyEnabled ? 'checked' : ''}
                         ${afkState.enabled ? '' : 'disabled'}
                         style="width:14px;height:14px;cursor:${afkState.enabled ? 'pointer' : 'not-allowed'};"
                     >
                     <span>Activer réponse automatique</span>
                 </label>
-                <div style="margin-top:8px;font-size:11px;color:${autoReplyWindowExpired ? '#facc15' : '#71717a'};line-height:1.45;">
+                <div style="margin-top:8px;font-size:11px;color:${viewModel.autoReplyWindowExpired ? '#facc15' : '#71717a'};line-height:1.45;">
                     ${!afkState.enabled
                         ? 'Active d’abord le mode AFK pour pouvoir autoriser les réponses automatiques.'
-                        : !autoReplyEnabled
+                        : !viewModel.autoReplyEnabled
                             ? 'Réponses automatiques désactivées. Le panneau continue simplement à enregistrer les messages à relire.'
-                        : autoReplyWindowExpired
-                        ? 'Les réponses automatiques sont coupées après 30 minutes d’inactivité, mais les messages continuent d’être enregistrés.'
-                        : 'Les réponses automatiques s’arrêtent d’elles-mêmes après 30 minutes d’inactivité, mais le suivi des messages continue.'}
+                            : viewModel.autoReplyWindowExpired
+                                ? 'Les réponses automatiques sont coupées après 30 minutes d’inactivité, mais les messages continuent d’être enregistrés.'
+                                : 'Les réponses automatiques s’arrêtent d’elles-mêmes après 30 minutes d’inactivité, mais le suivi des messages continue.'}
                 </div>
                 <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:12px;color:#e4e4e7;cursor:pointer;">
                     <input
@@ -3693,7 +3769,7 @@
                     padding:10px 12px;
                     outline:none;
                     line-height:1.45;
-                ">${currentAfkMessage}</textarea>
+                ">${viewModel.currentAfkMessage}</textarea>
                 <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
                     Message personnalisable, limité à ${MAX_AFK_AUTO_REPLY_MESSAGE_LENGTH} caractères.
                 </div>
@@ -3721,7 +3797,7 @@
                             cursor:pointer;
                             font-size:12px;
                             font-weight:600;
-                        ">${toggleLabel}</button>
+                        ">${viewModel.toggleLabel}</button>
                         <button type="button" data-tm-afk-action="clear" style="
                             border:none;
                             background:#3f3f46;
@@ -3735,11 +3811,59 @@
                     </div>
                 </div>
             </div>
+        `;
+    }
 
+    function renderAfkPanelRecord(record) {
+        return `
+            <div style="padding:10px 12px;border-radius:12px;background:${record.isRead ? 'rgba(255,255,255,0.03)' : 'rgba(59,130,246,0.08)'};border:1px solid ${record.isRead ? 'rgba(255,255,255,0.08)' : 'rgba(59,130,246,0.16)'};opacity:${record.isRead ? '0.82' : '1'};">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap;">
+                    <div style="font-size:12px;font-weight:700;color:#e0f2fe;">${escapeHtml(record.displayUsername)}</div>
+                    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                        <span style="display:inline-flex;align-items:center;padding:3px 7px;border-radius:999px;background:${record.isRead ? 'rgba(113,113,122,0.18)' : 'rgba(250,204,21,0.14)'};border:1px solid ${record.isRead ? 'rgba(113,113,122,0.28)' : 'rgba(250,204,21,0.22)'};color:${record.isRead ? '#d4d4d8' : '#fde68a'};font-size:10px;font-weight:700;">${escapeHtml(getAfkReadStatusLabel(record))}</span>
+                        <span style="display:inline-flex;align-items:center;padding:3px 7px;border-radius:999px;background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.22);color:#bbf7d0;font-size:10px;font-weight:700;">${escapeHtml(getAfkReasonLabel(record.reason))}</span>
+                        <span style="font-size:10px;color:#a1a1aa;">${escapeHtml(formatAfkRecordTimestamp(record))}</span>
+                    </div>
+                </div>
+                <div style="margin-top:8px;font-size:12px;line-height:1.45;color:#e4e4e7;white-space:pre-wrap;word-break:break-word;">${escapeHtml(record.messageText || '(message vide)')}</div>
+                ${record.replyContextText ? `
+                    <div style="margin-top:6px;font-size:11px;color:#c4b5fd;">
+                        Contexte réponse : ${escapeHtml(record.replyContextText)}
+                    </div>
+                ` : ''}
+                <div style="margin-top:8px;font-size:10px;color:${record.autoReplySent ? '#86efac' : '#a1a1aa'};">
+                    ${escapeHtml(getAfkAutoReplyStatusLabel(record))}
+                </div>
+                <div style="margin-top:4px;font-size:10px;color:#71717a;">
+                    ${escapeHtml(record.contextLabel || 'Contexte inconnu')}
+                </div>
+                <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px;">
+                    <button
+                        type="button"
+                        data-tm-afk-record-action="toggle-read"
+                        data-tm-afk-record-id="${escapeHtml(record.id)}"
+                        style="
+                            border:none;
+                            background:${record.isRead ? '#3b82f6' : '#3f3f46'};
+                            color:#fff;
+                            border-radius:10px;
+                            padding:7px 10px;
+                            cursor:pointer;
+                            font-size:11px;
+                            font-weight:600;
+                        "
+                    >${record.isRead ? 'Remettre non lu' : 'Marquer lu'}</button>
+                </div>
+            </div>
+        `;
+    }
+
+    function renderAfkPanelRecordsSection(viewModel) {
+        return `
             <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px;">
                 <div style="font-size:12px;font-weight:700;color:#d4d4d8;">Messages à relire</div>
                 <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
-                    ${unreadCount > 2 ? `
+                    ${viewModel.unreadCount > 2 ? `
                         <button
                             type="button"
                             data-tm-afk-action="mark-all-read"
@@ -3756,108 +3880,44 @@
                         >Marquer tout lu</button>
                     ` : ''}
                     <div style="font-size:11px;color:#a1a1aa;text-align:right;line-height:1.4;">
-                        ${unreadCount} non lu${unreadCount > 1 ? 's' : ''} · ${readCount} lu${readCount > 1 ? 's' : ''}
+                        ${viewModel.unreadCount} non lu${viewModel.unreadCount > 1 ? 's' : ''} · ${viewModel.readCount} lu${viewModel.readCount > 1 ? 's' : ''}
                     </div>
                 </div>
             </div>
 
             <div id="tm-afk-records" style="display:grid;gap:8px;">
                 ${afkActivityRecords.length === 0
-                    ? `<div style="font-size:12px;color:#a1a1aa;padding:8px 2px;">Aucun message AFK enregistré pour le moment.</div>`
-                    : afkActivityRecords.map((record) => `
-                        <div style="padding:10px 12px;border-radius:12px;background:${record.isRead ? 'rgba(255,255,255,0.03)' : 'rgba(59,130,246,0.08)'};border:1px solid ${record.isRead ? 'rgba(255,255,255,0.08)' : 'rgba(59,130,246,0.16)'};opacity:${record.isRead ? '0.82' : '1'};">
-                            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap;">
-                                <div style="font-size:12px;font-weight:700;color:#e0f2fe;">${escapeHtml(record.displayUsername)}</div>
-                                <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-                                    <span style="display:inline-flex;align-items:center;padding:3px 7px;border-radius:999px;background:${record.isRead ? 'rgba(113,113,122,0.18)' : 'rgba(250,204,21,0.14)'};border:1px solid ${record.isRead ? 'rgba(113,113,122,0.28)' : 'rgba(250,204,21,0.22)'};color:${record.isRead ? '#d4d4d8' : '#fde68a'};font-size:10px;font-weight:700;">${escapeHtml(getAfkReadStatusLabel(record))}</span>
-                                    <span style="display:inline-flex;align-items:center;padding:3px 7px;border-radius:999px;background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.22);color:#bbf7d0;font-size:10px;font-weight:700;">${escapeHtml(getAfkReasonLabel(record.reason))}</span>
-                                    <span style="font-size:10px;color:#a1a1aa;">${escapeHtml(formatAfkRecordTimestamp(record))}</span>
-                                </div>
-                            </div>
-                            <div style="margin-top:8px;font-size:12px;line-height:1.45;color:#e4e4e7;white-space:pre-wrap;word-break:break-word;">${escapeHtml(record.messageText || '(message vide)')}</div>
-                            ${record.replyContextText ? `
-                                <div style="margin-top:6px;font-size:11px;color:#c4b5fd;">
-                                    Contexte réponse : ${escapeHtml(record.replyContextText)}
-                                </div>
-                            ` : ''}
-                            <div style="margin-top:8px;font-size:10px;color:${record.autoReplySent ? '#86efac' : '#a1a1aa'};">
-                                ${escapeHtml(getAfkAutoReplyStatusLabel(record))}
-                            </div>
-                            <div style="margin-top:4px;font-size:10px;color:#71717a;">
-                                ${escapeHtml(record.contextLabel || 'Contexte inconnu')}
-                            </div>
-                            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px;">
-                                <button
-                                    type="button"
-                                    data-tm-afk-record-action="toggle-read"
-                                    data-tm-afk-record-id="${escapeHtml(record.id)}"
-                                    style="
-                                        border:none;
-                                        background:${record.isRead ? '#3b82f6' : '#3f3f46'};
-                                        color:#fff;
-                                        border-radius:10px;
-                                        padding:7px 10px;
-                                        cursor:pointer;
-                                        font-size:11px;
-                                        font-weight:600;
-                                    "
-                                >${record.isRead ? 'Remettre non lu' : 'Marquer lu'}</button>
-                            </div>
-                        </div>
-                    `).join('')
-                }
+                    ? '<div style="font-size:12px;color:#a1a1aa;padding:8px 2px;">Aucun message AFK enregistré pour le moment.</div>'
+                    : afkActivityRecords.map((record) => renderAfkPanelRecord(record)).join('')}
             </div>
         `;
+    }
 
-        const saveMessageBtn = panel.querySelector('[data-tm-afk-action="save-message"]');
-        const toggleBtn = panel.querySelector('[data-tm-afk-action="toggle"]');
-        const clearBtn = panel.querySelector('[data-tm-afk-action="clear"]');
-        const markAllReadBtn = panel.querySelector('[data-tm-afk-action="mark-all-read"]');
-        const hidePanelBtn = panel.querySelector('[data-tm-afk-action="hide-panel"]');
-        const afkMessageInput = panel.querySelector('#tm-afk-message-input');
-        const autoReplyEnabledInput = panel.querySelector('#tm-afk-auto-reply-enabled');
-        const muteMentionSoundInput = panel.querySelector('#tm-afk-mute-mention-sound-enabled');
-        const dragHandle = panel.querySelector('[data-tm-afk-drag-handle="1"]');
+    function buildAfkPanelHtml(viewModel) {
+        return `
+            ${renderAfkPanelHeader(viewModel)}
+            ${renderAfkPanelReplySection(viewModel)}
+            ${renderAfkPanelRecordsSection(viewModel)}
+        `;
+    }
 
-        saveMessageBtn?.addEventListener('click', () => {
-            updateAfkAutoReplyMessage(afkMessageInput instanceof HTMLTextAreaElement ? afkMessageInput.value : '');
-            showToast('Message AFK enregistré.');
-        });
+    function getAfkPanelElements(panel) {
+        return {
+            saveMessageBtn: panel.querySelector('[data-tm-afk-action="save-message"]'),
+            toggleBtn: panel.querySelector('[data-tm-afk-action="toggle"]'),
+            clearBtn: panel.querySelector('[data-tm-afk-action="clear"]'),
+            markAllReadBtn: panel.querySelector('[data-tm-afk-action="mark-all-read"]'),
+            hidePanelBtn: panel.querySelector('[data-tm-afk-action="hide-panel"]'),
+            afkMessageInput: panel.querySelector('#tm-afk-message-input'),
+            autoReplyEnabledInput: panel.querySelector('#tm-afk-auto-reply-enabled'),
+            muteMentionSoundInput: panel.querySelector('#tm-afk-mute-mention-sound-enabled'),
+            dragHandle: panel.querySelector('[data-tm-afk-drag-handle="1"]'),
+            recordToggleButtons: Array.from(panel.querySelectorAll('[data-tm-afk-record-action="toggle-read"]'))
+        };
+    }
 
-        toggleBtn?.addEventListener('click', () => {
-            const result = toggleAfkModeForCurrentContext();
-            showToast(result.message, !result.ok);
-        });
-
-        clearBtn?.addEventListener('click', () => {
-            clearAfkActivityRecords();
-            showToast('Historique AFK effacé.');
-        });
-
-        markAllReadBtn?.addEventListener('click', () => {
-            const result = markAllAfkActivityRecordsRead();
-            showToast(result.message, !result.ok);
-        });
-
-        autoReplyEnabledInput?.addEventListener('change', () => {
-            if (!(autoReplyEnabledInput instanceof HTMLInputElement)) return;
-            const result = updateAfkAutoReplyEnabled(autoReplyEnabledInput.checked);
-            showToast(result.message, !result.ok);
-        });
-
-        muteMentionSoundInput?.addEventListener('change', () => {
-            if (!(muteMentionSoundInput instanceof HTMLInputElement)) return;
-            const result = updateAfkMuteMentionSound(muteMentionSoundInput.checked);
-            showToast(result.message, !result.ok);
-        });
-
-        hidePanelBtn?.addEventListener('click', () => {
-            saveAfkPanelHidden(true);
-            removeAfkPanel();
-            showToast('Panneau AFK masqué.');
-        });
-
-        panel.querySelectorAll('[data-tm-afk-record-action="toggle-read"]').forEach((button) => {
+    function bindAfkPanelRecordEvents(elements) {
+        elements.recordToggleButtons.forEach((button) => {
             if (!(button instanceof HTMLButtonElement)) return;
 
             button.addEventListener('click', () => {
@@ -3867,64 +3927,146 @@
                 showToast(result.message, !result.ok);
             });
         });
+    }
 
-        afkMessageInput?.addEventListener('keydown', (event) => {
+    function bindAfkPanelDrag(panel, dragHandle) {
+        if (!(dragHandle instanceof HTMLElement)) return;
+
+        let dragState = null;
+
+        function finishDrag() {
+            if (!dragState) return;
+            constrainAfkPanelToViewport(panel);
+            stopDrag();
+        }
+
+        function stopDrag() {
+            dragState = null;
+            document.removeEventListener('mousemove', handleDrag, true);
+            document.removeEventListener('mouseup', finishDrag, true);
+        }
+
+        function handleDrag(event) {
+            if (!dragState) return;
+
+            const nextLeft = dragState.startLeft + (event.clientX - dragState.startX);
+            const nextTop = dragState.startTop + (event.clientY - dragState.startY);
+
+            panel.style.left = `${nextLeft}px`;
+            panel.style.top = `${nextTop}px`;
+            panel.style.right = 'auto';
+            panel.style.bottom = 'auto';
+        }
+
+        dragHandle.addEventListener('mousedown', (event) => {
+            if (event.button !== 0) return;
+            if (event.target instanceof Element && event.target.closest('button, textarea, input, a, select, label')) return;
+
+            const rect = panel.getBoundingClientRect();
+            dragState = {
+                startX: event.clientX,
+                startY: event.clientY,
+                startLeft: rect.left,
+                startTop: rect.top
+            };
+
+            document.addEventListener('mousemove', handleDrag, true);
+            document.addEventListener('mouseup', finishDrag, true);
+            event.preventDefault();
+        });
+    }
+
+    function bindAfkPanelEvents(panel, elements) {
+        elements.saveMessageBtn?.addEventListener('click', () => {
+            updateAfkAutoReplyMessage(elements.afkMessageInput instanceof HTMLTextAreaElement ? elements.afkMessageInput.value : '');
+            showToast('Message AFK enregistré.');
+        });
+
+        elements.toggleBtn?.addEventListener('click', () => {
+            const result = toggleAfkModeForCurrentContext();
+            showToast(result.message, !result.ok);
+        });
+
+        elements.clearBtn?.addEventListener('click', () => {
+            clearAfkActivityRecords();
+            showToast('Historique AFK effacé.');
+        });
+
+        elements.markAllReadBtn?.addEventListener('click', () => {
+            const result = markAllAfkActivityRecordsRead();
+            showToast(result.message, !result.ok);
+        });
+
+        elements.autoReplyEnabledInput?.addEventListener('change', () => {
+            if (!(elements.autoReplyEnabledInput instanceof HTMLInputElement)) return;
+            const result = updateAfkAutoReplyEnabled(elements.autoReplyEnabledInput.checked);
+            showToast(result.message, !result.ok);
+        });
+
+        elements.muteMentionSoundInput?.addEventListener('change', () => {
+            if (!(elements.muteMentionSoundInput instanceof HTMLInputElement)) return;
+            const result = updateAfkMuteMentionSound(elements.muteMentionSoundInput.checked);
+            showToast(result.message, !result.ok);
+        });
+
+        elements.hidePanelBtn?.addEventListener('click', () => {
+            saveAfkPanelHidden(true);
+            removeAfkPanel();
+            showToast('Panneau AFK masqué.');
+        });
+
+        elements.afkMessageInput?.addEventListener('keydown', (event) => {
             if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
                 event.preventDefault();
-                updateAfkAutoReplyMessage(afkMessageInput.value);
+                updateAfkAutoReplyMessage(elements.afkMessageInput.value);
                 showToast('Message AFK enregistré.');
             }
         });
 
-        afkMessageInput?.addEventListener('input', () => {
-            afkMessageDraft = afkMessageInput.value.slice(0, MAX_AFK_AUTO_REPLY_MESSAGE_LENGTH);
+        elements.afkMessageInput?.addEventListener('input', () => {
+            afkMessageDraft = elements.afkMessageInput.value.slice(0, MAX_AFK_AUTO_REPLY_MESSAGE_LENGTH);
         });
 
-        if (dragHandle instanceof HTMLElement) {
-            let dragState = null;
+        bindAfkPanelRecordEvents(elements);
+        bindAfkPanelDrag(panel, elements.dragHandle);
+    }
 
-            function finishDrag() {
-                if (!dragState) return;
-                constrainAfkPanelToViewport(panel);
-                stopDrag();
-            }
-
-            function stopDrag() {
-                dragState = null;
-                document.removeEventListener('mousemove', handleDrag, true);
-                document.removeEventListener('mouseup', finishDrag, true);
-            }
-
-            function handleDrag(event) {
-                if (!dragState) return;
-
-                const nextLeft = dragState.startLeft + (event.clientX - dragState.startX);
-                const nextTop = dragState.startTop + (event.clientY - dragState.startY);
-
-                panel.style.left = `${nextLeft}px`;
-                panel.style.top = `${nextTop}px`;
-                panel.style.right = 'auto';
-                panel.style.bottom = 'auto';
-            }
-
-            dragHandle.addEventListener('mousedown', (event) => {
-                if (event.button !== 0) return;
-                if (event.target instanceof Element && event.target.closest('button, textarea, input, a, select, label')) return;
-
-                const rect = panel.getBoundingClientRect();
-                dragState = {
-                    startX: event.clientX,
-                    startY: event.clientY,
-                    startLeft: rect.left,
-                    startTop: rect.top
-                };
-
-                document.addEventListener('mousemove', handleDrag, true);
-                document.addEventListener('mouseup', finishDrag, true);
-                event.preventDefault();
-            });
+    /**
+     * Rend ou retire le panneau AFK selon le contexte courant, puis réattache ses interactions.
+     *
+     * @returns {void}
+     */
+    function renderAfkPanel() {
+        if (!shouldDisplayAfkPanelForCurrentPage()) {
+            removeAfkPanel();
+            return;
         }
 
+        if (isAfkEnabledForCurrentContext() && afkPanelHidden) {
+            saveAfkPanelHidden(false);
+        }
+
+        if (!afkState.enabled && afkPanelHidden) {
+            removeAfkPanel();
+            return;
+        }
+
+        const panel = getOrCreateAfkPanel();
+        if (!(panel instanceof HTMLElement)) return;
+        const existingAfkMessageInput = panel.querySelector('#tm-afk-message-input');
+        if (
+            existingAfkMessageInput instanceof HTMLTextAreaElement &&
+            document.activeElement === existingAfkMessageInput
+        ) {
+            afkMessageDraft = existingAfkMessageInput.value.slice(0, MAX_AFK_AUTO_REPLY_MESSAGE_LENGTH);
+            return;
+        }
+
+        const viewModel = getAfkPanelViewModel();
+        panel.innerHTML = buildAfkPanelHtml(viewModel);
+        const elements = getAfkPanelElements(panel);
+
+        bindAfkPanelEvents(panel, elements);
         applyAfkPanelPosition(panel);
         constrainAfkPanelToViewport(panel, false);
     }
@@ -5254,6 +5396,1564 @@
         updateStatsBox();
     }
 
+    function getSettingsModalElements(modal) {
+        return {
+            closeBtn: modal.querySelector('#tm-close-modal'),
+            userInput: modal.querySelector('#tm-user-input'),
+            phrasesConfigureBtn: modal.querySelector('#tm-phrases-configure'),
+            phrasesSummary: modal.querySelector('#tm-phrases-summary'),
+            scriptConfigExportBtn: modal.querySelector('#tm-script-config-export'),
+            scriptConfigImportBtn: modal.querySelector('#tm-script-config-import'),
+            scriptConfigImportFileInput: modal.querySelector('#tm-script-config-import-file'),
+            toggleBtn: modal.querySelector('#tm-user-toggle'),
+            phrasesEnabledToggle: modal.querySelector('#tm-phrases-enabled-toggle'),
+            klipyGifsToggle: modal.querySelector('#tm-klipy-gifs-toggle'),
+            hiddenUsersList: modal.querySelector('#tm-hidden-users-list'),
+            highlightUserInput: modal.querySelector('#tm-highlight-user-input'),
+            highlightColorInput: modal.querySelector('#tm-highlight-color-input'),
+            highlightOpacityInput: modal.querySelector('#tm-highlight-opacity-input'),
+            highlightOpacityValue: modal.querySelector('#tm-highlight-opacity-value'),
+            highlightPreview: modal.querySelector('#tm-highlight-preview'),
+            highlightPreviewMeta: modal.querySelector('#tm-highlight-preview-meta'),
+            highlightPreviewText: modal.querySelector('#tm-highlight-preview-text'),
+            highlightSaveBtn: modal.querySelector('#tm-highlight-save'),
+            highlightRemoveBtn: modal.querySelector('#tm-highlight-remove'),
+            highlightUsersList: modal.querySelector('#tm-highlight-users-list'),
+            mentionUserInput: modal.querySelector('#tm-mention-user-input'),
+            mentionColorInput: modal.querySelector('#tm-mention-color-input'),
+            mentionOpacityInput: modal.querySelector('#tm-mention-opacity-input'),
+            mentionOpacityValue: modal.querySelector('#tm-mention-opacity-value'),
+            mentionBlinkInput: modal.querySelector('#tm-mention-blink-input'),
+            mentionPreview: modal.querySelector('#tm-mention-preview'),
+            mentionPreviewMeta: modal.querySelector('#tm-mention-preview-meta'),
+            mentionPreviewText: modal.querySelector('#tm-mention-preview-text'),
+            mentionKeepHighlightToggle: modal.querySelector('#tm-mention-keep-highlight-toggle'),
+            mentionIncludeReplyToggle: modal.querySelector('#tm-mention-include-reply-toggle'),
+            mentionSoundScopeGroup: modal.querySelector('#tm-mention-sound-scope-group'),
+            mentionSoundScopeButtons: Array.from(modal.querySelectorAll('[data-tm-mention-sound-scope]')),
+            mentionSoundOptions: modal.querySelector('#tm-mention-sound-options'),
+            mentionSoundStyleSelect: modal.querySelector('#tm-mention-sound-style-select'),
+            mentionSoundCustomUrlInput: modal.querySelector('#tm-mention-sound-custom-url-input'),
+            mentionSoundCooldownInput: modal.querySelector('#tm-mention-sound-cooldown-input'),
+            mentionSoundTestBtn: modal.querySelector('#tm-mention-sound-test'),
+            mentionSaveBtn: modal.querySelector('#tm-mention-save'),
+            fontSizeRange: modal.querySelector('#tm-font-size-range'),
+            fontSizeValue: modal.querySelector('#tm-font-size-value'),
+            fontSizeDecreaseBtn: modal.querySelector('#tm-font-size-decrease'),
+            fontSizeIncreaseBtn: modal.querySelector('#tm-font-size-increase'),
+            fontSizeSaveBtn: modal.querySelector('#tm-font-size-save'),
+            fontSizeResetBtn: modal.querySelector('#tm-font-size-reset'),
+            linkifyUrlsToggle: modal.querySelector('#tm-linkify-urls-toggle'),
+            chatScrollbarToggle: modal.querySelector('#tm-chat-scrollbar-toggle'),
+            messageActionsLeftToggle: modal.querySelector('#tm-message-actions-left-toggle'),
+            chatInputToolbarInlineToggle: modal.querySelector('#tm-chat-input-toolbar-inline-toggle'),
+            chatInputToolbarAlignRightToggle: modal.querySelector('#tm-chat-input-toolbar-align-right-toggle'),
+            hideChatFooterToggle: modal.querySelector('#tm-hide-chat-footer-toggle'),
+            embedUrlImagesToggle: modal.querySelector('#tm-embed-url-images-toggle'),
+            lightThemeToggle: modal.querySelector('#tm-light-theme-toggle'),
+            resetStatsLayoutBtn: modal.querySelector('#tm-reset-stats-layout'),
+            hideStatsToggle: modal.querySelector('#tm-hide-stats-toggle'),
+            debugToggle: modal.querySelector('#tm-debug-toggle'),
+            homeCollapseToggle: modal.querySelector('#tm-home-collapse-toggle-setting'),
+            feedback: modal.querySelector('#tm-feedback')
+        };
+    }
+
+    function getSelectedSettingsMentionSoundScope(elements) {
+        return normalizeMentionSoundScope(
+            elements.mentionSoundScopeGroup?.getAttribute('data-tm-sound-scope') || mentionSettings.soundScope
+        );
+    }
+
+    function syncSettingsMentionSoundControls(elements) {
+        const soundScope = getSelectedSettingsMentionSoundScope(elements);
+        const soundEnabled = isMentionSoundScopeEnabled(soundScope);
+        const customSoundSelected = elements.mentionSoundStyleSelect?.value === 'custom';
+
+        if (elements.mentionSoundScopeGroup instanceof HTMLElement) {
+            elements.mentionSoundScopeGroup.setAttribute('data-tm-sound-scope', soundScope);
+        }
+
+        elements.mentionSoundScopeButtons.forEach((button) => {
+            if (!(button instanceof HTMLButtonElement)) return;
+
+            const isActive = normalizeMentionSoundScope(button.getAttribute('data-tm-mention-sound-scope')) === soundScope;
+            button.style.background = isActive ? '#166534' : '#27272a';
+            button.style.borderColor = isActive ? 'rgba(74,222,128,0.42)' : 'rgba(255,255,255,0.08)';
+            button.style.color = isActive ? '#ecfdf5' : '#e4e4e7';
+            button.style.boxShadow = isActive ? 'inset 0 1px 0 rgba(255,255,255,0.08), 0 0 0 1px rgba(34,197,94,0.12)' : 'none';
+        });
+
+        if (elements.mentionSoundOptions instanceof HTMLElement) {
+            elements.mentionSoundOptions.style.display = soundEnabled ? 'flex' : 'none';
+        }
+
+        if (elements.mentionSoundStyleSelect instanceof HTMLSelectElement) {
+            elements.mentionSoundStyleSelect.disabled = !soundEnabled;
+        }
+
+        if (elements.mentionSoundCooldownInput instanceof HTMLInputElement) {
+            elements.mentionSoundCooldownInput.disabled = !soundEnabled;
+        }
+
+        if (elements.mentionSoundCustomUrlInput instanceof HTMLInputElement) {
+            elements.mentionSoundCustomUrlInput.disabled = !soundEnabled || !customSoundSelected;
+        }
+
+        if (elements.mentionSoundTestBtn instanceof HTMLButtonElement) {
+            elements.mentionSoundTestBtn.disabled = !soundEnabled;
+            elements.mentionSoundTestBtn.style.cursor = soundEnabled ? 'pointer' : 'not-allowed';
+        }
+    }
+
+    function syncSettingsHighlightPreview(elements) {
+        const opacityPercent = parseOpacityPercentInput(
+            elements.highlightOpacityInput?.value,
+            DEFAULT_HIGHLIGHT_OPACITY
+        );
+        const previewColor = normalizeHexColor(elements.highlightColorInput?.value, DEFAULT_HIGHLIGHT_COLOR);
+        const previewAlpha = opacityPercent / 100;
+        const previewAccent = hexToRgba(previewColor, Math.min(1, previewAlpha * 5.15));
+        const previewUsername = normalizeName(elements.highlightUserInput?.value || '') || 'pseudo';
+
+        if (elements.highlightOpacityInput instanceof HTMLInputElement) {
+            elements.highlightOpacityInput.value = String(opacityPercent);
+        }
+
+        if (elements.highlightOpacityValue instanceof HTMLElement) {
+            elements.highlightOpacityValue.textContent = `${opacityPercent}%`;
+        }
+
+        if (elements.highlightPreview instanceof HTMLElement) {
+            elements.highlightPreview.style.background = hexToRgba(previewColor, previewAlpha);
+            elements.highlightPreview.style.border = `1px solid ${previewAccent}`;
+            elements.highlightPreview.style.boxShadow = `inset 3px 0 0 ${previewAccent}`;
+        }
+
+        if (elements.highlightPreviewMeta instanceof HTMLElement) {
+            elements.highlightPreviewMeta.textContent = `Mise en avant : ${previewUsername}`;
+        }
+
+        if (elements.highlightPreviewText instanceof HTMLElement) {
+            elements.highlightPreviewText.textContent = `Exemple de message de ${previewUsername} mis en avant.`;
+        }
+    }
+
+    function syncSettingsMentionPreview(elements) {
+        const previewColor = normalizeHexColor(elements.mentionColorInput?.value, DEFAULT_MENTION_COLOR);
+        const previewOpacity = parseOpacityPercentInput(elements.mentionOpacityInput?.value, mentionSettings.opacityPercent);
+        const previewAlpha = previewOpacity / 100;
+        const previewAccent = hexToRgba(previewColor, Math.min(1, previewAlpha * 4.55));
+        const previewUsername = normalizeName(elements.mentionUserInput?.value || '') || 'moi';
+
+        if (elements.mentionOpacityInput instanceof HTMLInputElement) {
+            elements.mentionOpacityInput.value = String(previewOpacity);
+        }
+
+        if (elements.mentionOpacityValue instanceof HTMLElement) {
+            elements.mentionOpacityValue.textContent = `${previewOpacity}%`;
+        }
+
+        if (elements.mentionPreview instanceof HTMLElement) {
+            elements.mentionPreview.style.background = hexToRgba(previewColor, previewAlpha);
+            elements.mentionPreview.style.border = `1px solid ${previewAccent}`;
+            elements.mentionPreview.style.boxShadow = `inset 3px 0 0 ${previewAccent}`;
+        }
+
+        if (elements.mentionPreviewMeta instanceof HTMLElement) {
+            elements.mentionPreviewMeta.textContent = `Mention @${previewUsername}`;
+        }
+
+        if (elements.mentionPreviewText instanceof HTMLElement) {
+            elements.mentionPreviewText.textContent = `Exemple de message contenant @${previewUsername}.`;
+        }
+    }
+
+    function refreshSettingsHiddenUsersList(elements, setFeedback) {
+        if (!(elements.hiddenUsersList instanceof HTMLElement)) return;
+
+        const users = [...hiddenUsers].sort((a, b) => a.localeCompare(b, 'fr'));
+        elements.hiddenUsersList.innerHTML = '';
+
+        if (users.length === 0) {
+            const empty = document.createElement('div');
+            empty.textContent = '(aucun)';
+            empty.style.fontSize = '12px';
+            empty.style.color = '#a1a1aa';
+            elements.hiddenUsersList.appendChild(empty);
+            return;
+        }
+
+        for (const user of users) {
+            const chip = document.createElement('button');
+            chip.type = 'button';
+            chip.textContent = user;
+            chip.style.border = '1px solid rgba(59,130,246,0.25)';
+            chip.style.background = 'rgba(59,130,246,0.10)';
+            chip.style.color = '#93c5fd';
+            chip.style.borderRadius = '999px';
+            chip.style.padding = '6px 10px';
+            chip.style.fontSize = '12px';
+            chip.style.cursor = 'pointer';
+            chip.style.lineHeight = '1.2';
+
+            chip.addEventListener('click', () => {
+                if (!(elements.userInput instanceof HTMLInputElement)) return;
+                elements.userInput.value = user;
+                elements.userInput.focus();
+                elements.userInput.select();
+                setFeedback(`Pseudo chargé : ${user}`);
+            });
+
+            elements.hiddenUsersList.appendChild(chip);
+        }
+    }
+
+    function refreshSettingsHighlightedUsersList(elements, setFeedback) {
+        if (!(elements.highlightUsersList instanceof HTMLElement)) return;
+
+        const users = Object.entries(highlightedUsers)
+            .sort((a, b) => a[0].localeCompare(b[0], 'fr'));
+
+        elements.highlightUsersList.innerHTML = '';
+
+        if (users.length === 0) {
+            const empty = document.createElement('div');
+            empty.textContent = '(aucun)';
+            empty.style.fontSize = '12px';
+            empty.style.color = '#a1a1aa';
+            elements.highlightUsersList.appendChild(empty);
+            return;
+        }
+
+        for (const [user, config] of users) {
+            const color = normalizeHexColor(config?.color, DEFAULT_HIGHLIGHT_COLOR);
+            const opacityPercent = parseOpacityPercentInput(config?.opacityPercent, DEFAULT_HIGHLIGHT_OPACITY);
+            const chip = document.createElement('button');
+            chip.type = 'button';
+            chip.textContent = user;
+            chip.style.border = `1px solid ${hexToRgba(color, 0.38)}`;
+            chip.style.background = hexToRgba(color, opacityPercent / 100);
+            chip.style.color = color;
+            chip.style.borderRadius = '999px';
+            chip.style.padding = '6px 10px';
+            chip.style.fontSize = '12px';
+            chip.style.cursor = 'pointer';
+            chip.style.lineHeight = '1.2';
+
+            chip.addEventListener('click', () => {
+                if (!(elements.highlightUserInput instanceof HTMLInputElement) || !(elements.highlightColorInput instanceof HTMLInputElement)) {
+                    return;
+                }
+
+                elements.highlightUserInput.value = user;
+                elements.highlightColorInput.value = normalizeHexColor(color);
+                if (elements.highlightOpacityInput instanceof HTMLInputElement) {
+                    elements.highlightOpacityInput.value = String(opacityPercent);
+                }
+                syncSettingsHighlightPreview(elements);
+                elements.highlightUserInput.focus();
+                elements.highlightUserInput.select();
+                setFeedback(`Mise en avant chargee : ${user}`);
+            });
+
+            elements.highlightUsersList.appendChild(chip);
+        }
+    }
+
+    function applyMentionSettingsToModalInputs(elements) {
+        if (elements.mentionUserInput instanceof HTMLInputElement) {
+            elements.mentionUserInput.value = mentionSettings.username;
+        }
+        if (elements.mentionColorInput instanceof HTMLInputElement) {
+            elements.mentionColorInput.value = mentionSettings.color;
+        }
+        if (elements.mentionOpacityInput instanceof HTMLInputElement) {
+            elements.mentionOpacityInput.value = String(mentionSettings.opacityPercent);
+        }
+        if (elements.mentionBlinkInput instanceof HTMLInputElement) {
+            elements.mentionBlinkInput.value = String(mentionSettings.blinkSeconds);
+        }
+        if (elements.mentionKeepHighlightToggle instanceof HTMLInputElement) {
+            elements.mentionKeepHighlightToggle.checked = mentionSettings.keepHighlightAfterBlink;
+        }
+        if (elements.mentionIncludeReplyToggle instanceof HTMLInputElement) {
+            elements.mentionIncludeReplyToggle.checked = mentionSettings.includeReplyContext;
+        }
+        if (elements.mentionSoundScopeGroup instanceof HTMLElement) {
+            elements.mentionSoundScopeGroup.setAttribute('data-tm-sound-scope', mentionSettings.soundScope || DEFAULT_MENTION_SOUND_SCOPE);
+        }
+        if (elements.mentionSoundStyleSelect instanceof HTMLSelectElement) {
+            elements.mentionSoundStyleSelect.value = mentionSettings.soundStyle;
+        }
+        if (elements.mentionSoundCustomUrlInput instanceof HTMLInputElement) {
+            elements.mentionSoundCustomUrlInput.value = mentionSettings.soundCustomUrl || '';
+        }
+        if (elements.mentionSoundCooldownInput instanceof HTMLInputElement) {
+            elements.mentionSoundCooldownInput.value = String(mentionSettings.soundCooldownSeconds);
+        }
+
+        syncSettingsMentionPreview(elements);
+        syncSettingsMentionSoundControls(elements);
+    }
+
+    /**
+     * Construit l'API interne de la modale de paramètres pour mutualiser feedback et rafraîchissements UI.
+     *
+     * @param {Object.<string, Element|null>} elements
+     * @returns {Object}
+     */
+    function createSettingsModalController(elements) {
+        function setFeedback(message, isError = false) {
+            if (!(elements.feedback instanceof HTMLElement)) return;
+            elements.feedback.textContent = message;
+            elements.feedback.style.color = isError ? '#fca5a5' : '#93c5fd';
+        }
+
+        function syncSavedPhrasesMainSummary() {
+            if (elements.phrasesSummary instanceof HTMLElement) {
+                elements.phrasesSummary.textContent = formatSavedPhrasesSummaryLabel();
+            }
+        }
+
+        function syncFontSizeValueLabel() {
+            if (elements.fontSizeValue instanceof HTMLElement && elements.fontSizeRange instanceof HTMLInputElement) {
+                elements.fontSizeValue.textContent = `${elements.fontSizeRange.value}%`;
+            }
+        }
+
+        function setPreviewFontScale(scale) {
+            if (!(elements.fontSizeRange instanceof HTMLInputElement)) return;
+            elements.fontSizeRange.value = formatChatFontScalePercent(scale);
+            syncFontSizeValueLabel();
+            applyChatFontScale(scale);
+        }
+
+        return {
+            setFeedback,
+            syncSavedPhrasesMainSummary,
+            getSelectedMentionSoundScope: () => getSelectedSettingsMentionSoundScope(elements),
+            syncMentionSoundControlsState: () => syncSettingsMentionSoundControls(elements),
+            syncHighlightOpacityValue: () => syncSettingsHighlightPreview(elements),
+            syncMentionOpacityPreview: () => syncSettingsMentionPreview(elements),
+            refreshHiddenUsersList: () => refreshSettingsHiddenUsersList(elements, setFeedback),
+            refreshHighlightedUsersList: () => refreshSettingsHighlightedUsersList(elements, setFeedback),
+            syncFontSizeValueLabel,
+            setPreviewFontScale,
+            applyMentionSettingsToInputs: () => applyMentionSettingsToModalInputs(elements)
+        };
+    }
+
+    function initializeSettingsModal(elements, controls) {
+        controls.refreshHiddenUsersList();
+        controls.refreshHighlightedUsersList();
+        elements.userInput?.focus();
+        controls.syncHighlightOpacityValue();
+        controls.syncMentionSoundControlsState();
+        controls.syncMentionOpacityPreview();
+        controls.syncFontSizeValueLabel();
+    }
+
+    function bindSettingsModalBlacklistEvents(elements, controls) {
+        elements.toggleBtn?.addEventListener('click', () => {
+            const result = addOrToggleUser(elements.userInput?.value);
+            controls.setFeedback(result.message, !result.ok);
+            controls.refreshHiddenUsersList();
+            elements.userInput?.focus();
+            elements.userInput?.select();
+        });
+
+        elements.userInput?.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter') return;
+            event.preventDefault();
+            elements.toggleBtn?.click();
+        });
+
+        elements.highlightSaveBtn?.addEventListener('click', () => {
+            const result = addOrUpdateHighlightedUser(
+                elements.highlightUserInput?.value,
+                elements.highlightColorInput?.value,
+                elements.highlightOpacityInput?.value
+            );
+            controls.setFeedback(result.message, !result.ok);
+            controls.refreshHighlightedUsersList();
+            elements.highlightUserInput?.focus();
+            elements.highlightUserInput?.select();
+        });
+
+        elements.highlightRemoveBtn?.addEventListener('click', () => {
+            const result = removeHighlightedUser(elements.highlightUserInput?.value);
+            controls.setFeedback(result.message, !result.ok);
+            controls.refreshHighlightedUsersList();
+            elements.highlightUserInput?.focus();
+            elements.highlightUserInput?.select();
+        });
+
+        elements.highlightUserInput?.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter') return;
+            event.preventDefault();
+            elements.highlightSaveBtn?.click();
+        });
+        elements.highlightUserInput?.addEventListener('input', controls.syncHighlightOpacityValue);
+        elements.highlightColorInput?.addEventListener('input', controls.syncHighlightOpacityValue);
+        elements.highlightOpacityInput?.addEventListener('input', controls.syncHighlightOpacityValue);
+    }
+
+    function bindSettingsModalMentionEvents(elements, controls) {
+        elements.mentionSaveBtn?.addEventListener('click', () => {
+            const result = updateMentionSettings(
+                elements.mentionUserInput?.value,
+                elements.mentionColorInput?.value,
+                elements.mentionOpacityInput?.value,
+                elements.mentionBlinkInput?.value,
+                elements.mentionKeepHighlightToggle?.checked,
+                elements.mentionIncludeReplyToggle?.checked,
+                controls.getSelectedMentionSoundScope(),
+                elements.mentionSoundStyleSelect?.value,
+                elements.mentionSoundCustomUrlInput?.value,
+                elements.mentionSoundCooldownInput?.value
+            );
+
+            controls.applyMentionSettingsToInputs();
+            controls.setFeedback(result.message, !result.ok);
+        });
+
+        elements.mentionUserInput?.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter') return;
+            event.preventDefault();
+            elements.mentionSaveBtn?.click();
+        });
+        elements.mentionUserInput?.addEventListener('input', controls.syncMentionOpacityPreview);
+        elements.mentionColorInput?.addEventListener('input', controls.syncMentionOpacityPreview);
+        elements.mentionOpacityInput?.addEventListener('input', controls.syncMentionOpacityPreview);
+        elements.mentionBlinkInput?.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter') return;
+            event.preventDefault();
+            elements.mentionSaveBtn?.click();
+        });
+        elements.mentionSoundCooldownInput?.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter') return;
+            event.preventDefault();
+            elements.mentionSaveBtn?.click();
+        });
+        elements.mentionSoundCustomUrlInput?.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter') return;
+            event.preventDefault();
+            elements.mentionSaveBtn?.click();
+        });
+
+        elements.mentionSoundScopeButtons.forEach((button) => {
+            if (!(button instanceof HTMLButtonElement)) return;
+            button.addEventListener('click', () => {
+                const scope = normalizeMentionSoundScope(button.getAttribute('data-tm-mention-sound-scope'));
+                elements.mentionSoundScopeGroup?.setAttribute('data-tm-sound-scope', scope);
+                controls.syncMentionSoundControlsState();
+            });
+        });
+        elements.mentionSoundStyleSelect?.addEventListener('change', controls.syncMentionSoundControlsState);
+        elements.mentionSoundTestBtn?.addEventListener('click', async () => {
+            if (!isMentionSoundScopeEnabled(controls.getSelectedMentionSoundScope())) return;
+
+            const played = await playMentionNotificationSound(
+                elements.mentionSoundStyleSelect?.value,
+                elements.mentionSoundCustomUrlInput?.value
+            );
+            controls.setFeedback(
+                played ? 'Son de notification testé.' : 'Impossible de jouer le son pour le moment.',
+                !played
+            );
+        });
+    }
+
+    function bindSettingsModalAccessibilityEvents(elements, controls) {
+        elements.fontSizeRange?.addEventListener('input', () => {
+            controls.syncFontSizeValueLabel();
+            applyChatFontScale(parseChatFontScalePercentInput(elements.fontSizeRange.value, chatFontScale));
+        });
+        elements.fontSizeDecreaseBtn?.addEventListener('click', () => {
+            const nextScale = parseChatFontScalePercentInput(
+                Number(elements.fontSizeRange?.value || formatChatFontScalePercent()) - 5,
+                chatFontScale
+            );
+            controls.setPreviewFontScale(nextScale);
+        });
+        elements.fontSizeIncreaseBtn?.addEventListener('click', () => {
+            const nextScale = parseChatFontScalePercentInput(
+                Number(elements.fontSizeRange?.value || formatChatFontScalePercent()) + 5,
+                chatFontScale
+            );
+            controls.setPreviewFontScale(nextScale);
+        });
+        elements.fontSizeSaveBtn?.addEventListener('click', () => {
+            const nextScale = parseChatFontScalePercentInput(
+                elements.fontSizeRange?.value || formatChatFontScalePercent(),
+                chatFontScale
+            );
+            saveChatFontScale(nextScale);
+            applyChatFontScale();
+            controls.setPreviewFontScale(chatFontScale);
+            controls.setFeedback(`Taille de police enregistrée : ${formatChatFontScalePercent()}%.`);
+        });
+        elements.fontSizeResetBtn?.addEventListener('click', () => {
+            saveChatFontScale(DEFAULT_CHAT_FONT_SCALE);
+            applyChatFontScale();
+            controls.setPreviewFontScale(chatFontScale);
+            controls.setFeedback('Taille de police réinitialisée.');
+        });
+    }
+
+    function bindSettingsModalConfigEvents(elements, controls) {
+        elements.phrasesConfigureBtn?.addEventListener('click', openSavedPhrasesConfigModal);
+        elements.scriptConfigExportBtn?.addEventListener('click', () => {
+            const result = downloadScriptConfigExport();
+            controls.setFeedback(result.message, !result.ok);
+        });
+        elements.scriptConfigImportBtn?.addEventListener('click', () => {
+            elements.scriptConfigImportFileInput?.click();
+        });
+        elements.scriptConfigImportFileInput?.addEventListener('change', async () => {
+            const selectedFile = elements.scriptConfigImportFileInput instanceof HTMLInputElement
+                ? elements.scriptConfigImportFileInput.files?.[0]
+                : null;
+            if (!selectedFile) return;
+
+            try {
+                const fileContent = await selectedFile.text();
+                const parsedContent = JSON.parse(fileContent);
+                const result = importScriptConfiguration(parsedContent);
+
+                if (result.ok) {
+                    closeSettingsModal();
+                    showToast(result.message);
+                } else {
+                    controls.setFeedback(result.message, true);
+                }
+            } catch (e) {
+                controls.setFeedback('Import impossible : fichier JSON invalide.', true);
+            } finally {
+                if (elements.scriptConfigImportFileInput instanceof HTMLInputElement) {
+                    elements.scriptConfigImportFileInput.value = '';
+                }
+            }
+        });
+    }
+
+    function bindSettingsModalFeatureToggleEvents(elements, controls, currentPageLabel) {
+        elements.phrasesEnabledToggle?.addEventListener('change', () => {
+            saveSavedPhrasesEnabled(elements.phrasesEnabledToggle.checked);
+            controls.syncSavedPhrasesMainSummary();
+
+            if (savedPhrasesEnabled) {
+                injectSavedPhrasesToolbar();
+                controls.setFeedback('Réponses rapides activées.');
+                return;
+            }
+
+            removeSavedPhrasesToolbar();
+            controls.setFeedback('Réponses rapides désactivées.');
+        });
+
+        elements.klipyGifsToggle?.addEventListener('change', () => {
+            saveKlipyGifsEnabled(elements.klipyGifsToggle.checked);
+
+            if (klipyGifsEnabled) {
+                injectKlipyGifToolbar();
+                controls.setFeedback('Bouton GIF Klipy activé.');
+                return;
+            }
+
+            removeKlipyGifToolbar();
+            controls.setFeedback('Bouton GIF Klipy désactivé.');
+        });
+
+        elements.linkifyUrlsToggle?.addEventListener('change', () => {
+            saveLinkifyUrlsEnabled(elements.linkifyUrlsToggle.checked);
+            processAllMessages();
+            controls.setFeedback(
+                linkifyUrlsEnabled ? 'URLs cliquables activées.' : 'URLs cliquables désactivées.'
+            );
+        });
+
+        elements.chatScrollbarToggle?.addEventListener('change', () => {
+            saveChatScrollbarEnabled(elements.chatScrollbarToggle.checked);
+            applyChatPageScrollbarState();
+            controls.setFeedback(chatScrollbarEnabled ? 'Ascenseur du chat activé.' : 'Ascenseur du chat désactivé.');
+        });
+
+        elements.messageActionsLeftToggle?.addEventListener('change', () => {
+            saveMessageActionsLeftEnabled(elements.messageActionsLeftToggle.checked);
+            applyMessageActionsPositionState();
+            processAllMessages();
+            controls.setFeedback(
+                messageActionsLeftEnabled
+                    ? 'Actions natives des messages déplacées à gauche.'
+                    : 'Actions natives des messages replacées à droite.'
+            );
+        });
+
+        elements.chatInputToolbarInlineToggle?.addEventListener('change', () => {
+            saveChatInputToolbarInline(elements.chatInputToolbarInlineToggle.checked);
+            applyChatInputToolbarAlignmentState();
+            controls.setFeedback(
+                chatInputToolbarInline
+                    ? 'Barre d’outils du chat déplacée sur la même ligne que l’input.'
+                    : 'Barre d’outils du chat replacée au-dessus de l’input.'
+            );
+        });
+
+        elements.chatInputToolbarAlignRightToggle?.addEventListener('change', () => {
+            saveChatInputToolbarAlignRight(elements.chatInputToolbarAlignRightToggle.checked);
+            applyChatInputToolbarAlignmentState();
+            controls.setFeedback(
+                chatInputToolbarAlignRight
+                    ? (chatInputToolbarInline
+                        ? 'Barre d’outils du chat alignée à droite de l’input.'
+                        : 'Barre d’outils du chat alignée à droite au-dessus de l’input.')
+                    : (chatInputToolbarInline
+                        ? 'Barre d’outils du chat alignée à gauche de l’input.'
+                        : 'Barre d’outils du chat alignée à gauche au-dessus de l’input.')
+            );
+        });
+
+        elements.hideChatFooterToggle?.addEventListener('change', () => {
+            saveHideChatFooterEnabled(elements.hideChatFooterToggle.checked);
+            applyChatFooterVisibilityState();
+            controls.setFeedback(
+                hideChatFooterEnabled
+                    ? 'Pied de page masqué sur la page chat.'
+                    : 'Pied de page réaffiché sur la page chat.'
+            );
+        });
+
+        elements.embedUrlImagesToggle?.addEventListener('change', () => {
+            saveEmbedUrlImagesEnabled(elements.embedUrlImagesToggle.checked);
+            processAllMessages();
+            controls.setFeedback(
+                embedUrlImagesEnabled
+                    ? 'Prévisualisation des images au survol activée.'
+                    : 'Prévisualisation des images au survol désactivée.'
+            );
+        });
+
+        elements.lightThemeToggle?.addEventListener('change', () => {
+            saveLightThemeEnabled(elements.lightThemeToggle.checked);
+            applyLightThemeState();
+            processAllMessages();
+            if (lightThemeEnabled) {
+                showToast(`Thème clair beta activé pour ${currentPageLabel}. Fonction encore récente, rendu susceptible d’évoluer.`);
+            }
+            controls.setFeedback(
+                lightThemeEnabled
+                    ? `Thème clair activé pour ${currentPageLabel}.`
+                    : `Thème clair désactivé pour ${currentPageLabel}.`
+            );
+        });
+
+        elements.hideStatsToggle?.addEventListener('change', () => {
+            saveStatsHidden(elements.hideStatsToggle.checked);
+            applyStatsBoxVisibilityState();
+            controls.setFeedback(
+                statsHidden
+                    ? `Stats box masquée pour ${currentPageLabel}.`
+                    : `Stats box affichée pour ${currentPageLabel}.`
+            );
+        });
+
+        elements.resetStatsLayoutBtn?.addEventListener('click', () => {
+            resetPosition();
+            resetStatsBoxSize();
+            applyStatsBoxDisplayModeState();
+            applyBoxPosition(loadPosition());
+            constrainStatsBoxToViewport(false, false);
+            updateStatsBox();
+            controls.setFeedback(`Taille et position de la stats box réinitialisées pour ${currentPageLabel}.`);
+        });
+
+        elements.debugToggle?.addEventListener('change', () => {
+            saveDebugMode(elements.debugToggle.checked);
+            processAllMessages();
+            updateStatsBox();
+            controls.setFeedback(debugMode ? 'Mode debug activé.' : 'Mode debug désactivé.');
+        });
+
+        elements.homeCollapseToggle?.addEventListener('change', () => {
+            toggleHomepageChatCollapsed(elements.homeCollapseToggle.checked);
+            controls.setFeedback(homeChatCollapsed ? 'Shoutbox d’accueil repliée.' : 'Shoutbox d’accueil réaffichée.');
+        });
+    }
+
+    function bindSettingsModalEvents(modal, overlay, elements, controls, currentPageLabel) {
+        elements.closeBtn?.addEventListener('click', closeSettingsModal);
+        overlay.addEventListener('click', closeSettingsModal);
+
+        bindSettingsModalBlacklistEvents(elements, controls);
+        bindSettingsModalMentionEvents(elements, controls);
+        bindSettingsModalAccessibilityEvents(elements, controls);
+        bindSettingsModalConfigEvents(elements, controls);
+        bindSettingsModalFeatureToggleEvents(elements, controls, currentPageLabel);
+
+        modal.addEventListener('keydown', (event) => {
+            if (event.key !== 'Escape') return;
+            event.preventDefault();
+            closeSettingsModal();
+        });
+    }
+
+    function createSettingsCheckboxInputStyle(accentColor) {
+        return `
+            width:16px;
+            height:16px;
+            accent-color:${accentColor};
+            cursor:pointer;
+            flex-shrink:0;
+        `;
+    }
+
+    function getSettingsModalStyles(settingsColumnCount) {
+        const settingsCheckboxLabelStyle = `
+            display:flex;
+            align-items:center;
+            gap:10px;
+            cursor:pointer;
+            font-size:12px;
+            color:#d4d4d8;
+        `;
+
+        return {
+            settingsColumnCount,
+            settingsCardStyle: `
+                display:inline-block;
+                width:100%;
+                padding:12px;
+                margin:0 0 14px 0;
+                border-radius:14px;
+                background:rgba(255,255,255,0.03);
+                border:1px solid rgba(255,255,255,0.06);
+                box-sizing:border-box;
+                break-inside:avoid;
+                vertical-align:top;
+            `,
+            settingsFullWidthCardStyle: `
+                width:100%;
+                padding:12px;
+                margin:0 0 14px 0;
+                border-radius:14px;
+                background:rgba(255,255,255,0.03);
+                border:1px solid rgba(255,255,255,0.06);
+                box-sizing:border-box;
+            `,
+            settingsCheckboxLabelStyle,
+            settingsCheckboxLabelWithMarginStyle: `
+                ${settingsCheckboxLabelStyle}
+                margin-top:12px;
+            `,
+            accessibilityCheckboxAccentColor: '#06b6d4'
+        };
+    }
+
+    function renderSettingsModalHeader(currentPageLabel) {
+        return `
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px;">
+                <div>
+                    <div style="font-size:16px;font-weight:700;">Paramètres chat</div>
+                    <div style="font-size:12px;color:#a1a1aa;margin-top:4px;">Vue actuelle : ${currentPageLabel}</div>
+                </div>
+                <button id="tm-close-modal" style="
+                    border:none;
+                    background:#27272a;
+                    color:#fff;
+                    width:34px;
+                    height:34px;
+                    border-radius:10px;
+                    cursor:pointer;
+                    font-size:18px;
+                    line-height:1;
+                ">×</button>
+            </div>
+        `;
+    }
+
+    function renderSettingsTipsCard(isChatView, settingsFullWidthCardStyle) {
+        return `
+            <div style="${settingsFullWidthCardStyle}">
+                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Astuces</div>
+
+                <div style="display:grid;gap:10px;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));">
+                    <div style="padding:10px 12px;border-radius:12px;background:rgba(37,99,235,0.12);border:1px solid rgba(37,99,235,0.24);">
+                        <div style="font-size:12px;font-weight:700;color:#dbeafe;">Ctrl+Alt+C ou Ctrl+Cmd+C</div>
+                        <div style="margin-top:4px;font-size:11px;color:#93c5fd;line-height:1.45;">
+                            Ouvre directement cette page de paramètres.
+                        </div>
+                    </div>
+
+                    <div style="padding:10px 12px;border-radius:12px;background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.24);">
+                        <div style="font-size:12px;font-weight:700;color:#bbf7d0;">${formatAfkShortcutLabel()}</div>
+                        <div style="margin-top:4px;font-size:11px;color:#86efac;line-height:1.45;">
+                            Active ou coupe le mode AFK sur le chat en cours, avec historique dédié des mentions et réponses.
+                        </div>
+                    </div>
+
+                    <div style="padding:10px 12px;border-radius:12px;background:rgba(124,58,237,0.14);border:1px solid rgba(139,92,246,0.26);">
+                        <div style="font-size:12px;font-weight:700;color:#ddd6fe;">Ctrl+Alt+R ou Ctrl+Cmd+R</div>
+                        <div style="margin-top:4px;font-size:11px;color:#c4b5fd;line-height:1.45;">
+                            Ouvre directement les réponses rapides. Utilise ensuite les flèches, `Home`, `End` et `Entrée` pour naviguer sans souris.
+                        </div>
+                    </div>
+
+                    <div style="padding:10px 12px;border-radius:12px;background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.24);">
+                        <div style="font-size:12px;font-weight:700;color:#fde68a;">Alt+clic sur un pseudo</div>
+                        <div style="margin-top:4px;font-size:11px;color:#fcd34d;line-height:1.45;">
+                            Ajoute ou retire rapidement un utilisateur de la blacklist.
+                        </div>
+                    </div>
+
+                    <div style="padding:10px 12px;border-radius:12px;background:rgba(124,58,237,0.14);border:1px solid rgba(139,92,246,0.26);">
+                        <div style="font-size:12px;font-weight:700;color:#ddd6fe;">Exporter la config avant nettoyage navigateur</div>
+                        <div style="margin-top:4px;font-size:11px;color:#c4b5fd;line-height:1.45;">
+                            Pense à exporter la configuration du script avant de supprimer les données du navigateur, changer de profil ou réinstaller Tampermonkey.
+                        </div>
+                    </div>
+
+                    ${isChatView ? `
+                    <div style="padding:10px 12px;border-radius:12px;background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.24);">
+                        <div style="font-size:12px;font-weight:700;color:#bbf7d0;">Double-clic sur un message</div>
+                        <div style="margin-top:4px;font-size:11px;color:#86efac;line-height:1.45;">
+                            Lance la réponse au message sans passer par le bouton d’action.
+                        </div>
+                    </div>
+
+                    <div style="padding:10px 12px;border-radius:12px;background:rgba(6,182,212,0.12);border:1px solid rgba(6,182,212,0.24);">
+                        <div style="font-size:12px;font-weight:700;color:#a5f3fc;">Clic long sur un message</div>
+                        <div style="margin-top:4px;font-size:11px;color:#67e8f9;line-height:1.45;">
+                            Ouvre les réactions, avec le picker repositionné à droite du pointeur.
+                        </div>
+                    </div>
+                    ` : `
+                    <div style="padding:10px 12px;border-radius:12px;background:rgba(63,63,70,0.6);border:1px solid rgba(255,255,255,0.08);">
+                        <div style="font-size:12px;font-weight:700;color:#f4f4f5;">Raccourcis du chat dédié</div>
+                        <div style="margin-top:4px;font-size:11px;color:#a1a1aa;line-height:1.45;">
+                            Les gestes double-clic pour répondre et clic long pour réagir ne sont actifs que sur la page chat, pas sur la shout de l’accueil.
+                        </div>
+                    </div>
+                    `}
+                </div>
+            </div>
+        `;
+    }
+
+    function renderSettingsHomeCard(homeView, settingsCardStyle, settingsCheckboxLabelStyle) {
+        if (!homeView) return '';
+
+        return `
+            <div style="${settingsCardStyle}">
+                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Page d’accueil</div>
+
+                <label style="${settingsCheckboxLabelStyle}">
+                    <input id="tm-home-collapse-toggle-setting" type="checkbox" ${homeChatCollapsed ? 'checked' : ''} style="${createSettingsCheckboxInputStyle('#22c55e')}">
+                    <span>Masquer la shoutbox</span>
+                </label>
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                    Permet de masquer la shoutbox sur la page d’accueil.
+                </div>
+            </div>
+        `;
+    }
+
+    function renderSettingsStatsCard(currentPageLabel, settingsCardStyle, settingsCheckboxLabelWithMarginStyle) {
+        return `
+            <div style="${settingsCardStyle}">
+                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Stats box (${currentPageLabel})</div>
+
+                <div style="font-size:11px;color:#71717a;line-height:1.5;">
+                    Glisse l’en-tête de la stats box pour la déplacer, puis attrape son coin inférieur droit pour la redimensionner. La position et la taille sont mémorisées séparément pour ${currentPageLabel}.
+                </div>
+
+                <label style="${settingsCheckboxLabelWithMarginStyle}">
+                    <input id="tm-hide-stats-toggle" type="checkbox" ${statsHidden ? 'checked' : ''} style="${createSettingsCheckboxInputStyle('#f59e0b')}">
+                    <span>Masquer complètement la stats box</span>
+                </label>
+
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
+                    <button id="tm-reset-stats-layout" style="
+                        border:none;
+                        background:#3f3f46;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">Réinitialiser taille et position</button>
+                </div>
+            </div>
+        `;
+    }
+
+    function renderSettingsAccessibilityCard(currentPageLabel, isChatView, styles) {
+        return `
+            <div style="${styles.settingsCardStyle}">
+                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Accessibilité</div>
+
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+                    <div style="font-size:12px;color:#c4c4c8;">
+                        Taille de police shoutbox
+                    </div>
+                    <div id="tm-font-size-value" style="
+                        min-width:52px;
+                        text-align:right;
+                        font-size:12px;
+                        color:#f4f4f5;
+                        font-weight:700;
+                    ">${formatChatFontScalePercent()}%</div>
+                </div>
+
+                <input id="tm-font-size-range" type="range" min="${MIN_CHAT_FONT_SCALE * 100}" max="${MAX_CHAT_FONT_SCALE * 100}" step="5" value="${formatChatFontScalePercent()}"
+                    style="
+                        width:100%;
+                        margin-top:12px;
+                        accent-color:#38bdf8;
+                        cursor:pointer;
+                    ">
+
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
+                    <button id="tm-font-size-decrease" style="
+                        border:none;
+                        background:#3f3f46;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">A-</button>
+
+                    <button id="tm-font-size-increase" style="
+                        border:none;
+                        background:#0f766e;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">A+</button>
+
+                    <button id="tm-font-size-save" style="
+                        border:none;
+                        background:#2563eb;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">Enregistrer</button>
+
+                    <button id="tm-font-size-reset" style="
+                        border:none;
+                        background:#3f3f46;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">Réinitialiser la police</button>
+                </div>
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                    Agrandit ou réduit les pseudos et les messages dans la shoutbox.
+                </div>
+
+                <label style="${styles.settingsCheckboxLabelWithMarginStyle}">
+                    <input id="tm-linkify-urls-toggle" type="checkbox" ${linkifyUrlsEnabled ? 'checked' : ''} style="${createSettingsCheckboxInputStyle(styles.accessibilityCheckboxAccentColor)}">
+                    <span>Rendre les URLs cliquables</span>
+                </label>
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                    Détecte les liens dans les messages et les transforme en liens cliquables.
+                </div>
+
+                ${isChatView ? `
+                <label style="${styles.settingsCheckboxLabelWithMarginStyle}">
+                    <input id="tm-chat-scrollbar-toggle" type="checkbox" ${chatScrollbarEnabled ? 'checked' : ''} style="${createSettingsCheckboxInputStyle(styles.accessibilityCheckboxAccentColor)}">
+                    <span>Afficher l’ascenseur du chat</span>
+                </label>
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                    Ajoute une scrollbar visible uniquement sur la zone de messages de la page chat.
+                </div>
+                ` : ''}
+
+                <label style="${styles.settingsCheckboxLabelWithMarginStyle}">
+                    <input id="tm-message-actions-left-toggle" type="checkbox" ${messageActionsLeftEnabled ? 'checked' : ''} style="${createSettingsCheckboxInputStyle(styles.accessibilityCheckboxAccentColor)}">
+                    <span>Actions des messages à gauche</span>
+                </label>
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                    Déplace les boutons Réagir / Répondre qui apparaissent au survol vers la gauche du bloc message. Utile seulement sur la page chat.
+                </div>
+
+                <label style="${styles.settingsCheckboxLabelWithMarginStyle}">
+                    <input id="tm-chat-input-toolbar-inline-toggle" type="checkbox" ${chatInputToolbarInline ? 'checked' : ''} style="${createSettingsCheckboxInputStyle(styles.accessibilityCheckboxAccentColor)}">
+                    <span>Boutons du chat sur la même ligne que l’input</span>
+                </label>
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                    Désactivé par défaut : la barre d’outils reste au-dessus du champ. Active cette option pour placer les boutons à côté de l’input.
+                </div>
+
+                <label style="${styles.settingsCheckboxLabelWithMarginStyle}">
+                    <input id="tm-chat-input-toolbar-align-right-toggle" type="checkbox" ${chatInputToolbarAlignRight ? 'checked' : ''} style="${createSettingsCheckboxInputStyle(styles.accessibilityCheckboxAccentColor)}">
+                    <span>Aligner les boutons du chat à droite</span>
+                </label>
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                    Décoché : boutons à gauche. Coché : boutons à droite, que la barre soit au-dessus du champ ou sur la même ligne.
+                </div>
+
+                ${isChatView ? `
+                <label style="${styles.settingsCheckboxLabelWithMarginStyle}">
+                    <input id="tm-hide-chat-footer-toggle" type="checkbox" ${hideChatFooterEnabled ? 'checked' : ''} style="${createSettingsCheckboxInputStyle(styles.accessibilityCheckboxAccentColor)}">
+                    <span>Masquer le footer sur la page chat</span>
+                </label>
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                    Retire le footer du site sur la page de chat dédiée donner un effet pleine écran.
+                </div>
+                ` : ''}
+
+                <label style="${styles.settingsCheckboxLabelWithMarginStyle}">
+                    <input id="tm-embed-url-images-toggle" type="checkbox" ${embedUrlImagesEnabled ? 'checked' : ''} style="${createSettingsCheckboxInputStyle(styles.accessibilityCheckboxAccentColor)}">
+                    <span>Prévisualiser les liens directs d'images au survol</span>
+                </label>
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                    Affiche un aperçu flottant uniquement pour les URLs qui pointent directement vers un fichier image.
+                </div>
+
+                <label style="${styles.settingsCheckboxLabelWithMarginStyle}">
+                    <input id="tm-light-theme-toggle" type="checkbox" ${lightThemeEnabled ? 'checked' : ''} style="${createSettingsCheckboxInputStyle(styles.accessibilityCheckboxAccentColor)}">
+                    <span>Thème clair <span style="font-weight:700;text-decoration:underline;">beta</span> pour la shoutbox</span>
+                </label>
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                    Éclaircit la zone de chat, les messages, la stats box et les toasts du script. Réglage enregistré séparément pour ${currentPageLabel}.
+                </div>
+            </div>
+        `;
+    }
+
+    function renderSettingsSavedPhrasesCard(settingsCardStyle, settingsCheckboxLabelStyle) {
+        return `
+            <div style="${settingsCardStyle}">
+                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Phrases sauvegardées</div>
+
+                <label style="${settingsCheckboxLabelStyle}">
+                    <input id="tm-phrases-enabled-toggle" type="checkbox" ${savedPhrasesEnabled ? 'checked' : ''} style="${createSettingsCheckboxInputStyle('#8b5cf6')}">
+                    <span>Activer les réponses rapides</span>
+                </label>
+
+                <div id="tm-phrases-summary" style="margin-top:10px;font-size:12px;color:#a1a1aa;line-height:1.5;">
+                    ${formatSavedPhrasesSummaryLabel()}
+                </div>
+
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
+                    <button id="tm-phrases-configure" style="
+                        border:none;
+                        background:#7c3aed;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">Configurer</button>
+                </div>
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.4;">
+                    Ouvre une fenêtre dédiée pour ajouter, retirer et gérer les réponses rapides.
+                </div>
+            </div>
+        `;
+    }
+
+    function renderSettingsConfigCard(settingsCardStyle) {
+        return `
+            <div style="${settingsCardStyle}">
+                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Sauvegarde configuration</div>
+
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <button id="tm-script-config-export" style="
+                        border:none;
+                        background:#2563eb;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">Exporter la config</button>
+
+                    <button id="tm-script-config-import" style="
+                        border:none;
+                        background:#3f3f46;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">Importer une config</button>
+                </div>
+
+                <input id="tm-script-config-import-file" type="file" accept="application/json,.json" style="display:none;">
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                    Sauvegarde tes réglages principaux, ta blacklist, tes mises en avant, tes réponses rapides ainsi que les positions et tailles mémorisées. L’historique AFK temporaire n’est pas repris.
+                </div>
+            </div>
+        `;
+    }
+
+    function renderSettingsGifCard(settingsCardStyle, settingsCheckboxLabelStyle) {
+        return `
+            <div style="${settingsCardStyle}">
+                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">GIF Klipy</div>
+
+                <label style="${settingsCheckboxLabelStyle}">
+                    <input id="tm-klipy-gifs-toggle" type="checkbox" ${klipyGifsEnabled ? 'checked' : ''} style="${createSettingsCheckboxInputStyle('#22c55e')}">
+                    <span>Activer le bouton GIF Klipy</span>
+                </label>
+
+                <div style="margin-top:10px;font-size:12px;color:#a1a1aa;line-height:1.5;">
+                    Permet d’utiliser un picker GIF directement depuis le chat.
+                </div>
+            </div>
+        `;
+    }
+
+    function renderSettingsBlacklistCard(settingsCardStyle) {
+        return `
+            <div style="${settingsCardStyle}">
+                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Blacklist</div>
+
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <input id="tm-user-input" type="text" placeholder="Pseudo"
+                        style="
+                            flex:1 1 180px;
+                            min-width:0;
+                            background:#18181b;
+                            color:#fff;
+                            border:1px solid rgba(255,255,255,0.10);
+                            border-radius:10px;
+                            padding:10px 12px;
+                            outline:none;
+                        ">
+                    <button id="tm-user-toggle" style="
+                        border:none;
+                        background:#2563eb;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">Ajouter / retirer</button>
+                </div>
+
+                <div style="margin-top:10px;font-size:12px;color:#a1a1aa;line-height:1.5;">
+                    Bloqués :
+                </div>
+
+                <div id="tm-hidden-users-list" style="
+                    margin-top:8px;
+                    display:flex;
+                    flex-wrap:wrap;
+                    gap:8px;
+                "></div>
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.4;">
+                    Clique sur un pseudo pour le charger dans le champ. Alt+clic directement sur un pseudo du chat permet de le blacklister.
+                </div>
+            </div>
+        `;
+    }
+
+    function renderSettingsHighlightCard(settingsCardStyle) {
+        return `
+            <div style="${settingsCardStyle}">
+                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Mettre en avant</div>
+
+                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+                    <input id="tm-highlight-user-input" type="text" placeholder="Pseudo"
+                        style="
+                            flex:1 1 160px;
+                            min-width:0;
+                            background:#18181b;
+                            color:#fff;
+                            border:1px solid rgba(255,255,255,0.10);
+                            border-radius:10px;
+                            padding:10px 12px;
+                            outline:none;
+                        ">
+
+                    <input id="tm-highlight-color-input" type="color" value="${DEFAULT_HIGHLIGHT_COLOR}"
+                        style="
+                            width:48px;
+                            height:40px;
+                            padding:4px;
+                            background:#18181b;
+                            border:1px solid rgba(255,255,255,0.10);
+                            border-radius:10px;
+                            cursor:pointer;
+                        ">
+
+                    <button id="tm-highlight-save" style="
+                        border:none;
+                        background:#d97706;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">Ajouter / MAJ</button>
+
+                    <button id="tm-highlight-remove" style="
+                        border:none;
+                        background:#3f3f46;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">Retirer</button>
+                </div>
+
+                <div style="display:grid;gap:8px;margin-top:12px;">
+                    <label style="display:flex;flex-direction:column;gap:6px;">
+                        <span style="display:flex;justify-content:space-between;gap:12px;font-size:12px;color:#c4c4c8;">
+                            <span>Opacité</span>
+                            <span id="tm-highlight-opacity-value">${DEFAULT_HIGHLIGHT_OPACITY}%</span>
+                        </span>
+                        <input id="tm-highlight-opacity-input" type="range" min="0" max="100" step="1" value="${DEFAULT_HIGHLIGHT_OPACITY}"
+                            title="Opacité %"
+                            style="
+                                width:100%;
+                                accent-color:#f59e0b;
+                                cursor:pointer;
+                            ">
+                    </label>
+
+                    <div>
+                        <div style="font-size:12px;color:#c4c4c8;margin-bottom:6px;">Aperçu</div>
+                        <div id="tm-highlight-preview" style="
+                            padding:10px 12px;
+                            border-radius:12px;
+                            background:rgba(245,158,11,0.14);
+                            border:1px solid rgba(245,158,11,0.42);
+                            box-shadow:inset 3px 0 0 rgba(245,158,11,0.75);
+                        ">
+                            <div style="display:flex;align-items:center;gap:8px;font-size:11px;color:#d4d4d8;margin-bottom:4px;">
+                                <span style="font-weight:700;color:#fff;">Pseudo</span>
+                                <span id="tm-highlight-preview-meta">Mise en avant</span>
+                            </div>
+                            <div id="tm-highlight-preview-text" style="font-size:12px;color:#f4f4f5;line-height:1.45;">
+                                Exemple de message mis en avant.
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div style="margin-top:10px;font-size:12px;color:#a1a1aa;line-height:1.5;">
+                    Mis en avant :
+                </div>
+
+                <div id="tm-highlight-users-list" style="
+                    margin-top:8px;
+                    display:flex;
+                    flex-wrap:wrap;
+                    gap:8px;
+                "></div>
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.4;">
+                    Clique sur un pseudo pour charger sa couleur. Les messages restent visibles mais sont surlignés avec la couleur choisie.
+                </div>
+            </div>
+        `;
+    }
+
+    function renderSettingsMentionPreviewSection() {
+        return `
+            <div style="display:grid;gap:10px;margin-top:12px;">
+                <label style="display:flex;flex-direction:column;gap:6px;">
+                    <span style="display:flex;justify-content:space-between;gap:12px;font-size:12px;color:#c4c4c8;">
+                        <span>Opacité</span>
+                        <span id="tm-mention-opacity-value">${mentionSettings.opacityPercent}%</span>
+                    </span>
+                    <input id="tm-mention-opacity-input" type="range" min="0" max="100" step="1" value="${mentionSettings.opacityPercent}"
+                        title="Opacité %"
+                        style="
+                            width:100%;
+                            accent-color:#22c55e;
+                            cursor:pointer;
+                        ">
+                </label>
+
+                <div style="font-size:11px;color:#71717a;line-height:1.4;">
+                    Ajuste la transparence de la surbrillance.
+                </div>
+
+                <div>
+                    <div style="font-size:12px;color:#c4c4c8;margin-bottom:6px;">Aperçu</div>
+                    <div id="tm-mention-preview" style="
+                        padding:10px 12px;
+                        border-radius:12px;
+                        background:rgba(34,197,94,0.18);
+                        border:1px solid rgba(34,197,94,0.45);
+                        box-shadow:inset 3px 0 0 rgba(34,197,94,0.7);
+                    ">
+                        <div style="display:flex;align-items:center;gap:8px;font-size:11px;color:#d4d4d8;margin-bottom:4px;">
+                            <span style="font-weight:700;color:#fff;">Pseudo</span>
+                            <span id="tm-mention-preview-meta">Mention @moi</span>
+                        </div>
+                        <div id="tm-mention-preview-text" style="font-size:12px;color:#f4f4f5;line-height:1.45;">
+                            Exemple de message contenant une mention.
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    function renderSettingsMentionSoundSection() {
+        return `
+            <div style="margin-top:10px;">
+                <div style="font-size:12px;color:#c4c4c8;margin-bottom:8px;">Son de notification</div>
+                <div id="tm-mention-sound-scope-group" data-tm-sound-scope="${mentionSettings.soundScope || DEFAULT_MENTION_SOUND_SCOPE}" style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <button type="button" data-tm-mention-sound-scope="off" style="
+                        border:1px solid rgba(255,255,255,0.08);
+                        background:#27272a;
+                        color:#e4e4e7;
+                        border-radius:999px;
+                        padding:8px 12px;
+                        cursor:pointer;
+                        font-size:12px;
+                        font-weight:600;
+                    ">Désactivé</button>
+                    <button type="button" data-tm-mention-sound-scope="home" style="
+                        border:1px solid rgba(255,255,255,0.08);
+                        background:#27272a;
+                        color:#e4e4e7;
+                        border-radius:999px;
+                        padding:8px 12px;
+                        cursor:pointer;
+                        font-size:12px;
+                        font-weight:600;
+                    ">Accueil</button>
+                    <button type="button" data-tm-mention-sound-scope="chat" style="
+                        border:1px solid rgba(255,255,255,0.08);
+                        background:#27272a;
+                        color:#e4e4e7;
+                        border-radius:999px;
+                        padding:8px 12px;
+                        cursor:pointer;
+                        font-size:12px;
+                        font-weight:600;
+                    ">Chat</button>
+                    <button type="button" data-tm-mention-sound-scope="both" style="
+                        border:1px solid rgba(255,255,255,0.08);
+                        background:#27272a;
+                        color:#e4e4e7;
+                        border-radius:999px;
+                        padding:8px 12px;
+                        cursor:pointer;
+                        font-size:12px;
+                        font-weight:600;
+                    ">Les deux</button>
+                </div>
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                    Choisis sur quelle vue le son doit se jouer. Le mode désactivé replie les réglages audio pour gagner de la place.
+                </div>
+            </div>
+
+            <div id="tm-mention-sound-options" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:10px;">
+                <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:#c4c4c8;">
+                    <span>Son</span>
+                    <select id="tm-mention-sound-style-select"
+                        style="
+                            min-width:120px;
+                            background:#18181b;
+                            color:#fff;
+                            border:1px solid rgba(255,255,255,0.10);
+                            border-radius:10px;
+                            padding:10px 12px;
+                            outline:none;
+                        ">
+                        <option value="ping" ${mentionSettings.soundStyle === 'ping' ? 'selected' : ''}>Ping</option>
+                        <option value="soft" ${mentionSettings.soundStyle === 'soft' ? 'selected' : ''}>Doux</option>
+                        <option value="bell" ${mentionSettings.soundStyle === 'bell' ? 'selected' : ''}>Cloche</option>
+                        <option value="double" ${mentionSettings.soundStyle === 'double' ? 'selected' : ''}>Double</option>
+                        <option value="custom" ${mentionSettings.soundStyle === 'custom' ? 'selected' : ''}>Personnalisé</option>
+                    </select>
+                </label>
+
+                <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:#c4c4c8;flex:1 1 240px;min-width:0;">
+                    <span>URL audio</span>
+                    <input id="tm-mention-sound-custom-url-input" type="text" placeholder="https://.../son.mp3" value="${escapeHtml(mentionSettings.soundCustomUrl || '')}"
+                        style="
+                            flex:1 1 180px;
+                            min-width:0;
+                            background:#18181b;
+                            color:#fff;
+                            border:1px solid rgba(255,255,255,0.10);
+                            border-radius:10px;
+                            padding:10px 12px;
+                            outline:none;
+                        ">
+                </label>
+
+                <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:#c4c4c8;">
+                    <span>Délai mini</span>
+                    <input id="tm-mention-sound-cooldown-input" type="number" min="0" max="300" step="0.5" value="${mentionSettings.soundCooldownSeconds}"
+                        style="
+                            width:90px;
+                            background:#18181b;
+                            color:#fff;
+                            border:1px solid rgba(255,255,255,0.10);
+                            border-radius:10px;
+                            padding:10px 12px;
+                            outline:none;
+                        ">
+                    <span>s</span>
+                </label>
+
+                <button id="tm-mention-sound-test" type="button" style="
+                    border:none;
+                    background:#2563eb;
+                    color:#fff;
+                    border-radius:10px;
+                    padding:10px 12px;
+                    cursor:pointer;
+                    font-weight:600;
+                ">Tester le son</button>
+            </div>
+        `;
+    }
+
+    function renderSettingsMentionCard(settingsCardStyle, settingsCheckboxLabelStyle) {
+        return `
+            <div style="${settingsCardStyle}">
+                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Mentions @moi</div>
+
+                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+                    <input id="tm-mention-user-input" type="text" placeholder="Mon pseudo" value="${escapeHtml(mentionSettings.username)}"
+                        style="
+                            flex:1 1 180px;
+                            min-width:0;
+                            background:#18181b;
+                            color:#fff;
+                            border:1px solid rgba(255,255,255,0.10);
+                            border-radius:10px;
+                            padding:10px 12px;
+                            outline:none;
+                        ">
+
+                    <input id="tm-mention-color-input" type="color" value="${mentionSettings.color}"
+                        style="
+                            width:48px;
+                            height:40px;
+                            padding:4px;
+                            background:#18181b;
+                            border:1px solid rgba(255,255,255,0.10);
+                            border-radius:10px;
+                            cursor:pointer;
+                        ">
+
+                    <input id="tm-mention-blink-input" type="number" min="0" max="30" step="0.5" value="${mentionSettings.blinkSeconds}"
+                        style="
+                            width:90px;
+                            background:#18181b;
+                            color:#fff;
+                            border:1px solid rgba(255,255,255,0.10);
+                            border-radius:10px;
+                            padding:10px 12px;
+                            outline:none;
+                        ">
+                </div>
+
+                ${renderSettingsMentionPreviewSection()}
+
+                <label style="${settingsCheckboxLabelStyle} margin-top:10px;">
+                    <input id="tm-mention-keep-highlight-toggle" type="checkbox" ${mentionSettings.keepHighlightAfterBlink ? 'checked' : ''} style="${createSettingsCheckboxInputStyle('#22c55e')}">
+                    <span>Garder la couleur après le clignotement</span>
+                </label>
+
+                <label style="${settingsCheckboxLabelStyle} margin-top:10px;">
+                    <input id="tm-mention-include-reply-toggle" type="checkbox" ${mentionSettings.includeReplyContext ? 'checked' : ''} style="${createSettingsCheckboxInputStyle('#22c55e')}">
+                    <span>Considérer aussi les réponses citées vers @moi</span>
+                </label>
+
+                ${renderSettingsMentionSoundSection()}
+
+                <div style="display:flex;justify-content:flex-start;gap:8px;flex-wrap:wrap;margin-top:12px;">
+                    <button id="tm-mention-save" style="
+                        border:none;
+                        background:#059669;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:10px 12px;
+                        cursor:pointer;
+                        font-weight:600;
+                    ">Enregistrer</button>
+                </div>
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                    Quand un message contient @tonpseudo, il est surligné avec cette couleur. Tu peux aussi inclure les réponses citées, régler l'opacité, mettre 0 seconde pour désactiver le clignotement, choisir un son si besoin et laisser le pseudo vide pour couper la surveillance.
+                </div>
+            </div>
+        `;
+    }
+
+    function renderSettingsDebugCard(settingsCardStyle, settingsCheckboxLabelStyle) {
+        return `
+            <div style="${settingsCardStyle}">
+                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Debug</div>
+
+                <label style="${settingsCheckboxLabelStyle}">
+                    <input id="tm-debug-toggle" type="checkbox" ${debugMode ? 'checked' : ''} style="${createSettingsCheckboxInputStyle('#ef4444')}">
+                    <span>Mode debug</span>
+                </label>
+
+                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                    En mode debug, les messages blacklistés ne sont pas cachés : ils sont surlignés en rouge.
+                </div>
+            </div>
+        `;
+    }
+
+    function buildSettingsModalHtml(currentPageLabel, homeView, isChatView, styles) {
+        return `
+            ${renderSettingsModalHeader(currentPageLabel)}
+            ${renderSettingsTipsCard(isChatView, styles.settingsFullWidthCardStyle)}
+
+            <div style="
+                column-count:${styles.settingsColumnCount};
+                column-gap:14px;
+            ">
+                ${renderSettingsHomeCard(homeView, styles.settingsCardStyle, styles.settingsCheckboxLabelStyle)}
+                ${renderSettingsStatsCard(currentPageLabel, styles.settingsCardStyle, styles.settingsCheckboxLabelWithMarginStyle)}
+                ${renderSettingsAccessibilityCard(currentPageLabel, isChatView, styles)}
+                ${renderSettingsSavedPhrasesCard(styles.settingsCardStyle, styles.settingsCheckboxLabelStyle)}
+                ${renderSettingsConfigCard(styles.settingsCardStyle)}
+                ${renderSettingsGifCard(styles.settingsCardStyle, styles.settingsCheckboxLabelStyle)}
+                ${renderSettingsBlacklistCard(styles.settingsCardStyle)}
+                ${renderSettingsHighlightCard(styles.settingsCardStyle)}
+                ${renderSettingsMentionCard(styles.settingsCardStyle, styles.settingsCheckboxLabelStyle)}
+                ${renderSettingsDebugCard(styles.settingsCardStyle, styles.settingsCheckboxLabelStyle)}
+            </div>
+
+            <div id="tm-feedback" style="
+                min-height:20px;
+                margin-top:4px;
+                font-size:12px;
+                color:#93c5fd;
+            "></div>
+        `;
+    }
+
     function closeImageViewer() {
         const modal = document.getElementById(IMAGE_VIEWER_MODAL_ID);
         const overlay = document.getElementById(IMAGE_VIEWER_OVERLAY_ID);
@@ -5810,292 +7510,38 @@
         tryNextCandidate();
     }
 
-    function openSavedPhraseQuickAddModal(initialText = '', sourceInput = null) {
-        if (!isSupportedPage()) return;
+    function setModalFeedback(feedbackElement, message, isError = false) {
+        if (!(feedbackElement instanceof HTMLElement)) return;
 
-        if (modalOpen) {
-            closeSettingsModal();
-        }
-
-        modalOpen = true;
-        hideImagePreview();
-
-        const normalizedInitialText = normalizeSavedPhraseText(initialText, true);
-
-        const overlay = document.createElement('div');
-        overlay.id = OVERLAY_ID;
-        overlay.style.position = 'fixed';
-        overlay.style.inset = '0';
-        overlay.style.zIndex = '1000000';
-        overlay.style.background = 'rgba(0,0,0,0.45)';
-
-        const modal = document.createElement('div');
-        modal.id = MODAL_ID;
-        modal.style.position = 'fixed';
-        modal.style.top = '50%';
-        modal.style.left = '50%';
-        modal.style.transform = 'translate(-50%, -50%)';
-        modal.style.zIndex = '1000001';
-        modal.style.width = 'min(620px, calc(100vw - 24px))';
-        modal.style.maxHeight = 'min(86vh, 720px)';
-        modal.style.overflowY = 'auto';
-        modal.style.background = 'rgba(24,24,27,0.98)';
-        modal.style.border = '1px solid rgba(255,255,255,0.08)';
-        modal.style.borderRadius = '18px';
-        modal.style.boxShadow = '0 20px 50px rgba(0,0,0,0.45)';
-        modal.style.padding = '18px';
-        modal.style.fontFamily = 'Inter, Arial, sans-serif';
-        modal.style.color = '#fff';
-        applyScrollableModalStyle(modal);
-
-        modal.innerHTML = `
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px;">
-            <div>
-                <div style="font-size:16px;font-weight:700;">Ajouter une réponse rapide</div>
-                <div style="font-size:12px;color:#a1a1aa;margin-top:4px;">
-                    Le texte actuel du champ de chat a été repris ici pour gagner du temps.
-                </div>
-            </div>
-            <button id="tm-close-modal" style="
-                border:none;
-                background:#27272a;
-                color:#fff;
-                width:34px;
-                height:34px;
-                border-radius:10px;
-                cursor:pointer;
-                font-size:18px;
-                line-height:1;
-            ">×</button>
-        </div>
-
-        <div style="
-            padding:12px;
-            border-radius:14px;
-            background:rgba(255,255,255,0.03);
-            border:1px solid rgba(255,255,255,0.06);
-        ">
-            <label for="tm-quick-add-phrase-input" style="display:block;font-size:12px;color:#d4d4d8;margin-bottom:6px;">
-                Texte de la réponse
-            </label>
-
-            <textarea id="tm-quick-add-phrase-input" rows="5" maxlength="${MAX_SAVED_PHRASE_LENGTH}" placeholder="Exemple : Salut, il me faut le lien exact du torrent pour vérifier."
-                style="
-                    width:100%;
-                    min-height:120px;
-                    resize:vertical;
-                    background:#18181b;
-                    color:#fff;
-                    border:1px solid rgba(255,255,255,0.10);
-                    border-radius:10px;
-                    padding:10px 12px;
-                    outline:none;
-                    line-height:1.45;
-                ">${escapeHtml(normalizedInitialText)}</textarea>
-
-            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:8px;font-size:11px;color:#71717a;">
-                <span>Le texte est prérempli depuis le chat, mais reste modifiable.</span>
-                <span id="tm-quick-add-phrase-length">${formatSavedPhraseLengthLabel(normalizedInitialText)}</span>
-            </div>
-
-            <label for="tm-quick-add-keywords-input" style="display:block;font-size:12px;color:#d4d4d8;margin:12px 0 6px;">
-                Mots-clés
-            </label>
-
-            <input id="tm-quick-add-keywords-input" type="text" placeholder="ratio, reseed, merci, lien"
-                style="
-                    width:100%;
-                    background:#18181b;
-                    color:#fff;
-                    border:1px solid rgba(255,255,255,0.10);
-                    border-radius:10px;
-                    padding:10px 12px;
-                    outline:none;
-                ">
-
-            <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
-                Optionnel. Sépare les mots-clés par des virgules pour améliorer les suggestions contextuelles.
-            </div>
-
-            <div style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:12px;">
-                <button id="tm-quick-add-cancel" type="button" style="
-                    border:none;
-                    background:#3f3f46;
-                    color:#fff;
-                    border-radius:10px;
-                    padding:10px 12px;
-                    cursor:pointer;
-                    font-weight:600;
-                ">Annuler</button>
-
-                <button id="tm-quick-add-save" type="button" style="
-                    border:none;
-                    background:#2563eb;
-                    color:#fff;
-                    border-radius:10px;
-                    padding:10px 12px;
-                    cursor:pointer;
-                    font-weight:600;
-                ">Enregistrer</button>
-            </div>
-        </div>
-
-        <div id="tm-feedback" style="
-            min-height:20px;
-            margin-top:14px;
-            font-size:12px;
-            color:#93c5fd;
-        "></div>
-        `;
-
-        document.body.appendChild(overlay);
-        document.body.appendChild(modal);
-
-        const closeBtn = modal.querySelector('#tm-close-modal');
-        const cancelBtn = modal.querySelector('#tm-quick-add-cancel');
-        const saveBtn = modal.querySelector('#tm-quick-add-save');
-        const phraseInput = modal.querySelector('#tm-quick-add-phrase-input');
-        const phraseLength = modal.querySelector('#tm-quick-add-phrase-length');
-        const keywordsInput = modal.querySelector('#tm-quick-add-keywords-input');
-        const feedback = modal.querySelector('#tm-feedback');
-
-        function restoreSourceInputFocus() {
-            const nextInput = sourceInput instanceof HTMLElement && document.contains(sourceInput)
-                ? sourceInput
-                : getChatInput();
-
-            if (!(nextInput instanceof HTMLElement)) return;
-
-            window.requestAnimationFrame(() => {
-                nextInput.focus();
-            });
-        }
-
-        function setFeedback(message, isError = false) {
-            if (!(feedback instanceof HTMLElement)) return;
-
-            feedback.textContent = message;
-            feedback.style.color = isError ? '#fca5a5' : '#93c5fd';
-        }
-
-        function syncPhraseLengthIndicator() {
-            if (!(phraseInput instanceof HTMLTextAreaElement) || !(phraseLength instanceof HTMLElement)) return;
-
-            if (phraseInput.value.length > MAX_SAVED_PHRASE_LENGTH) {
-                phraseInput.value = phraseInput.value.slice(0, MAX_SAVED_PHRASE_LENGTH);
-            }
-
-            const currentLength = phraseInput.value.length;
-            phraseLength.textContent = `${currentLength}/${MAX_SAVED_PHRASE_LENGTH} caractères`;
-            phraseLength.style.color = currentLength >= MAX_SAVED_PHRASE_LENGTH
-                ? '#fca5a5'
-                : (currentLength >= Math.floor(MAX_SAVED_PHRASE_LENGTH * 0.9) ? '#facc15' : '#71717a');
-        }
-
-        function submitQuickAdd() {
-            const result = addSavedPhrase(phraseInput?.value, keywordsInput?.value);
-            setFeedback(result.message, !result.ok);
-
-            if (!result.ok) return;
-
-            closeSettingsModal();
-            showToast(result.message);
-            restoreSourceInputFocus();
-        }
-
-        closeBtn?.addEventListener('click', () => {
-            closeSettingsModal();
-            restoreSourceInputFocus();
-        });
-
-        cancelBtn?.addEventListener('click', () => {
-            closeSettingsModal();
-            restoreSourceInputFocus();
-        });
-
-        overlay.addEventListener('click', () => {
-            closeSettingsModal();
-            restoreSourceInputFocus();
-        });
-
-        saveBtn?.addEventListener('click', submitQuickAdd);
-
-        phraseInput?.addEventListener('input', syncPhraseLengthIndicator);
-
-        phraseInput?.addEventListener('keydown', (event) => {
-            if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
-                event.preventDefault();
-                submitQuickAdd();
-            }
-        });
-
-        keywordsInput?.addEventListener('keydown', (event) => {
-            if (event.key === 'Enter') {
-                event.preventDefault();
-                submitQuickAdd();
-            }
-        });
-
-        modal.addEventListener('keydown', (event) => {
-            if (event.key === 'Escape') {
-                event.preventDefault();
-                closeSettingsModal();
-                restoreSourceInputFocus();
-            }
-        });
-
-        syncPhraseLengthIndicator();
-
-        if (phraseInput instanceof HTMLTextAreaElement) {
-            phraseInput.focus();
-            phraseInput.setSelectionRange(phraseInput.value.length, phraseInput.value.length);
-        }
+        feedbackElement.textContent = message;
+        feedbackElement.style.color = isError ? '#fca5a5' : '#93c5fd';
     }
 
-    function openSavedPhrasesConfigModal() {
-        if (!isSupportedPage()) return;
+    function syncSavedPhraseLengthIndicator(textarea, lengthLabel, suffix = '') {
+        if (!(textarea instanceof HTMLTextAreaElement) || !(lengthLabel instanceof HTMLElement)) return;
 
-        if (modalOpen) {
-            closeSettingsModal();
+        if (textarea.value.length > MAX_SAVED_PHRASE_LENGTH) {
+            textarea.value = textarea.value.slice(0, MAX_SAVED_PHRASE_LENGTH);
         }
 
-        modalOpen = true;
-        hideImagePreview();
+        const currentLength = textarea.value.length;
+        lengthLabel.textContent = `${currentLength}/${MAX_SAVED_PHRASE_LENGTH}${suffix}`;
+        lengthLabel.style.color = currentLength >= MAX_SAVED_PHRASE_LENGTH
+            ? '#fca5a5'
+            : (currentLength >= Math.floor(MAX_SAVED_PHRASE_LENGTH * 0.9) ? '#facc15' : '#71717a');
+    }
 
-        const overlay = document.createElement('div');
-        overlay.id = OVERLAY_ID;
-        overlay.style.position = 'fixed';
-        overlay.style.inset = '0';
-        overlay.style.zIndex = '1000000';
-        overlay.style.background = 'rgba(0,0,0,0.45)';
-
-        const modal = document.createElement('div');
-        modal.id = MODAL_ID;
-        modal.style.position = 'fixed';
-        modal.style.top = '50%';
-        modal.style.left = '50%';
-        modal.style.transform = 'translate(-50%, -50%)';
-        modal.style.zIndex = '1000001';
-        modal.style.width = 'min(720px, calc(100vw - 24px))';
-        modal.style.maxHeight = 'min(88vh, 860px)';
-        modal.style.overflowY = 'auto';
-        modal.style.background = 'rgba(24,24,27,0.98)';
-        modal.style.border = '1px solid rgba(255,255,255,0.08)';
-        modal.style.borderRadius = '18px';
-        modal.style.boxShadow = '0 20px 50px rgba(0,0,0,0.45)';
-        modal.style.padding = '18px';
-        modal.style.fontFamily = 'Inter, Arial, sans-serif';
-        modal.style.color = '#fff';
-        applyScrollableModalStyle(modal);
-
-        const cardStyle = `
+    function getSavedPhrasesModalCardStyle() {
+        return `
             padding:12px;
             border-radius:14px;
             background:rgba(255,255,255,0.03);
             border:1px solid rgba(255,255,255,0.06);
         `;
+    }
 
-        modal.innerHTML = `
+    function buildSavedPhrasesConfigModalHtml(cardStyle) {
+        return `
         <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px;">
             <div>
                 <div style="font-size:16px;font-weight:700;">Configuration des réponses rapides</div>
@@ -6227,466 +7673,747 @@
             color:#93c5fd;
         "></div>
         `;
+    }
 
-        document.body.appendChild(overlay);
-        document.body.appendChild(modal);
+    function getSavedPhrasesConfigElements(modal) {
+        return {
+            closeBtn: modal.querySelector('#tm-close-modal'),
+            backBtn: modal.querySelector('#tm-saved-phrases-back'),
+            phraseInput: modal.querySelector('#tm-phrase-input'),
+            phraseKeywordsInput: modal.querySelector('#tm-phrase-keywords-input'),
+            phraseAddBtn: modal.querySelector('#tm-phrase-add'),
+            phraseLength: modal.querySelector('#tm-phrase-length'),
+            phrasesList: modal.querySelector('#tm-phrases-list'),
+            phrasesCount: modal.querySelector('#tm-phrases-count'),
+            phrasesExportBtn: modal.querySelector('#tm-phrases-export'),
+            phrasesImportBtn: modal.querySelector('#tm-phrases-import'),
+            phrasesImportFileInput: modal.querySelector('#tm-phrases-import-file'),
+            summary: modal.querySelector('#tm-saved-phrases-summary'),
+            feedback: modal.querySelector('#tm-feedback')
+        };
+    }
 
-        const closeBtn = modal.querySelector('#tm-close-modal');
-        const backBtn = modal.querySelector('#tm-saved-phrases-back');
-        const phraseInput = modal.querySelector('#tm-phrase-input');
-        const phraseKeywordsInput = modal.querySelector('#tm-phrase-keywords-input');
-        const phraseAddBtn = modal.querySelector('#tm-phrase-add');
-        const phraseLength = modal.querySelector('#tm-phrase-length');
-        const phrasesList = modal.querySelector('#tm-phrases-list');
-        const phrasesCount = modal.querySelector('#tm-phrases-count');
-        const phrasesExportBtn = modal.querySelector('#tm-phrases-export');
-        const phrasesImportBtn = modal.querySelector('#tm-phrases-import');
-        const phrasesImportFileInput = modal.querySelector('#tm-phrases-import-file');
-        const summary = modal.querySelector('#tm-saved-phrases-summary');
-        const feedback = modal.querySelector('#tm-feedback');
-        let editingPhraseIndex = null;
-
-        function setFeedback(message, isError = false) {
-            if (!feedback) return;
-
-            feedback.textContent = message;
-            feedback.style.color = isError ? '#fca5a5' : '#93c5fd';
+    function syncSavedPhrasesConfigHeader(elements) {
+        if (elements.phrasesCount instanceof HTMLElement) {
+            elements.phrasesCount.textContent = formatSavedPhrasesCountLabel();
         }
 
-        function syncSavedPhrasesHeader() {
-            if (phrasesCount) {
-                phrasesCount.textContent = formatSavedPhrasesCountLabel();
-            }
-
-            if (summary) {
-                summary.textContent = formatSavedPhrasesSummaryLabel();
-            }
+        if (elements.summary instanceof HTMLElement) {
+            elements.summary.textContent = formatSavedPhrasesSummaryLabel();
         }
+    }
 
-        function syncSavedPhraseLengthIndicator(textarea, lengthLabel) {
-            if (!(textarea instanceof HTMLTextAreaElement) || !(lengthLabel instanceof HTMLElement)) return;
+    function createSavedPhraseKeywordChip(keyword) {
+        const chip = document.createElement('span');
+        chip.textContent = keyword;
+        chip.style.display = 'inline-flex';
+        chip.style.alignItems = 'center';
+        chip.style.padding = '4px 8px';
+        chip.style.borderRadius = '999px';
+        chip.style.background = 'rgba(124,58,237,0.18)';
+        chip.style.border = '1px solid rgba(139,92,246,0.22)';
+        chip.style.color = '#ddd6fe';
+        chip.style.fontSize = '11px';
+        chip.style.lineHeight = '1.2';
+        return chip;
+    }
 
-            if (textarea.value.length > MAX_SAVED_PHRASE_LENGTH) {
-                textarea.value = textarea.value.slice(0, MAX_SAVED_PHRASE_LENGTH);
-            }
+    /**
+     * Regroupe l'état local et les actions de la modale de gestion complète des réponses rapides.
+     *
+     * @param {HTMLElement} modal
+     * @param {Object.<string, Element|null>} elements
+     * @returns {Object}
+     */
+    function createSavedPhrasesConfigController(modal, elements) {
+        const controller = {
+            editingPhraseIndex: null,
+            setFeedback(message, isError = false) {
+                setModalFeedback(elements.feedback, message, isError);
+            },
+            syncHeader() {
+                syncSavedPhrasesConfigHeader(elements);
+            },
+            refreshList() {
+                refreshSavedPhrasesConfigList(modal, elements, controller);
+            },
+            stopEditing(refresh = true) {
+                controller.editingPhraseIndex = null;
 
-            const currentLength = textarea.value.length;
-            lengthLabel.textContent = `${currentLength}/${MAX_SAVED_PHRASE_LENGTH}`;
-            lengthLabel.style.color = currentLength >= MAX_SAVED_PHRASE_LENGTH
-                ? '#fca5a5'
-                : (currentLength >= Math.floor(MAX_SAVED_PHRASE_LENGTH * 0.9) ? '#facc15' : '#71717a');
-        }
-
-        function syncPhraseLengthIndicator() {
-            syncSavedPhraseLengthIndicator(phraseInput, phraseLength);
-        }
-
-        function createKeywordChip(keyword) {
-            const chip = document.createElement('span');
-            chip.textContent = keyword;
-            chip.style.display = 'inline-flex';
-            chip.style.alignItems = 'center';
-            chip.style.padding = '4px 8px';
-            chip.style.borderRadius = '999px';
-            chip.style.background = 'rgba(124,58,237,0.18)';
-            chip.style.border = '1px solid rgba(139,92,246,0.22)';
-            chip.style.color = '#ddd6fe';
-            chip.style.fontSize = '11px';
-            chip.style.lineHeight = '1.2';
-            return chip;
-        }
-
-        function stopEditingSavedPhrase(refresh = true) {
-            editingPhraseIndex = null;
-
-            if (refresh) {
-                refreshSavedPhrasesList();
-            }
-        }
-
-        function startEditingSavedPhrase(index) {
-            editingPhraseIndex = index;
-            refreshSavedPhrasesList();
-
-            window.requestAnimationFrame(() => {
-                const editTextarea = modal.querySelector(`[data-tm-saved-phrase-edit-input="${index}"]`);
-                if (editTextarea instanceof HTMLTextAreaElement) {
-                    editTextarea.focus();
-                    editTextarea.setSelectionRange(editTextarea.value.length, editTextarea.value.length);
+                if (refresh) {
+                    controller.refreshList();
                 }
-            });
-        }
+            },
+            startEditing(index) {
+                controller.editingPhraseIndex = index;
+                controller.refreshList();
 
-        function refreshSavedPhrasesList() {
-            if (!phrasesList) return;
-
-            phrasesList.innerHTML = '';
-            syncSavedPhrasesHeader();
-
-            if (editingPhraseIndex !== null && (editingPhraseIndex < 0 || editingPhraseIndex >= savedPhrases.length)) {
-                editingPhraseIndex = null;
-            }
-
-            if (savedPhrases.length === 0) {
-                const empty = document.createElement('div');
-                empty.textContent = 'Aucune réponse rapide enregistrée pour le moment.';
-                empty.style.fontSize = '12px';
-                empty.style.color = '#a1a1aa';
-                empty.style.padding = '6px 2px';
-                phrasesList.appendChild(empty);
-                return;
-            }
-
-            savedPhrases.forEach((entry, index) => {
-                const phrase = normalizeSavedPhraseRecord(entry, true);
-                if (!phrase) return;
-                if (phrase !== entry) {
-                    savedPhrases[index] = phrase;
-                }
-
-                const row = document.createElement('div');
-                row.style.display = 'flex';
-                row.style.alignItems = 'flex-start';
-                row.style.gap = '10px';
-                row.style.padding = '12px';
-                row.style.borderRadius = '12px';
-                row.style.background = 'rgba(59,130,246,0.08)';
-                row.style.border = '1px solid rgba(59,130,246,0.16)';
-
-                const content = document.createElement('div');
-                content.style.flex = '1';
-                content.style.minWidth = '0';
-
-                if (editingPhraseIndex === index) {
-                    const editText = document.createElement('textarea');
-                    editText.value = phrase.text;
-                    editText.rows = 4;
-                    editText.maxLength = MAX_SAVED_PHRASE_LENGTH;
-                    editText.setAttribute('data-tm-saved-phrase-edit-input', String(index));
-                    editText.style.width = '100%';
-                    editText.style.minHeight = '96px';
-                    editText.style.resize = 'vertical';
-                    editText.style.background = '#18181b';
-                    editText.style.color = '#fff';
-                    editText.style.border = '1px solid rgba(255,255,255,0.10)';
-                    editText.style.borderRadius = '10px';
-                    editText.style.padding = '10px 12px';
-                    editText.style.outline = 'none';
-                    editText.style.lineHeight = '1.45';
-
-                    const editLength = document.createElement('div');
-                    editLength.style.marginTop = '8px';
-                    editLength.style.fontSize = '11px';
-                    editLength.style.textAlign = 'right';
-
-                    const editKeywordsLabel = document.createElement('label');
-                    editKeywordsLabel.textContent = 'Mots-clés';
-                    editKeywordsLabel.style.display = 'block';
-                    editKeywordsLabel.style.fontSize = '12px';
-                    editKeywordsLabel.style.color = '#d4d4d8';
-                    editKeywordsLabel.style.margin = '12px 0 6px';
-
-                    const editKeywordsInput = document.createElement('input');
-                    editKeywordsInput.type = 'text';
-                    editKeywordsInput.value = formatSavedPhraseKeywordsInputValue(phrase.keywords);
-                    editKeywordsInput.placeholder = 'ratio, reseed, merci, lien';
-                    editKeywordsInput.style.width = '100%';
-                    editKeywordsInput.style.background = '#18181b';
-                    editKeywordsInput.style.color = '#fff';
-                    editKeywordsInput.style.border = '1px solid rgba(255,255,255,0.10)';
-                    editKeywordsInput.style.borderRadius = '10px';
-                    editKeywordsInput.style.padding = '10px 12px';
-                    editKeywordsInput.style.outline = 'none';
-
-                    const editHint = document.createElement('div');
-                    editHint.textContent = 'Modifie le texte ou les mots-clés, puis enregistre.';
-                    editHint.style.marginTop = '8px';
-                    editHint.style.fontSize = '11px';
-                    editHint.style.color = '#71717a';
-                    editHint.style.lineHeight = '1.45';
-
-                    const editActions = document.createElement('div');
-                    editActions.style.display = 'flex';
-                    editActions.style.justifyContent = 'flex-end';
-                    editActions.style.gap = '8px';
-                    editActions.style.flexWrap = 'wrap';
-                    editActions.style.marginTop = '12px';
-
-                    const cancelEditBtn = document.createElement('button');
-                    cancelEditBtn.type = 'button';
-                    cancelEditBtn.textContent = 'Annuler';
-                    cancelEditBtn.style.border = 'none';
-                    cancelEditBtn.style.background = '#3f3f46';
-                    cancelEditBtn.style.color = '#fff';
-                    cancelEditBtn.style.borderRadius = '10px';
-                    cancelEditBtn.style.padding = '8px 10px';
-                    cancelEditBtn.style.cursor = 'pointer';
-                    cancelEditBtn.style.fontSize = '12px';
-                    cancelEditBtn.style.fontWeight = '600';
-
-                    const saveEditBtn = document.createElement('button');
-                    saveEditBtn.type = 'button';
-                    saveEditBtn.textContent = 'Enregistrer';
-                    saveEditBtn.style.border = 'none';
-                    saveEditBtn.style.background = '#2563eb';
-                    saveEditBtn.style.color = '#fff';
-                    saveEditBtn.style.borderRadius = '10px';
-                    saveEditBtn.style.padding = '8px 10px';
-                    saveEditBtn.style.cursor = 'pointer';
-                    saveEditBtn.style.fontSize = '12px';
-                    saveEditBtn.style.fontWeight = '600';
-
-                    function submitSavedPhraseEdition() {
-                        const result = updateSavedPhraseAt(index, editText.value, editKeywordsInput.value);
-                        setFeedback(result.message, !result.ok);
-
-                        if (!result.ok) return;
-
-                        stopEditingSavedPhrase();
+                window.requestAnimationFrame(() => {
+                    const editTextarea = modal.querySelector(`[data-tm-saved-phrase-edit-input="${index}"]`);
+                    if (editTextarea instanceof HTMLTextAreaElement) {
+                        editTextarea.focus();
+                        editTextarea.setSelectionRange(editTextarea.value.length, editTextarea.value.length);
                     }
-
-                    cancelEditBtn.addEventListener('click', () => {
-                        stopEditingSavedPhrase();
-                    });
-
-                    saveEditBtn.addEventListener('click', submitSavedPhraseEdition);
-
-                    editText.addEventListener('input', () => {
-                        syncSavedPhraseLengthIndicator(editText, editLength);
-                    });
-
-                    editText.addEventListener('keydown', (event) => {
-                        if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
-                            event.preventDefault();
-                            submitSavedPhraseEdition();
-                        }
-                    });
-
-                    editKeywordsInput.addEventListener('keydown', (event) => {
-                        if (event.key === 'Enter') {
-                            event.preventDefault();
-                            submitSavedPhraseEdition();
-                        }
-                    });
-
-                    syncSavedPhraseLengthIndicator(editText, editLength);
-
-                    editActions.appendChild(cancelEditBtn);
-                    editActions.appendChild(saveEditBtn);
-
-                    content.appendChild(editText);
-                    content.appendChild(editLength);
-                    content.appendChild(editKeywordsLabel);
-                    content.appendChild(editKeywordsInput);
-                    content.appendChild(editHint);
-                    content.appendChild(editActions);
-
-                    row.appendChild(content);
-                    phrasesList.appendChild(row);
-                    return;
-                }
-
-                const text = document.createElement('div');
-                text.textContent = phrase.text;
-                text.style.fontSize = '12px';
-                text.style.lineHeight = '1.5';
-                text.style.color = '#e4e4e7';
-                text.style.whiteSpace = 'pre-wrap';
-                text.style.wordBreak = 'break-word';
-
-                const meta = document.createElement('div');
-                meta.style.display = 'flex';
-                meta.style.justifyContent = 'space-between';
-                meta.style.alignItems = 'center';
-                meta.style.gap = '10px';
-                meta.style.flexWrap = 'wrap';
-                meta.style.marginTop = '8px';
-
-                const keywordsLabel = document.createElement('div');
-                keywordsLabel.textContent = phrase.keywords.length > 0 ? 'Mots-clés liés' : 'Aucun mot-clé';
-                keywordsLabel.style.fontSize = '11px';
-                keywordsLabel.style.color = phrase.keywords.length > 0 ? '#c4b5fd' : '#71717a';
-
-                const length = document.createElement('div');
-                length.textContent = formatSavedPhraseLengthLabel(phrase.text);
-                length.style.fontSize = '11px';
-                length.style.color = '#71717a';
-
-                meta.appendChild(keywordsLabel);
-                meta.appendChild(length);
-
-                content.appendChild(text);
-                content.appendChild(meta);
-
-                if (phrase.keywords.length > 0) {
-                    const keywordsWrap = document.createElement('div');
-                    keywordsWrap.style.display = 'flex';
-                    keywordsWrap.style.flexWrap = 'wrap';
-                    keywordsWrap.style.gap = '6px';
-                    keywordsWrap.style.marginTop = '8px';
-
-                    phrase.keywords.forEach((keyword) => {
-                        keywordsWrap.appendChild(createKeywordChip(keyword));
-                    });
-
-                    content.appendChild(keywordsWrap);
-                }
-
-                const actions = document.createElement('div');
-                actions.style.display = 'flex';
-                actions.style.flexDirection = 'column';
-                actions.style.gap = '8px';
-                actions.style.flexShrink = '0';
-
-                const editBtn = document.createElement('button');
-                editBtn.type = 'button';
-                editBtn.textContent = '✎';
-                editBtn.title = 'Modifier cette réponse rapide';
-                editBtn.setAttribute('aria-label', 'Modifier cette réponse rapide');
-                editBtn.style.border = 'none';
-                editBtn.style.background = '#1f2937';
-                editBtn.style.color = '#c4b5fd';
-                editBtn.style.borderRadius = '10px';
-                editBtn.style.padding = '8px 10px';
-                editBtn.style.cursor = 'pointer';
-                editBtn.style.fontSize = '14px';
-                editBtn.style.fontWeight = '700';
-                editBtn.style.lineHeight = '1';
-
-                const removeBtn = document.createElement('button');
-                removeBtn.type = 'button';
-                removeBtn.textContent = 'Supprimer';
-                removeBtn.style.border = 'none';
-                removeBtn.style.background = '#3f3f46';
-                removeBtn.style.color = '#fca5a5';
-                removeBtn.style.borderRadius = '10px';
-                removeBtn.style.padding = '8px 10px';
-                removeBtn.style.cursor = 'pointer';
-                removeBtn.style.fontSize = '12px';
-                removeBtn.style.fontWeight = '600';
-                removeBtn.style.flexShrink = '0';
-
-                editBtn.addEventListener('click', () => {
-                    startEditingSavedPhrase(index);
                 });
+            },
+            handleRemoval(index) {
+                const result = removeSavedPhraseAt(index);
+                controller.setFeedback(result.message, !result.ok);
 
-                removeBtn.addEventListener('click', () => {
-                    const result = removeSavedPhraseAt(index);
-                    setFeedback(result.message, !result.ok);
-
-                    if (editingPhraseIndex !== null) {
-                        if (editingPhraseIndex === index) {
-                            editingPhraseIndex = null;
-                        } else if (index < editingPhraseIndex) {
-                            editingPhraseIndex -= 1;
-                        }
+                if (controller.editingPhraseIndex !== null) {
+                    if (controller.editingPhraseIndex === index) {
+                        controller.editingPhraseIndex = null;
+                    } else if (index < controller.editingPhraseIndex) {
+                        controller.editingPhraseIndex -= 1;
                     }
+                }
 
-                    refreshSavedPhrasesList();
-                });
+                controller.refreshList();
+            }
+        };
 
-                actions.appendChild(editBtn);
-                actions.appendChild(removeBtn);
+        return controller;
+    }
 
-                row.appendChild(content);
-                row.appendChild(actions);
-                phrasesList.appendChild(row);
-            });
+    function createSavedPhraseEditRow(controller, index, phrase) {
+        const row = document.createElement('div');
+        row.style.display = 'flex';
+        row.style.alignItems = 'flex-start';
+        row.style.gap = '10px';
+        row.style.padding = '12px';
+        row.style.borderRadius = '12px';
+        row.style.background = 'rgba(59,130,246,0.08)';
+        row.style.border = '1px solid rgba(59,130,246,0.16)';
+
+        const content = document.createElement('div');
+        content.style.flex = '1';
+        content.style.minWidth = '0';
+
+        const editText = document.createElement('textarea');
+        editText.value = phrase.text;
+        editText.rows = 4;
+        editText.maxLength = MAX_SAVED_PHRASE_LENGTH;
+        editText.setAttribute('data-tm-saved-phrase-edit-input', String(index));
+        editText.style.width = '100%';
+        editText.style.minHeight = '96px';
+        editText.style.resize = 'vertical';
+        editText.style.background = '#18181b';
+        editText.style.color = '#fff';
+        editText.style.border = '1px solid rgba(255,255,255,0.10)';
+        editText.style.borderRadius = '10px';
+        editText.style.padding = '10px 12px';
+        editText.style.outline = 'none';
+        editText.style.lineHeight = '1.45';
+
+        const editLength = document.createElement('div');
+        editLength.style.marginTop = '8px';
+        editLength.style.fontSize = '11px';
+        editLength.style.textAlign = 'right';
+
+        const editKeywordsLabel = document.createElement('label');
+        editKeywordsLabel.textContent = 'Mots-clés';
+        editKeywordsLabel.style.display = 'block';
+        editKeywordsLabel.style.fontSize = '12px';
+        editKeywordsLabel.style.color = '#d4d4d8';
+        editKeywordsLabel.style.margin = '12px 0 6px';
+
+        const editKeywordsInput = document.createElement('input');
+        editKeywordsInput.type = 'text';
+        editKeywordsInput.value = formatSavedPhraseKeywordsInputValue(phrase.keywords);
+        editKeywordsInput.placeholder = 'ratio, reseed, merci, lien';
+        editKeywordsInput.style.width = '100%';
+        editKeywordsInput.style.background = '#18181b';
+        editKeywordsInput.style.color = '#fff';
+        editKeywordsInput.style.border = '1px solid rgba(255,255,255,0.10)';
+        editKeywordsInput.style.borderRadius = '10px';
+        editKeywordsInput.style.padding = '10px 12px';
+        editKeywordsInput.style.outline = 'none';
+
+        const editHint = document.createElement('div');
+        editHint.textContent = 'Modifie le texte ou les mots-clés, puis enregistre.';
+        editHint.style.marginTop = '8px';
+        editHint.style.fontSize = '11px';
+        editHint.style.color = '#71717a';
+        editHint.style.lineHeight = '1.45';
+
+        const editActions = document.createElement('div');
+        editActions.style.display = 'flex';
+        editActions.style.justifyContent = 'flex-end';
+        editActions.style.gap = '8px';
+        editActions.style.flexWrap = 'wrap';
+        editActions.style.marginTop = '12px';
+
+        const cancelEditBtn = document.createElement('button');
+        cancelEditBtn.type = 'button';
+        cancelEditBtn.textContent = 'Annuler';
+        cancelEditBtn.style.border = 'none';
+        cancelEditBtn.style.background = '#3f3f46';
+        cancelEditBtn.style.color = '#fff';
+        cancelEditBtn.style.borderRadius = '10px';
+        cancelEditBtn.style.padding = '8px 10px';
+        cancelEditBtn.style.cursor = 'pointer';
+        cancelEditBtn.style.fontSize = '12px';
+        cancelEditBtn.style.fontWeight = '600';
+
+        const saveEditBtn = document.createElement('button');
+        saveEditBtn.type = 'button';
+        saveEditBtn.textContent = 'Enregistrer';
+        saveEditBtn.style.border = 'none';
+        saveEditBtn.style.background = '#2563eb';
+        saveEditBtn.style.color = '#fff';
+        saveEditBtn.style.borderRadius = '10px';
+        saveEditBtn.style.padding = '8px 10px';
+        saveEditBtn.style.cursor = 'pointer';
+        saveEditBtn.style.fontSize = '12px';
+        saveEditBtn.style.fontWeight = '600';
+
+        function submitSavedPhraseEdition() {
+            const result = updateSavedPhraseAt(index, editText.value, editKeywordsInput.value);
+            controller.setFeedback(result.message, !result.ok);
+
+            if (!result.ok) return;
+
+            controller.stopEditing();
         }
 
-        closeBtn?.addEventListener('click', closeSettingsModal);
+        cancelEditBtn.addEventListener('click', () => {
+            controller.stopEditing();
+        });
+        saveEditBtn.addEventListener('click', submitSavedPhraseEdition);
+        editText.addEventListener('input', () => {
+            syncSavedPhraseLengthIndicator(editText, editLength);
+        });
+        editText.addEventListener('keydown', (event) => {
+            if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+                event.preventDefault();
+                submitSavedPhraseEdition();
+            }
+        });
+        editKeywordsInput.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                submitSavedPhraseEdition();
+            }
+        });
+
+        syncSavedPhraseLengthIndicator(editText, editLength);
+
+        editActions.appendChild(cancelEditBtn);
+        editActions.appendChild(saveEditBtn);
+
+        content.appendChild(editText);
+        content.appendChild(editLength);
+        content.appendChild(editKeywordsLabel);
+        content.appendChild(editKeywordsInput);
+        content.appendChild(editHint);
+        content.appendChild(editActions);
+
+        row.appendChild(content);
+        return row;
+    }
+
+    function createSavedPhraseDisplayRow(controller, index, phrase) {
+        const row = document.createElement('div');
+        row.style.display = 'flex';
+        row.style.alignItems = 'flex-start';
+        row.style.gap = '10px';
+        row.style.padding = '12px';
+        row.style.borderRadius = '12px';
+        row.style.background = 'rgba(59,130,246,0.08)';
+        row.style.border = '1px solid rgba(59,130,246,0.16)';
+
+        const content = document.createElement('div');
+        content.style.flex = '1';
+        content.style.minWidth = '0';
+
+        const text = document.createElement('div');
+        text.textContent = phrase.text;
+        text.style.fontSize = '12px';
+        text.style.lineHeight = '1.5';
+        text.style.color = '#e4e4e7';
+        text.style.whiteSpace = 'pre-wrap';
+        text.style.wordBreak = 'break-word';
+
+        const meta = document.createElement('div');
+        meta.style.display = 'flex';
+        meta.style.justifyContent = 'space-between';
+        meta.style.alignItems = 'center';
+        meta.style.gap = '10px';
+        meta.style.flexWrap = 'wrap';
+        meta.style.marginTop = '8px';
+
+        const keywordsLabel = document.createElement('div');
+        keywordsLabel.textContent = phrase.keywords.length > 0 ? 'Mots-clés liés' : 'Aucun mot-clé';
+        keywordsLabel.style.fontSize = '11px';
+        keywordsLabel.style.color = phrase.keywords.length > 0 ? '#c4b5fd' : '#71717a';
+
+        const length = document.createElement('div');
+        length.textContent = formatSavedPhraseLengthLabel(phrase.text);
+        length.style.fontSize = '11px';
+        length.style.color = '#71717a';
+
+        meta.appendChild(keywordsLabel);
+        meta.appendChild(length);
+
+        content.appendChild(text);
+        content.appendChild(meta);
+
+        if (phrase.keywords.length > 0) {
+            const keywordsWrap = document.createElement('div');
+            keywordsWrap.style.display = 'flex';
+            keywordsWrap.style.flexWrap = 'wrap';
+            keywordsWrap.style.gap = '6px';
+            keywordsWrap.style.marginTop = '8px';
+
+            phrase.keywords.forEach((keyword) => {
+                keywordsWrap.appendChild(createSavedPhraseKeywordChip(keyword));
+            });
+
+            content.appendChild(keywordsWrap);
+        }
+
+        const actions = document.createElement('div');
+        actions.style.display = 'flex';
+        actions.style.flexDirection = 'column';
+        actions.style.gap = '8px';
+        actions.style.flexShrink = '0';
+
+        const editBtn = document.createElement('button');
+        editBtn.type = 'button';
+        editBtn.textContent = '✎';
+        editBtn.title = 'Modifier cette réponse rapide';
+        editBtn.setAttribute('aria-label', 'Modifier cette réponse rapide');
+        editBtn.style.border = 'none';
+        editBtn.style.background = '#1f2937';
+        editBtn.style.color = '#c4b5fd';
+        editBtn.style.borderRadius = '10px';
+        editBtn.style.padding = '8px 10px';
+        editBtn.style.cursor = 'pointer';
+        editBtn.style.fontSize = '14px';
+        editBtn.style.fontWeight = '700';
+        editBtn.style.lineHeight = '1';
+
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.textContent = 'Supprimer';
+        removeBtn.style.border = 'none';
+        removeBtn.style.background = '#3f3f46';
+        removeBtn.style.color = '#fca5a5';
+        removeBtn.style.borderRadius = '10px';
+        removeBtn.style.padding = '8px 10px';
+        removeBtn.style.cursor = 'pointer';
+        removeBtn.style.fontSize = '12px';
+        removeBtn.style.fontWeight = '600';
+        removeBtn.style.flexShrink = '0';
+
+        editBtn.addEventListener('click', () => {
+            controller.startEditing(index);
+        });
+        removeBtn.addEventListener('click', () => {
+            controller.handleRemoval(index);
+        });
+
+        actions.appendChild(editBtn);
+        actions.appendChild(removeBtn);
+
+        row.appendChild(content);
+        row.appendChild(actions);
+        return row;
+    }
+
+    function refreshSavedPhrasesConfigList(modal, elements, controller) {
+        if (!(elements.phrasesList instanceof HTMLElement)) return;
+
+        elements.phrasesList.innerHTML = '';
+        controller.syncHeader();
+
+        if (controller.editingPhraseIndex !== null
+            && (controller.editingPhraseIndex < 0 || controller.editingPhraseIndex >= savedPhrases.length)) {
+            controller.editingPhraseIndex = null;
+        }
+
+        if (savedPhrases.length === 0) {
+            const empty = document.createElement('div');
+            empty.textContent = 'Aucune réponse rapide enregistrée pour le moment.';
+            empty.style.fontSize = '12px';
+            empty.style.color = '#a1a1aa';
+            empty.style.padding = '6px 2px';
+            elements.phrasesList.appendChild(empty);
+            return;
+        }
+
+        savedPhrases.forEach((entry, index) => {
+            const phrase = normalizeSavedPhraseRecord(entry, true);
+            if (!phrase) return;
+            if (phrase !== entry) {
+                savedPhrases[index] = phrase;
+            }
+
+            const row = controller.editingPhraseIndex === index
+                ? createSavedPhraseEditRow(controller, index, phrase)
+                : createSavedPhraseDisplayRow(controller, index, phrase);
+
+            elements.phrasesList.appendChild(row);
+        });
+    }
+
+    function submitSavedPhrasesConfigCreation(elements, controller) {
+        const result = addSavedPhrase(elements.phraseInput?.value, elements.phraseKeywordsInput?.value);
+        controller.setFeedback(result.message, !result.ok);
+
+        if (!result.ok) return;
+
+        controller.refreshList();
+
+        if (elements.phraseInput instanceof HTMLTextAreaElement) {
+            elements.phraseInput.value = '';
+            elements.phraseInput.focus();
+        }
+
+        if (elements.phraseKeywordsInput instanceof HTMLInputElement) {
+            elements.phraseKeywordsInput.value = '';
+        }
+
+        syncSavedPhraseLengthIndicator(elements.phraseInput, elements.phraseLength);
+    }
+
+    async function handleSavedPhrasesConfigImport(elements, controller) {
+        const selectedFile = elements.phrasesImportFileInput instanceof HTMLInputElement
+            ? elements.phrasesImportFileInput.files?.[0]
+            : null;
+
+        if (!selectedFile) return;
+
+        try {
+            const rawContent = await selectedFile.text();
+            const parsedContent = JSON.parse(rawContent);
+            const result = importSavedPhrases(parsedContent);
+
+            controller.setFeedback(result.message, !result.ok);
+            if (result.ok) {
+                controller.refreshList();
+            }
+        } catch (e) {
+            controller.setFeedback('Import impossible : fichier JSON invalide.', true);
+        } finally {
+            if (elements.phrasesImportFileInput instanceof HTMLInputElement) {
+                elements.phrasesImportFileInput.value = '';
+            }
+        }
+    }
+
+    function bindSavedPhrasesConfigModalEvents(modal, overlay, elements, controller) {
+        elements.closeBtn?.addEventListener('click', closeSettingsModal);
         overlay.addEventListener('click', closeSettingsModal);
 
-        backBtn?.addEventListener('click', () => {
+        elements.backBtn?.addEventListener('click', () => {
             closeSettingsModal();
             openSettingsModal();
         });
 
-        phraseAddBtn?.addEventListener('click', () => {
-            const result = addSavedPhrase(phraseInput?.value, phraseKeywordsInput?.value);
-            setFeedback(result.message, !result.ok);
-
-            if (!result.ok) return;
-
-            refreshSavedPhrasesList();
-
-            if (phraseInput instanceof HTMLTextAreaElement) {
-                phraseInput.value = '';
-                phraseInput.focus();
-            }
-
-            if (phraseKeywordsInput instanceof HTMLInputElement) {
-                phraseKeywordsInput.value = '';
-            }
-
-            syncPhraseLengthIndicator();
+        elements.phraseAddBtn?.addEventListener('click', () => {
+            submitSavedPhrasesConfigCreation(elements, controller);
         });
 
-        phraseInput?.addEventListener('input', syncPhraseLengthIndicator);
-
-        phraseInput?.addEventListener('keydown', (e) => {
-            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-                e.preventDefault();
-                phraseAddBtn?.click();
+        elements.phraseInput?.addEventListener('input', () => {
+            syncSavedPhraseLengthIndicator(elements.phraseInput, elements.phraseLength);
+        });
+        elements.phraseInput?.addEventListener('keydown', (event) => {
+            if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+                event.preventDefault();
+                elements.phraseAddBtn?.click();
+            }
+        });
+        elements.phraseKeywordsInput?.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                elements.phraseAddBtn?.click();
             }
         });
 
-        phraseKeywordsInput?.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') {
-                e.preventDefault();
-                phraseAddBtn?.click();
-            }
-        });
-
-        phrasesExportBtn?.addEventListener('click', () => {
+        elements.phrasesExportBtn?.addEventListener('click', () => {
             const result = downloadSavedPhrasesExport();
-            setFeedback(result.message, !result.ok);
+            controller.setFeedback(result.message, !result.ok);
+        });
+        elements.phrasesImportBtn?.addEventListener('click', () => {
+            elements.phrasesImportFileInput?.click();
+        });
+        elements.phrasesImportFileInput?.addEventListener('change', async () => {
+            await handleSavedPhrasesConfigImport(elements, controller);
         });
 
-        phrasesImportBtn?.addEventListener('click', () => {
-            phrasesImportFileInput?.click();
-        });
-
-        phrasesImportFileInput?.addEventListener('change', async () => {
-            const selectedFile = phrasesImportFileInput instanceof HTMLInputElement
-                ? phrasesImportFileInput.files?.[0]
-                : null;
-
-            if (!selectedFile) return;
-
-            try {
-                const rawContent = await selectedFile.text();
-                const parsedContent = JSON.parse(rawContent);
-                const result = importSavedPhrases(parsedContent);
-
-                setFeedback(result.message, !result.ok);
-                if (result.ok) {
-                    refreshSavedPhrasesList();
-                }
-            } catch (e) {
-                setFeedback('Import impossible : fichier JSON invalide.', true);
-            } finally {
-                if (phrasesImportFileInput instanceof HTMLInputElement) {
-                    phrasesImportFileInput.value = '';
-                }
-            }
-        });
-
-        modal.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') {
-                e.preventDefault();
+        modal.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') {
+                event.preventDefault();
                 closeSettingsModal();
             }
         });
-
-        refreshSavedPhrasesList();
-        syncPhraseLengthIndicator();
-        phraseInput?.focus();
     }
 
-    function openSavedPhrasesPickerModal() {
+    function initializeSavedPhrasesConfigModal(elements, controller) {
+        controller.refreshList();
+        syncSavedPhraseLengthIndicator(elements.phraseInput, elements.phraseLength);
+        elements.phraseInput?.focus();
+    }
+
+    function buildSavedPhraseQuickAddModalHtml(normalizedInitialText) {
+        return `
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px;">
+            <div>
+                <div style="font-size:16px;font-weight:700;">Ajouter une réponse rapide</div>
+                <div style="font-size:12px;color:#a1a1aa;margin-top:4px;">
+                    Le texte actuel du champ de chat a été repris ici pour gagner du temps.
+                </div>
+            </div>
+            <button id="tm-close-modal" style="
+                border:none;
+                background:#27272a;
+                color:#fff;
+                width:34px;
+                height:34px;
+                border-radius:10px;
+                cursor:pointer;
+                font-size:18px;
+                line-height:1;
+            ">×</button>
+        </div>
+
+        <div style="${getSavedPhrasesModalCardStyle()}">
+            <label for="tm-quick-add-phrase-input" style="display:block;font-size:12px;color:#d4d4d8;margin-bottom:6px;">
+                Texte de la réponse
+            </label>
+
+            <textarea id="tm-quick-add-phrase-input" rows="5" maxlength="${MAX_SAVED_PHRASE_LENGTH}" placeholder="Exemple : Salut, il me faut le lien exact du torrent pour vérifier."
+                style="
+                    width:100%;
+                    min-height:120px;
+                    resize:vertical;
+                    background:#18181b;
+                    color:#fff;
+                    border:1px solid rgba(255,255,255,0.10);
+                    border-radius:10px;
+                    padding:10px 12px;
+                    outline:none;
+                    line-height:1.45;
+                ">${escapeHtml(normalizedInitialText)}</textarea>
+
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:8px;font-size:11px;color:#71717a;">
+                <span>Le texte est prérempli depuis le chat, mais reste modifiable.</span>
+                <span id="tm-quick-add-phrase-length">${formatSavedPhraseLengthLabel(normalizedInitialText)}</span>
+            </div>
+
+            <label for="tm-quick-add-keywords-input" style="display:block;font-size:12px;color:#d4d4d8;margin:12px 0 6px;">
+                Mots-clés
+            </label>
+
+            <input id="tm-quick-add-keywords-input" type="text" placeholder="ratio, reseed, merci, lien"
+                style="
+                    width:100%;
+                    background:#18181b;
+                    color:#fff;
+                    border:1px solid rgba(255,255,255,0.10);
+                    border-radius:10px;
+                    padding:10px 12px;
+                    outline:none;
+                ">
+
+            <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
+                Optionnel. Sépare les mots-clés par des virgules pour améliorer les suggestions contextuelles.
+            </div>
+
+            <div style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:12px;">
+                <button id="tm-quick-add-cancel" type="button" style="
+                    border:none;
+                    background:#3f3f46;
+                    color:#fff;
+                    border-radius:10px;
+                    padding:10px 12px;
+                    cursor:pointer;
+                    font-weight:600;
+                ">Annuler</button>
+
+                <button id="tm-quick-add-save" type="button" style="
+                    border:none;
+                    background:#2563eb;
+                    color:#fff;
+                    border-radius:10px;
+                    padding:10px 12px;
+                    cursor:pointer;
+                    font-weight:600;
+                ">Enregistrer</button>
+            </div>
+        </div>
+
+        <div id="tm-feedback" style="
+            min-height:20px;
+            margin-top:14px;
+            font-size:12px;
+            color:#93c5fd;
+        "></div>
+        `;
+    }
+
+    function getSavedPhraseQuickAddElements(modal) {
+        return {
+            closeBtn: modal.querySelector('#tm-close-modal'),
+            cancelBtn: modal.querySelector('#tm-quick-add-cancel'),
+            saveBtn: modal.querySelector('#tm-quick-add-save'),
+            phraseInput: modal.querySelector('#tm-quick-add-phrase-input'),
+            phraseLength: modal.querySelector('#tm-quick-add-phrase-length'),
+            keywordsInput: modal.querySelector('#tm-quick-add-keywords-input'),
+            feedback: modal.querySelector('#tm-feedback')
+        };
+    }
+
+    /**
+     * Construit le contrôleur local de la modale d'ajout rapide de réponse.
+     *
+     * @param {HTMLElement|null} sourceInput
+     * @param {Object.<string, Element|null>} elements
+     * @returns {Object}
+     */
+    function createSavedPhraseQuickAddController(sourceInput, elements) {
+        return {
+            restoreSourceInputFocus() {
+                const nextInput = sourceInput instanceof HTMLElement && document.contains(sourceInput)
+                    ? sourceInput
+                    : getChatInput();
+
+                if (!(nextInput instanceof HTMLElement)) return;
+
+                window.requestAnimationFrame(() => {
+                    nextInput.focus();
+                });
+            },
+            submit() {
+                const result = addSavedPhrase(elements.phraseInput?.value, elements.keywordsInput?.value);
+                setModalFeedback(elements.feedback, result.message, !result.ok);
+
+                if (!result.ok) return;
+
+                closeSettingsModal();
+                showToast(result.message);
+                this.restoreSourceInputFocus();
+            },
+            close() {
+                closeSettingsModal();
+                this.restoreSourceInputFocus();
+            }
+        };
+    }
+
+    function bindSavedPhraseQuickAddModalEvents(modal, overlay, elements, controller) {
+        elements.closeBtn?.addEventListener('click', () => {
+            controller.close();
+        });
+        elements.cancelBtn?.addEventListener('click', () => {
+            controller.close();
+        });
+        overlay.addEventListener('click', () => {
+            controller.close();
+        });
+
+        elements.saveBtn?.addEventListener('click', () => {
+            controller.submit();
+        });
+
+        elements.phraseInput?.addEventListener('input', () => {
+            syncSavedPhraseLengthIndicator(elements.phraseInput, elements.phraseLength, ' caractères');
+        });
+        elements.phraseInput?.addEventListener('keydown', (event) => {
+            if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+                event.preventDefault();
+                controller.submit();
+            }
+        });
+        elements.keywordsInput?.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                controller.submit();
+            }
+        });
+
+        modal.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                controller.close();
+            }
+        });
+    }
+
+    function initializeSavedPhraseQuickAddModal(elements) {
+        syncSavedPhraseLengthIndicator(elements.phraseInput, elements.phraseLength, ' caractères');
+
+        if (elements.phraseInput instanceof HTMLTextAreaElement) {
+            elements.phraseInput.focus();
+            elements.phraseInput.setSelectionRange(elements.phraseInput.value.length, elements.phraseInput.value.length);
+        }
+    }
+
+    /**
+     * Ouvre la modale compacte d'ajout rapide à partir du contenu actuel du chat.
+     *
+     * @param {string} [initialText='']
+     * @param {HTMLElement|null} [sourceInput=null]
+     * @returns {void}
+     */
+    function openSavedPhraseQuickAddModal(initialText = '', sourceInput = null) {
         if (!isSupportedPage()) return;
-        if (savedPhrases.length === 0) return;
+
+        if (modalOpen) {
+            closeSettingsModal();
+        }
+
+        modalOpen = true;
+        hideImagePreview();
+
+        const normalizedInitialText = normalizeSavedPhraseText(initialText, true);
+
+        const overlay = document.createElement('div');
+        overlay.id = OVERLAY_ID;
+        overlay.style.position = 'fixed';
+        overlay.style.inset = '0';
+        overlay.style.zIndex = '1000000';
+        overlay.style.background = 'rgba(0,0,0,0.45)';
+
+        const modal = document.createElement('div');
+        modal.id = MODAL_ID;
+        modal.style.position = 'fixed';
+        modal.style.top = '50%';
+        modal.style.left = '50%';
+        modal.style.transform = 'translate(-50%, -50%)';
+        modal.style.zIndex = '1000001';
+        modal.style.width = 'min(620px, calc(100vw - 24px))';
+        modal.style.maxHeight = 'min(86vh, 720px)';
+        modal.style.overflowY = 'auto';
+        modal.style.background = 'rgba(24,24,27,0.98)';
+        modal.style.border = '1px solid rgba(255,255,255,0.08)';
+        modal.style.borderRadius = '18px';
+        modal.style.boxShadow = '0 20px 50px rgba(0,0,0,0.45)';
+        modal.style.padding = '18px';
+        modal.style.fontFamily = 'Inter, Arial, sans-serif';
+        modal.style.color = '#fff';
+        applyScrollableModalStyle(modal);
+
+        modal.innerHTML = buildSavedPhraseQuickAddModalHtml(normalizedInitialText);
+
+        document.body.appendChild(overlay);
+        document.body.appendChild(modal);
+
+        const elements = getSavedPhraseQuickAddElements(modal);
+        const controller = createSavedPhraseQuickAddController(sourceInput, elements);
+
+        bindSavedPhraseQuickAddModalEvents(modal, overlay, elements, controller);
+        initializeSavedPhraseQuickAddModal(elements);
+    }
+
+    /**
+     * Ouvre la modale complète de gestion des réponses rapides.
+     *
+     * @returns {void}
+     */
+    function openSavedPhrasesConfigModal() {
+        if (!isSupportedPage()) return;
 
         if (modalOpen) {
             closeSettingsModal();
@@ -6709,7 +8436,7 @@
         modal.style.left = '50%';
         modal.style.transform = 'translate(-50%, -50%)';
         modal.style.zIndex = '1000001';
-        modal.style.width = 'min(760px, calc(100vw - 24px))';
+        modal.style.width = 'min(720px, calc(100vw - 24px))';
         modal.style.maxHeight = 'min(88vh, 860px)';
         modal.style.overflowY = 'auto';
         modal.style.background = 'rgba(24,24,27,0.98)';
@@ -6721,14 +8448,20 @@
         modal.style.color = '#fff';
         applyScrollableModalStyle(modal);
 
-        const cardStyle = `
-            padding:12px;
-            border-radius:14px;
-            background:rgba(255,255,255,0.03);
-            border:1px solid rgba(255,255,255,0.06);
-        `;
+        modal.innerHTML = buildSavedPhrasesConfigModalHtml(getSavedPhrasesModalCardStyle());
 
-        modal.innerHTML = `
+        document.body.appendChild(overlay);
+        document.body.appendChild(modal);
+
+        const elements = getSavedPhrasesConfigElements(modal);
+        const controller = createSavedPhrasesConfigController(modal, elements);
+
+        bindSavedPhrasesConfigModalEvents(modal, overlay, elements, controller);
+        initializeSavedPhrasesConfigModal(elements, controller);
+    }
+
+    function buildSavedPhrasesPickerModalHtml(cardStyle) {
+        return `
         <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px;">
             <div>
                 <div style="font-size:16px;font-weight:700;">Toutes les réponses rapides</div>
@@ -6784,334 +8517,410 @@
             color:#93c5fd;
         "></div>
         `;
+    }
+
+    function getSavedPhrasesPickerElements(modal) {
+        return {
+            closeBtn: modal.querySelector('#tm-close-modal'),
+            clearFiltersBtn: modal.querySelector('#tm-saved-phrases-picker-clear'),
+            feedback: modal.querySelector('#tm-feedback'),
+            pickerCount: modal.querySelector('#tm-saved-phrases-picker-count'),
+            filtersWrap: modal.querySelector('#tm-saved-phrases-picker-filters'),
+            filterMeta: modal.querySelector('#tm-saved-phrases-picker-filter-meta'),
+            pickerList: modal.querySelector('#tm-saved-phrases-picker-list')
+        };
+    }
+
+    function normalizeSavedPhraseKeywordFilterKey(keyword) {
+        return normalizeSavedPhraseText(keyword).toLocaleLowerCase('fr');
+    }
+
+    function createSavedPhrasePickerChip(keyword, isSelected = false, onClick = null) {
+        const chip = document.createElement(onClick ? 'button' : 'span');
+        chip.textContent = keyword;
+        chip.style.display = 'inline-flex';
+        chip.style.alignItems = 'center';
+        chip.style.padding = '4px 8px';
+        chip.style.borderRadius = '999px';
+        chip.style.background = isSelected ? 'rgba(139,92,246,0.32)' : 'rgba(124,58,237,0.18)';
+        chip.style.border = isSelected ? '1px solid rgba(167,139,250,0.45)' : '1px solid rgba(139,92,246,0.22)';
+        chip.style.color = isSelected ? '#ffffff' : '#ddd6fe';
+        chip.style.fontSize = '11px';
+        chip.style.lineHeight = '1.2';
+
+        if (onClick) {
+            chip.type = 'button';
+            chip.style.cursor = 'pointer';
+            chip.style.transition = 'all 0.15s ease';
+            chip.addEventListener('click', onClick);
+        }
+
+        return chip;
+    }
+
+    /**
+     * Maintient l'état local du picker complet des réponses rapides et de ses filtres.
+     *
+     * @param {Object.<string, Element|null>} elements
+     * @returns {Object}
+     */
+    function createSavedPhrasesPickerController(elements) {
+        const controller = {
+            activeKeywordFilters: new Set(),
+            setFeedback(message, isError = false) {
+                setModalFeedback(elements.feedback, message, isError);
+            },
+            getRankedEntries() {
+                return getRankedSavedPhrases().map((entry) => ({
+                    ...entry,
+                    matchPercent: computeSavedPhraseMatchPercent(entry.score)
+                }));
+            },
+            phraseMatchesActiveFilters(entry) {
+                if (controller.activeKeywordFilters.size === 0) return true;
+
+                const phraseKeywordKeys = new Set(
+                    entry.phrase.keywords
+                        .map((keyword) => normalizeSavedPhraseKeywordFilterKey(keyword))
+                        .filter(Boolean)
+                );
+
+                for (const activeFilter of controller.activeKeywordFilters) {
+                    if (!phraseKeywordKeys.has(activeFilter)) {
+                        return false;
+                    }
+                }
+
+                return true;
+            },
+            toggleKeywordFilter(keyword) {
+                const keywordKey = normalizeSavedPhraseKeywordFilterKey(keyword);
+                if (!keywordKey) return;
+
+                if (controller.activeKeywordFilters.has(keywordKey)) {
+                    controller.activeKeywordFilters.delete(keywordKey);
+                } else {
+                    controller.activeKeywordFilters.add(keywordKey);
+                }
+
+                controller.refreshFilters();
+                controller.refreshList();
+            },
+            clearFilters() {
+                if (controller.activeKeywordFilters.size === 0) return;
+                controller.activeKeywordFilters.clear();
+                controller.refreshFilters();
+                controller.refreshList();
+            },
+            refreshFilters() {
+                refreshSavedPhrasesPickerFilters(elements, controller);
+            },
+            refreshList() {
+                refreshSavedPhrasesPickerList(elements, controller);
+            }
+        };
+
+        return controller;
+    }
+
+    function buildSavedPhrasePickerFilterChip(controller, keyword) {
+        const keywordKey = normalizeSavedPhraseKeywordFilterKey(keyword);
+        return createSavedPhrasePickerChip(
+            keyword,
+            controller.activeKeywordFilters.has(keywordKey),
+            (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                controller.toggleKeywordFilter(keyword);
+            }
+        );
+    }
+
+    function refreshSavedPhrasesPickerFilters(elements, controller) {
+        if (!(elements.filtersWrap instanceof HTMLElement)
+            || !(elements.filterMeta instanceof HTMLElement)
+            || !(elements.clearFiltersBtn instanceof HTMLButtonElement)) {
+            return;
+        }
+
+        const entries = controller.getRankedEntries();
+        const availableKeywords = [];
+        const seenKeywordKeys = new Set();
+
+        entries.forEach((entry) => {
+            entry.phrase.keywords.forEach((keyword) => {
+                const keywordKey = normalizeSavedPhraseKeywordFilterKey(keyword);
+                if (!keywordKey || seenKeywordKeys.has(keywordKey)) return;
+
+                seenKeywordKeys.add(keywordKey);
+                availableKeywords.push(keyword);
+            });
+        });
+
+        availableKeywords.sort((a, b) => a.localeCompare(b, 'fr', { sensitivity: 'base' }));
+        elements.filtersWrap.innerHTML = '';
+
+        if (availableKeywords.length === 0) {
+            const empty = document.createElement('div');
+            empty.textContent = 'Aucun mot-clé enregistré pour le moment.';
+            empty.style.fontSize = '12px';
+            empty.style.color = '#a1a1aa';
+            elements.filtersWrap.appendChild(empty);
+        } else {
+            availableKeywords.forEach((keyword) => {
+                elements.filtersWrap.appendChild(buildSavedPhrasePickerFilterChip(controller, keyword));
+            });
+        }
+
+        elements.clearFiltersBtn.disabled = controller.activeKeywordFilters.size === 0;
+        elements.clearFiltersBtn.style.opacity = controller.activeKeywordFilters.size === 0 ? '0.55' : '1';
+        elements.clearFiltersBtn.style.cursor = controller.activeKeywordFilters.size === 0 ? 'not-allowed' : 'pointer';
+
+        if (controller.activeKeywordFilters.size === 0) {
+            elements.filterMeta.textContent = 'Aucun filtre actif.';
+            return;
+        }
+
+        elements.filterMeta.textContent = `${controller.activeKeywordFilters.size} filtre${controller.activeKeywordFilters.size > 1 ? 's' : ''} actif${controller.activeKeywordFilters.size > 1 ? 's' : ''}. Clique à nouveau sur un mot-clé pour le retirer.`;
+    }
+
+    function createSavedPhrasePickerRow(controller, entry, contextualSortingActive) {
+        const phrase = entry.phrase;
+        const previewText = truncateSavedPhrasePreviewText(phrase.text);
+        const row = document.createElement('div');
+        row.title = buildSavedPhrasesMenuItemTitle(entry, contextualSortingActive);
+        row.style.width = '100%';
+        row.style.textAlign = 'left';
+        row.style.padding = '12px';
+        row.style.borderRadius = '12px';
+        row.style.background = 'rgba(59,130,246,0.08)';
+        row.style.border = '1px solid rgba(59,130,246,0.16)';
+        row.style.cursor = 'pointer';
+        row.style.transition = 'background 0.15s ease, border-color 0.15s ease';
+        row.tabIndex = 0;
+        row.setAttribute('role', 'button');
+
+        row.addEventListener('mouseenter', () => {
+            row.style.background = 'rgba(99,102,241,0.15)';
+            row.style.borderColor = 'rgba(129,140,248,0.32)';
+        });
+        row.addEventListener('mouseleave', () => {
+            row.style.background = 'rgba(59,130,246,0.08)';
+            row.style.borderColor = 'rgba(59,130,246,0.16)';
+        });
+
+        function insertPhrase() {
+            const input = getChatInput();
+            const result = insertSavedPhraseIntoChatInput(input, phrase.text);
+
+            if (!result.ok) {
+                controller.setFeedback(result.message, true);
+                return;
+            }
+
+            closeSettingsModal();
+        }
+
+        row.addEventListener('click', insertPhrase);
+        row.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                insertPhrase();
+            }
+        });
+
+        const textRow = document.createElement('div');
+        textRow.style.display = 'flex';
+        textRow.style.alignItems = 'flex-start';
+        textRow.style.gap = '8px';
+
+        if (contextualSortingActive && entry.matchPercent > 0) {
+            const percentBadge = document.createElement('span');
+            percentBadge.textContent = `${entry.matchPercent}%`;
+            percentBadge.title = 'Taux de correspondance estimé';
+            percentBadge.style.display = 'inline-flex';
+            percentBadge.style.alignItems = 'center';
+            percentBadge.style.justifyContent = 'center';
+            percentBadge.style.padding = '3px 7px';
+            percentBadge.style.borderRadius = '999px';
+            percentBadge.style.background = 'rgba(34,197,94,0.18)';
+            percentBadge.style.border = '1px solid rgba(74,222,128,0.28)';
+            percentBadge.style.color = '#bbf7d0';
+            percentBadge.style.fontSize = '10px';
+            percentBadge.style.fontWeight = '700';
+            percentBadge.style.flexShrink = '0';
+            percentBadge.style.marginTop = '1px';
+            textRow.appendChild(percentBadge);
+        }
+
+        const text = document.createElement('div');
+        text.textContent = previewText;
+        text.style.fontSize = '12px';
+        text.style.lineHeight = '1.5';
+        text.style.color = '#e4e4e7';
+        text.style.whiteSpace = 'pre-wrap';
+        text.style.wordBreak = 'break-word';
+        text.style.flex = '1';
+        text.style.minWidth = '0';
+
+        const meta = document.createElement('div');
+        meta.style.display = 'flex';
+        meta.style.justifyContent = 'space-between';
+        meta.style.alignItems = 'center';
+        meta.style.gap = '10px';
+        meta.style.flexWrap = 'wrap';
+        meta.style.marginTop = '8px';
+
+        const keywordsLabel = document.createElement('div');
+        keywordsLabel.textContent = phrase.keywords.length > 0 ? 'Mots-clés liés' : 'Aucun mot-clé';
+        keywordsLabel.style.fontSize = '11px';
+        keywordsLabel.style.color = phrase.keywords.length > 0 ? '#c4b5fd' : '#71717a';
+
+        const length = document.createElement('div');
+        length.textContent = formatSavedPhraseLengthLabel(phrase.text);
+        length.style.fontSize = '11px';
+        length.style.color = '#71717a';
+
+        const metaLeft = document.createElement('div');
+        metaLeft.style.display = 'flex';
+        metaLeft.style.alignItems = 'center';
+        metaLeft.style.gap = '8px';
+        metaLeft.style.flexWrap = 'wrap';
+        metaLeft.appendChild(keywordsLabel);
+
+        meta.appendChild(metaLeft);
+        meta.appendChild(length);
+
+        textRow.appendChild(text);
+        row.appendChild(textRow);
+        row.appendChild(meta);
+
+        if (phrase.keywords.length > 0) {
+            const keywordsWrap = document.createElement('div');
+            keywordsWrap.style.display = 'flex';
+            keywordsWrap.style.flexWrap = 'wrap';
+            keywordsWrap.style.gap = '6px';
+            keywordsWrap.style.marginTop = '8px';
+
+            phrase.keywords.forEach((keyword) => {
+                keywordsWrap.appendChild(buildSavedPhrasePickerFilterChip(controller, keyword));
+            });
+
+            row.appendChild(keywordsWrap);
+        }
+
+        return row;
+    }
+
+    function refreshSavedPhrasesPickerList(elements, controller) {
+        if (!(elements.pickerList instanceof HTMLElement) || !(elements.pickerCount instanceof HTMLElement)) return;
+
+        const entries = controller.getRankedEntries();
+        const filteredEntries = entries.filter((entry) => controller.phraseMatchesActiveFilters(entry));
+        const contextualSortingActive = entries.length > 0 && entries[0].score > 0;
+
+        elements.pickerList.innerHTML = '';
+        elements.pickerCount.textContent = contextualSortingActive
+            ? `${filteredEntries.length}/${entries.length} affichée${filteredEntries.length > 1 ? 's' : ''} · tri contextuel actif`
+            : `${filteredEntries.length}/${entries.length} affichée${filteredEntries.length > 1 ? 's' : ''}`;
+
+        if (entries.length === 0) {
+            const empty = document.createElement('div');
+            empty.textContent = 'Aucune réponse rapide enregistrée pour le moment.';
+            empty.style.fontSize = '12px';
+            empty.style.color = '#a1a1aa';
+            empty.style.padding = '6px 2px';
+            elements.pickerList.appendChild(empty);
+            return;
+        }
+
+        if (filteredEntries.length === 0) {
+            const empty = document.createElement('div');
+            empty.textContent = 'Aucune réponse ne correspond aux mots-clés sélectionnés.';
+            empty.style.fontSize = '12px';
+            empty.style.color = '#a1a1aa';
+            empty.style.padding = '6px 2px';
+            elements.pickerList.appendChild(empty);
+            return;
+        }
+
+        filteredEntries.forEach((entry) => {
+            elements.pickerList.appendChild(createSavedPhrasePickerRow(controller, entry, contextualSortingActive));
+        });
+    }
+
+    function bindSavedPhrasesPickerModalEvents(modal, overlay, elements, controller) {
+        elements.closeBtn?.addEventListener('click', closeSettingsModal);
+        overlay.addEventListener('click', closeSettingsModal);
+        elements.clearFiltersBtn?.addEventListener('click', () => {
+            controller.clearFilters();
+        });
+
+        modal.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                closeSettingsModal();
+            }
+        });
+    }
+
+    function initializeSavedPhrasesPickerModal(elements, controller) {
+        controller.refreshFilters();
+        controller.refreshList();
+    }
+
+    /**
+     * Ouvre le picker complet des réponses rapides avec filtres par mots-clés.
+     *
+     * @returns {void}
+     */
+    function openSavedPhrasesPickerModal() {
+        if (!isSupportedPage()) return;
+        if (savedPhrases.length === 0) return;
+
+        if (modalOpen) {
+            closeSettingsModal();
+        }
+
+        modalOpen = true;
+        hideImagePreview();
+
+        const overlay = document.createElement('div');
+        overlay.id = OVERLAY_ID;
+        overlay.style.position = 'fixed';
+        overlay.style.inset = '0';
+        overlay.style.zIndex = '1000000';
+        overlay.style.background = 'rgba(0,0,0,0.45)';
+
+        const modal = document.createElement('div');
+        modal.id = MODAL_ID;
+        modal.style.position = 'fixed';
+        modal.style.top = '50%';
+        modal.style.left = '50%';
+        modal.style.transform = 'translate(-50%, -50%)';
+        modal.style.zIndex = '1000001';
+        modal.style.width = 'min(760px, calc(100vw - 24px))';
+        modal.style.maxHeight = 'min(88vh, 860px)';
+        modal.style.overflowY = 'auto';
+        modal.style.background = 'rgba(24,24,27,0.98)';
+        modal.style.border = '1px solid rgba(255,255,255,0.08)';
+        modal.style.borderRadius = '18px';
+        modal.style.boxShadow = '0 20px 50px rgba(0,0,0,0.45)';
+        modal.style.padding = '18px';
+        modal.style.fontFamily = 'Inter, Arial, sans-serif';
+        modal.style.color = '#fff';
+        applyScrollableModalStyle(modal);
+
+        modal.innerHTML = buildSavedPhrasesPickerModalHtml(getSavedPhrasesModalCardStyle());
 
         document.body.appendChild(overlay);
         document.body.appendChild(modal);
 
-        const closeBtn = modal.querySelector('#tm-close-modal');
-        const clearFiltersBtn = modal.querySelector('#tm-saved-phrases-picker-clear');
-        const feedback = modal.querySelector('#tm-feedback');
-        const pickerCount = modal.querySelector('#tm-saved-phrases-picker-count');
-        const filtersWrap = modal.querySelector('#tm-saved-phrases-picker-filters');
-        const filterMeta = modal.querySelector('#tm-saved-phrases-picker-filter-meta');
-        const pickerList = modal.querySelector('#tm-saved-phrases-picker-list');
-        const activeKeywordFilters = new Set();
+        const elements = getSavedPhrasesPickerElements(modal);
+        const controller = createSavedPhrasesPickerController(elements);
 
-        function setFeedback(message, isError = false) {
-            if (!feedback) return;
-
-            feedback.textContent = message;
-            feedback.style.color = isError ? '#fca5a5' : '#93c5fd';
-        }
-
-        function getRankedPickerEntries() {
-            return getRankedSavedPhrases().map((entry) => ({
-                ...entry,
-                matchPercent: computeSavedPhraseMatchPercent(entry.score)
-            }));
-        }
-
-        function normalizeKeywordFilterKey(keyword) {
-            return normalizeSavedPhraseText(keyword).toLocaleLowerCase('fr');
-        }
-
-        function phraseMatchesActiveFilters(entry) {
-            if (activeKeywordFilters.size === 0) return true;
-
-            const phraseKeywordKeys = new Set(
-                entry.phrase.keywords
-                    .map((keyword) => normalizeKeywordFilterKey(keyword))
-                    .filter(Boolean)
-            );
-
-            for (const activeFilter of activeKeywordFilters) {
-                if (!phraseKeywordKeys.has(activeFilter)) {
-                    return false;
-                }
-            }
-
-            return true;
-        }
-
-        function toggleKeywordFilter(keyword) {
-            const keywordKey = normalizeKeywordFilterKey(keyword);
-            if (!keywordKey) return;
-
-            if (activeKeywordFilters.has(keywordKey)) {
-                activeKeywordFilters.delete(keywordKey);
-            } else {
-                activeKeywordFilters.add(keywordKey);
-            }
-
-            refreshPickerFilters();
-            refreshPickerList();
-        }
-
-        function createKeywordChip(keyword, isSelected = false, onClick = null) {
-            const chip = document.createElement(onClick ? 'button' : 'span');
-            chip.textContent = keyword;
-            chip.style.display = 'inline-flex';
-            chip.style.alignItems = 'center';
-            chip.style.padding = '4px 8px';
-            chip.style.borderRadius = '999px';
-            chip.style.background = isSelected ? 'rgba(139,92,246,0.32)' : 'rgba(124,58,237,0.18)';
-            chip.style.border = isSelected ? '1px solid rgba(167,139,250,0.45)' : '1px solid rgba(139,92,246,0.22)';
-            chip.style.color = isSelected ? '#ffffff' : '#ddd6fe';
-            chip.style.fontSize = '11px';
-            chip.style.lineHeight = '1.2';
-            if (onClick) {
-                chip.type = 'button';
-                chip.style.cursor = 'pointer';
-                chip.style.transition = 'all 0.15s ease';
-                chip.addEventListener('click', onClick);
-            }
-            return chip;
-        }
-
-        function refreshPickerFilters() {
-            if (!filtersWrap || !filterMeta || !clearFiltersBtn) return;
-
-            const entries = getRankedPickerEntries();
-            const availableKeywords = [];
-            const seenKeywordKeys = new Set();
-
-            entries.forEach((entry) => {
-                entry.phrase.keywords.forEach((keyword) => {
-                    const keywordKey = normalizeKeywordFilterKey(keyword);
-                    if (!keywordKey || seenKeywordKeys.has(keywordKey)) return;
-
-                    seenKeywordKeys.add(keywordKey);
-                    availableKeywords.push(keyword);
-                });
-            });
-
-            availableKeywords.sort((a, b) => a.localeCompare(b, 'fr', { sensitivity: 'base' }));
-
-            filtersWrap.innerHTML = '';
-
-            if (availableKeywords.length === 0) {
-                const empty = document.createElement('div');
-                empty.textContent = 'Aucun mot-clé enregistré pour le moment.';
-                empty.style.fontSize = '12px';
-                empty.style.color = '#a1a1aa';
-                filtersWrap.appendChild(empty);
-            } else {
-                availableKeywords.forEach((keyword) => {
-                    const keywordKey = normalizeKeywordFilterKey(keyword);
-                    const chip = createKeywordChip(
-                        keyword,
-                        activeKeywordFilters.has(keywordKey),
-                        (event) => {
-                            event.preventDefault();
-                            event.stopPropagation();
-                            toggleKeywordFilter(keyword);
-                        }
-                    );
-                    filtersWrap.appendChild(chip);
-                });
-            }
-
-            clearFiltersBtn.disabled = activeKeywordFilters.size === 0;
-            clearFiltersBtn.style.opacity = activeKeywordFilters.size === 0 ? '0.55' : '1';
-            clearFiltersBtn.style.cursor = activeKeywordFilters.size === 0 ? 'not-allowed' : 'pointer';
-
-            if (activeKeywordFilters.size === 0) {
-                filterMeta.textContent = 'Aucun filtre actif.';
-                return;
-            }
-
-            filterMeta.textContent = `${activeKeywordFilters.size} filtre${activeKeywordFilters.size > 1 ? 's' : ''} actif${activeKeywordFilters.size > 1 ? 's' : ''}. Clique à nouveau sur un mot-clé pour le retirer.`;
-        }
-
-        function refreshPickerList() {
-            if (!pickerList || !pickerCount) return;
-
-            const entries = getRankedPickerEntries();
-            const filteredEntries = entries.filter((entry) => phraseMatchesActiveFilters(entry));
-            const contextualSortingActive = entries.length > 0 && entries[0].score > 0;
-
-            pickerList.innerHTML = '';
-            pickerCount.textContent = contextualSortingActive
-                ? `${filteredEntries.length}/${entries.length} affichée${filteredEntries.length > 1 ? 's' : ''} · tri contextuel actif`
-                : `${filteredEntries.length}/${entries.length} affichée${filteredEntries.length > 1 ? 's' : ''}`;
-
-            if (entries.length === 0) {
-                const empty = document.createElement('div');
-                empty.textContent = 'Aucune réponse rapide enregistrée pour le moment.';
-                empty.style.fontSize = '12px';
-                empty.style.color = '#a1a1aa';
-                empty.style.padding = '6px 2px';
-                pickerList.appendChild(empty);
-                return;
-            }
-
-            if (filteredEntries.length === 0) {
-                const empty = document.createElement('div');
-                empty.textContent = 'Aucune réponse ne correspond aux mots-clés sélectionnés.';
-                empty.style.fontSize = '12px';
-                empty.style.color = '#a1a1aa';
-                empty.style.padding = '6px 2px';
-                pickerList.appendChild(empty);
-                return;
-            }
-
-            filteredEntries.forEach((entry) => {
-                const phrase = entry.phrase;
-                const previewText = truncateSavedPhrasePreviewText(phrase.text);
-                const row = document.createElement('div');
-                row.style.width = '100%';
-                row.style.textAlign = 'left';
-                row.style.padding = '12px';
-                row.style.borderRadius = '12px';
-                row.style.background = 'rgba(59,130,246,0.08)';
-                row.style.border = '1px solid rgba(59,130,246,0.16)';
-                row.style.cursor = 'pointer';
-                row.style.transition = 'background 0.15s ease, border-color 0.15s ease';
-                row.tabIndex = 0;
-                row.setAttribute('role', 'button');
-
-                row.addEventListener('mouseenter', () => {
-                    row.style.background = 'rgba(99,102,241,0.15)';
-                    row.style.borderColor = 'rgba(129,140,248,0.32)';
-                });
-
-                row.addEventListener('mouseleave', () => {
-                    row.style.background = 'rgba(59,130,246,0.08)';
-                    row.style.borderColor = 'rgba(59,130,246,0.16)';
-                });
-
-                function insertPhrase() {
-                    const input = getChatInput();
-                    const result = insertSavedPhraseIntoChatInput(input, phrase.text);
-
-                    if (!result.ok) {
-                        setFeedback(result.message, true);
-                        return;
-                    }
-
-                    closeSettingsModal();
-                }
-
-                row.addEventListener('click', insertPhrase);
-                row.addEventListener('keydown', (event) => {
-                    if (event.key === 'Enter' || event.key === ' ') {
-                        event.preventDefault();
-                        insertPhrase();
-                    }
-                });
-
-                const textRow = document.createElement('div');
-                textRow.style.display = 'flex';
-                textRow.style.alignItems = 'flex-start';
-                textRow.style.gap = '8px';
-
-                if (contextualSortingActive && entry.matchPercent > 0) {
-                    const percentBadge = document.createElement('span');
-                    percentBadge.textContent = `${entry.matchPercent}%`;
-                    percentBadge.title = 'Taux de correspondance estimé';
-                    percentBadge.style.display = 'inline-flex';
-                    percentBadge.style.alignItems = 'center';
-                    percentBadge.style.justifyContent = 'center';
-                    percentBadge.style.padding = '3px 7px';
-                    percentBadge.style.borderRadius = '999px';
-                    percentBadge.style.background = 'rgba(34,197,94,0.18)';
-                    percentBadge.style.border = '1px solid rgba(74,222,128,0.28)';
-                    percentBadge.style.color = '#bbf7d0';
-                    percentBadge.style.fontSize = '10px';
-                    percentBadge.style.fontWeight = '700';
-                    percentBadge.style.flexShrink = '0';
-                    percentBadge.style.marginTop = '1px';
-                    textRow.appendChild(percentBadge);
-                }
-
-                const text = document.createElement('div');
-                text.textContent = previewText;
-                text.style.fontSize = '12px';
-                text.style.lineHeight = '1.5';
-                text.style.color = '#e4e4e7';
-                text.style.whiteSpace = 'pre-wrap';
-                text.style.wordBreak = 'break-word';
-                text.style.flex = '1';
-                text.style.minWidth = '0';
-
-                const meta = document.createElement('div');
-                meta.style.display = 'flex';
-                meta.style.justifyContent = 'space-between';
-                meta.style.alignItems = 'center';
-                meta.style.gap = '10px';
-                meta.style.flexWrap = 'wrap';
-                meta.style.marginTop = '8px';
-
-                const keywordsLabel = document.createElement('div');
-                keywordsLabel.textContent = phrase.keywords.length > 0 ? 'Mots-clés liés' : 'Aucun mot-clé';
-                keywordsLabel.style.fontSize = '11px';
-                keywordsLabel.style.color = phrase.keywords.length > 0 ? '#c4b5fd' : '#71717a';
-
-                const length = document.createElement('div');
-                length.textContent = formatSavedPhraseLengthLabel(phrase.text);
-                length.style.fontSize = '11px';
-                length.style.color = '#71717a';
-
-                const metaLeft = document.createElement('div');
-                metaLeft.style.display = 'flex';
-                metaLeft.style.alignItems = 'center';
-                metaLeft.style.gap = '8px';
-                metaLeft.style.flexWrap = 'wrap';
-                metaLeft.appendChild(keywordsLabel);
-
-                meta.appendChild(metaLeft);
-                meta.appendChild(length);
-
-                textRow.appendChild(text);
-                row.appendChild(textRow);
-                row.appendChild(meta);
-
-                if (phrase.keywords.length > 0) {
-                    const keywordsWrap = document.createElement('div');
-                    keywordsWrap.style.display = 'flex';
-                    keywordsWrap.style.flexWrap = 'wrap';
-                    keywordsWrap.style.gap = '6px';
-                    keywordsWrap.style.marginTop = '8px';
-
-                    phrase.keywords.forEach((keyword) => {
-                        const keywordKey = normalizeKeywordFilterKey(keyword);
-                        const chip = createKeywordChip(
-                            keyword,
-                            activeKeywordFilters.has(keywordKey),
-                            (event) => {
-                                event.preventDefault();
-                                event.stopPropagation();
-                                toggleKeywordFilter(keyword);
-                            }
-                        );
-                        keywordsWrap.appendChild(chip);
-                    });
-
-                    row.appendChild(keywordsWrap);
-                }
-
-                pickerList.appendChild(row);
-            });
-        }
-
-        closeBtn?.addEventListener('click', closeSettingsModal);
-        overlay.addEventListener('click', closeSettingsModal);
-        clearFiltersBtn?.addEventListener('click', () => {
-            if (activeKeywordFilters.size === 0) return;
-            activeKeywordFilters.clear();
-            refreshPickerFilters();
-            refreshPickerList();
-        });
-
-        modal.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') {
-                e.preventDefault();
-                closeSettingsModal();
-            }
-        });
-
-        refreshPickerFilters();
-        refreshPickerList();
+        bindSavedPhrasesPickerModalEvents(modal, overlay, elements, controller);
+        initializeSavedPhrasesPickerModal(elements, controller);
     }
 
     function setStatsDisplayMode(nextMode) {
@@ -7176,6 +8985,11 @@
 
     }
 
+    /**
+     * Ouvre la modale principale de configuration du script.
+     *
+     * @returns {void}
+     */
     function openSettingsModal() {
         if (!isSupportedPage()) return;
         if (modalOpen) return;
@@ -7185,48 +8999,9 @@
 
         const currentPageLabel = getCurrentPageLabel();
         const homeView = isHomePage();
+        const isChatView = isChatPage();
         const settingsColumnCount = window.innerWidth >= 780 ? 2 : 1;
-        const settingsCardStyle = `
-            display:inline-block;
-            width:100%;
-            padding:12px;
-            margin:0 0 14px 0;
-            border-radius:14px;
-            background:rgba(255,255,255,0.03);
-            border:1px solid rgba(255,255,255,0.06);
-            box-sizing:border-box;
-            break-inside:avoid;
-            vertical-align:top;
-        `;
-        const settingsFullWidthCardStyle = `
-            width:100%;
-            padding:12px;
-            margin:0 0 14px 0;
-            border-radius:14px;
-            background:rgba(255,255,255,0.03);
-            border:1px solid rgba(255,255,255,0.06);
-            box-sizing:border-box;
-        `;
-        const settingsCheckboxLabelStyle = `
-            display:flex;
-            align-items:center;
-            gap:10px;
-            cursor:pointer;
-            font-size:12px;
-            color:#d4d4d8;
-        `;
-        const settingsCheckboxLabelWithMarginStyle = `
-            ${settingsCheckboxLabelStyle}
-            margin-top:12px;
-        `;
-        const settingsCheckboxInputStyle = (accentColor) => `
-            width:16px;
-            height:16px;
-            accent-color:${accentColor};
-            cursor:pointer;
-            flex-shrink:0;
-        `;
-        const accessibilityCheckboxAccentColor = '#06b6d4';
+        const styles = getSettingsModalStyles(settingsColumnCount);
 
         const overlay = document.createElement('div');
         overlay.id = OVERLAY_ID;
@@ -7254,1382 +9029,14 @@
         modal.style.color = '#fff';
         applyScrollableModalStyle(modal);
 
-        modal.innerHTML = `
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px;">
-            <div>
-                <div style="font-size:16px;font-weight:700;">Paramètres chat</div>
-                <div style="font-size:12px;color:#a1a1aa;margin-top:4px;">Vue actuelle : ${currentPageLabel}</div>
-            </div>
-            <button id="tm-close-modal" style="
-                border:none;
-                background:#27272a;
-                color:#fff;
-                width:34px;
-                height:34px;
-                border-radius:10px;
-                cursor:pointer;
-                font-size:18px;
-                line-height:1;
-            ">×</button>
-        </div>
-
-        <div style="${settingsFullWidthCardStyle}">
-            <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Astuces</div>
-
-            <div style="display:grid;gap:10px;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));">
-                <div style="padding:10px 12px;border-radius:12px;background:rgba(37,99,235,0.12);border:1px solid rgba(37,99,235,0.24);">
-                    <div style="font-size:12px;font-weight:700;color:#dbeafe;">Ctrl+Alt+C ou Ctrl+Cmd+C</div>
-                    <div style="margin-top:4px;font-size:11px;color:#93c5fd;line-height:1.45;">
-                        Ouvre directement cette page de paramètres.
-                    </div>
-                </div>
-
-                <div style="padding:10px 12px;border-radius:12px;background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.24);">
-                    <div style="font-size:12px;font-weight:700;color:#bbf7d0;">${formatAfkShortcutLabel()}</div>
-                    <div style="margin-top:4px;font-size:11px;color:#86efac;line-height:1.45;">
-                        Active ou coupe le mode AFK sur le chat en cours, avec historique dédié des mentions et réponses.
-                    </div>
-                </div>
-
-                <div style="padding:10px 12px;border-radius:12px;background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.24);">
-                    <div style="font-size:12px;font-weight:700;color:#fde68a;">Alt+clic sur un pseudo</div>
-                    <div style="margin-top:4px;font-size:11px;color:#fcd34d;line-height:1.45;">
-                        Ajoute ou retire rapidement un utilisateur de la blacklist.
-                    </div>
-                </div>
-
-                <div style="padding:10px 12px;border-radius:12px;background:rgba(124,58,237,0.14);border:1px solid rgba(139,92,246,0.26);">
-                    <div style="font-size:12px;font-weight:700;color:#ddd6fe;">Exporter la config avant nettoyage navigateur</div>
-                    <div style="margin-top:4px;font-size:11px;color:#c4b5fd;line-height:1.45;">
-                        Pense à exporter la configuration du script avant de supprimer les données du navigateur, changer de profil ou réinstaller Tampermonkey.
-                    </div>
-                </div>
-
-                ${isChatPage() ? `
-                <div style="padding:10px 12px;border-radius:12px;background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.24);">
-                    <div style="font-size:12px;font-weight:700;color:#bbf7d0;">Double-clic sur un message</div>
-                    <div style="margin-top:4px;font-size:11px;color:#86efac;line-height:1.45;">
-                        Lance la réponse au message sans passer par le bouton d’action.
-                    </div>
-                </div>
-
-                <div style="padding:10px 12px;border-radius:12px;background:rgba(6,182,212,0.12);border:1px solid rgba(6,182,212,0.24);">
-                    <div style="font-size:12px;font-weight:700;color:#a5f3fc;">Clic long sur un message</div>
-                    <div style="margin-top:4px;font-size:11px;color:#67e8f9;line-height:1.45;">
-                        Ouvre les réactions, avec le picker repositionné à droite du pointeur.
-                    </div>
-                </div>
-                ` : `
-                <div style="padding:10px 12px;border-radius:12px;background:rgba(63,63,70,0.6);border:1px solid rgba(255,255,255,0.08);">
-                    <div style="font-size:12px;font-weight:700;color:#f4f4f5;">Raccourcis du chat dédié</div>
-                    <div style="margin-top:4px;font-size:11px;color:#a1a1aa;line-height:1.45;">
-                        Les gestes double-clic pour répondre et clic long pour réagir ne sont actifs que sur la page chat, pas sur la shout de l’accueil.
-                    </div>
-                </div>
-                `}
-            </div>
-        </div>
-
-        <div style="
-            column-count:${settingsColumnCount};
-            column-gap:14px;
-        ">
-            ${homeView ? `
-            <div style="${settingsCardStyle}">
-                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Page d’accueil</div>
-
-                <label style="${settingsCheckboxLabelStyle}">
-                    <input id="tm-home-collapse-toggle-setting" type="checkbox" ${homeChatCollapsed ? 'checked' : ''} style="${settingsCheckboxInputStyle('#22c55e')}">
-                    <span>Masquer la shoutbox</span>
-                </label>
-
-                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
-                    Permet de masquer la shoutbox sur la page d’accueil.
-                </div>
-            </div>
-            ` : ''}
-
-            <div style="${settingsCardStyle}">
-                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Stats box (${currentPageLabel})</div>
-
-                <div style="font-size:11px;color:#71717a;line-height:1.5;">
-                    Glisse l’en-tête de la stats box pour la déplacer, puis attrape son coin inférieur droit pour la redimensionner. La position et la taille sont mémorisées séparément pour ${currentPageLabel}.
-                </div>
-
-                <label style="${settingsCheckboxLabelWithMarginStyle}">
-                    <input id="tm-hide-stats-toggle" type="checkbox" ${statsHidden ? 'checked' : ''} style="${settingsCheckboxInputStyle('#f59e0b')}">
-                    <span>Masquer complètement la stats box</span>
-                </label>
-
-                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
-                    <button id="tm-reset-stats-layout" style="
-                        border:none;
-                        background:#3f3f46;
-                        color:#fff;
-                        border-radius:10px;
-                        padding:10px 12px;
-                        cursor:pointer;
-                        font-weight:600;
-                    ">Réinitialiser taille et position</button>
-                </div>
-
-            </div>
-
-            <div style="${settingsCardStyle}">
-                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Accessibilité</div>
-
-                <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
-                    <div style="font-size:12px;color:#c4c4c8;">
-                        Taille de police shoutbox
-                    </div>
-                    <div id="tm-font-size-value" style="
-                        min-width:52px;
-                        text-align:right;
-                        font-size:12px;
-                        color:#f4f4f5;
-                        font-weight:700;
-                    ">${formatChatFontScalePercent()}%</div>
-                </div>
-
-                <input id="tm-font-size-range" type="range" min="${MIN_CHAT_FONT_SCALE * 100}" max="${MAX_CHAT_FONT_SCALE * 100}" step="5" value="${formatChatFontScalePercent()}"
-                    style="
-                        width:100%;
-                        margin-top:12px;
-                        accent-color:#38bdf8;
-                        cursor:pointer;
-                    ">
-
-                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
-                    <button id="tm-font-size-decrease" style="
-                        border:none;
-                        background:#3f3f46;
-                        color:#fff;
-                        border-radius:10px;
-                        padding:10px 12px;
-                        cursor:pointer;
-                        font-weight:600;
-                    ">A-</button>
-
-                    <button id="tm-font-size-increase" style="
-                        border:none;
-                        background:#0f766e;
-                        color:#fff;
-                        border-radius:10px;
-                        padding:10px 12px;
-                        cursor:pointer;
-                        font-weight:600;
-                    ">A+</button>
-
-                    <button id="tm-font-size-save" style="
-                        border:none;
-                        background:#2563eb;
-                        color:#fff;
-                        border-radius:10px;
-                        padding:10px 12px;
-                        cursor:pointer;
-                        font-weight:600;
-                    ">Enregistrer</button>
-
-                    <button id="tm-font-size-reset" style="
-                        border:none;
-                        background:#3f3f46;
-                        color:#fff;
-                        border-radius:10px;
-                        padding:10px 12px;
-                        cursor:pointer;
-                        font-weight:600;
-                    ">Réinitialiser la police</button>
-                </div>
-
-                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
-                    Agrandit ou réduit les pseudos et les messages dans la shoutbox.
-                </div>
-
-                <label style="${settingsCheckboxLabelWithMarginStyle}">
-                    <input id="tm-linkify-urls-toggle" type="checkbox" ${linkifyUrlsEnabled ? 'checked' : ''} style="${settingsCheckboxInputStyle(accessibilityCheckboxAccentColor)}">
-                    <span>Rendre les URLs cliquables</span>
-                </label>
-
-                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
-                    Détecte les liens dans les messages et les transforme en liens cliquables.
-                </div>
-
-                ${isChatPage() ? `
-                <label style="${settingsCheckboxLabelWithMarginStyle}">
-                    <input id="tm-chat-scrollbar-toggle" type="checkbox" ${chatScrollbarEnabled ? 'checked' : ''} style="${settingsCheckboxInputStyle(accessibilityCheckboxAccentColor)}">
-                    <span>Afficher l’ascenseur du chat</span>
-                </label>
-
-                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
-                    Ajoute une scrollbar visible uniquement sur la zone de messages de la page chat.
-                </div>
-                ` : ''}
-
-                <label style="${settingsCheckboxLabelWithMarginStyle}">
-                    <input id="tm-message-actions-left-toggle" type="checkbox" ${messageActionsLeftEnabled ? 'checked' : ''} style="${settingsCheckboxInputStyle(accessibilityCheckboxAccentColor)}">
-                    <span>Actions des messages à gauche</span>
-                </label>
-
-                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
-                    Déplace les boutons Réagir / Répondre qui apparaissent au survol vers la gauche du bloc message. Utile seulement sur la page chat.
-                </div>
-
-                <label style="${settingsCheckboxLabelWithMarginStyle}">
-                    <input id="tm-chat-input-toolbar-inline-toggle" type="checkbox" ${chatInputToolbarInline ? 'checked' : ''} style="${settingsCheckboxInputStyle(accessibilityCheckboxAccentColor)}">
-                    <span>Boutons du chat sur la même ligne que l’input</span>
-                </label>
-
-                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
-                    Désactivé par défaut : la barre d’outils reste au-dessus du champ. Active cette option pour placer les boutons à côté de l’input.
-                </div>
-
-                <label style="${settingsCheckboxLabelWithMarginStyle}">
-                    <input id="tm-chat-input-toolbar-align-right-toggle" type="checkbox" ${chatInputToolbarAlignRight ? 'checked' : ''} style="${settingsCheckboxInputStyle(accessibilityCheckboxAccentColor)}">
-                    <span>Aligner les boutons du chat à droite</span>
-                </label>
-
-                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
-                    Décoché : boutons à gauche. Coché : boutons à droite, que la barre soit au-dessus du champ ou sur la même ligne.
-                </div>
-
-                ${isChatPage() ? `
-                <label style="${settingsCheckboxLabelWithMarginStyle}">
-                    <input id="tm-hide-chat-footer-toggle" type="checkbox" ${hideChatFooterEnabled ? 'checked' : ''} style="${settingsCheckboxInputStyle(accessibilityCheckboxAccentColor)}">
-                    <span>Masquer le footer sur la page chat</span>
-                </label>
-
-                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
-                    Retire le footer du site sur la page de chat dédiée donner un effet pleine écran.
-                </div>
-                ` : ''}
-
-                <label style="${settingsCheckboxLabelWithMarginStyle}">
-                    <input id="tm-embed-url-images-toggle" type="checkbox" ${embedUrlImagesEnabled ? 'checked' : ''} style="${settingsCheckboxInputStyle(accessibilityCheckboxAccentColor)}">
-                    <span>Prévisualiser les liens directs d'images au survol</span>
-                </label>
-
-                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
-                    Affiche un aperçu flottant uniquement pour les URLs qui pointent directement vers un fichier image.
-                </div>
-
-                <label style="${settingsCheckboxLabelWithMarginStyle}">
-                    <input id="tm-light-theme-toggle" type="checkbox" ${lightThemeEnabled ? 'checked' : ''} style="${settingsCheckboxInputStyle(accessibilityCheckboxAccentColor)}">
-                    <span>Thème clair <span style="font-weight:700;text-decoration:underline;">beta</span> pour la shoutbox</span>
-                </label>
-
-                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
-                    Éclaircit la zone de chat, les messages, la stats box et les toasts du script. Réglage enregistré séparément pour ${currentPageLabel}.
-                </div>
-            </div>
-
-            <div style="${settingsCardStyle}">
-                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Phrases sauvegardées</div>
-
-                <label style="${settingsCheckboxLabelStyle}">
-                    <input id="tm-phrases-enabled-toggle" type="checkbox" ${savedPhrasesEnabled ? 'checked' : ''} style="${settingsCheckboxInputStyle('#8b5cf6')}">
-                    <span>Activer les réponses rapides</span>
-                </label>
-
-                <div id="tm-phrases-summary" style="margin-top:10px;font-size:12px;color:#a1a1aa;line-height:1.5;">
-                    ${formatSavedPhrasesSummaryLabel()}
-                </div>
-
-                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
-                    <button id="tm-phrases-configure" style="
-                        border:none;
-                        background:#7c3aed;
-                        color:#fff;
-                        border-radius:10px;
-                        padding:10px 12px;
-                        cursor:pointer;
-                        font-weight:600;
-                    ">Configurer</button>
-                </div>
-
-                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.4;">
-                    Ouvre une fenêtre dédiée pour ajouter, retirer et gérer les réponses rapides.
-                </div>
-            </div>
-
-            <div style="${settingsCardStyle}">
-                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Sauvegarde configuration</div>
-
-                <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                    <button id="tm-script-config-export" style="
-                        border:none;
-                        background:#2563eb;
-                        color:#fff;
-                        border-radius:10px;
-                        padding:10px 12px;
-                        cursor:pointer;
-                        font-weight:600;
-                    ">Exporter la config</button>
-
-                    <button id="tm-script-config-import" style="
-                        border:none;
-                        background:#3f3f46;
-                        color:#fff;
-                        border-radius:10px;
-                        padding:10px 12px;
-                        cursor:pointer;
-                        font-weight:600;
-                    ">Importer une config</button>
-                </div>
-
-                <input id="tm-script-config-import-file" type="file" accept="application/json,.json" style="display:none;">
-
-                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
-                    Sauvegarde tes réglages principaux, ta blacklist, tes mises en avant, tes réponses rapides ainsi que les positions et tailles mémorisées. L’historique AFK temporaire n’est pas repris.
-                </div>
-            </div>
-
-            <div style="${settingsCardStyle}">
-                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">GIF Klipy</div>
-
-                <label style="${settingsCheckboxLabelStyle}">
-                    <input id="tm-klipy-gifs-toggle" type="checkbox" ${klipyGifsEnabled ? 'checked' : ''} style="${settingsCheckboxInputStyle('#22c55e')}">
-                    <span>Activer le bouton GIF Klipy</span>
-                </label>
-
-                <div style="margin-top:10px;font-size:12px;color:#a1a1aa;line-height:1.5;">
-                    Permet d’utiliser un picker GIF directement depuis le chat.
-                </div>
-            </div>
-
-            <div style="${settingsCardStyle}">
-                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Blacklist</div>
-
-                <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                    <input id="tm-user-input" type="text" placeholder="Pseudo"
-                        style="
-                            flex:1 1 180px;
-                            min-width:0;
-                            background:#18181b;
-                            color:#fff;
-                            border:1px solid rgba(255,255,255,0.10);
-                            border-radius:10px;
-                            padding:10px 12px;
-                            outline:none;
-                        ">
-                    <button id="tm-user-toggle" style="
-                        border:none;
-                        background:#2563eb;
-                        color:#fff;
-                        border-radius:10px;
-                        padding:10px 12px;
-                        cursor:pointer;
-                        font-weight:600;
-                    ">Ajouter / retirer</button>
-                </div>
-
-                <div style="margin-top:10px;font-size:12px;color:#a1a1aa;line-height:1.5;">
-                    Bloqués :
-                </div>
-
-                <div id="tm-hidden-users-list" style="
-                    margin-top:8px;
-                    display:flex;
-                    flex-wrap:wrap;
-                    gap:8px;
-                "></div>
-
-                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.4;">
-                    Clique sur un pseudo pour le charger dans le champ. Alt+clic directement sur un pseudo du chat permet de le blacklister.
-                </div>
-            </div>
-
-            <div style="${settingsCardStyle}">
-                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Mettre en avant</div>
-
-                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-                    <input id="tm-highlight-user-input" type="text" placeholder="Pseudo"
-                        style="
-                            flex:1 1 160px;
-                            min-width:0;
-                            background:#18181b;
-                            color:#fff;
-                            border:1px solid rgba(255,255,255,0.10);
-                            border-radius:10px;
-                            padding:10px 12px;
-                            outline:none;
-                        ">
-
-                    <input id="tm-highlight-color-input" type="color" value="${DEFAULT_HIGHLIGHT_COLOR}"
-                        style="
-                            width:48px;
-                            height:40px;
-                            padding:4px;
-                            background:#18181b;
-                            border:1px solid rgba(255,255,255,0.10);
-                            border-radius:10px;
-                            cursor:pointer;
-                        ">
-
-                    <button id="tm-highlight-save" style="
-                        border:none;
-                        background:#d97706;
-                        color:#fff;
-                        border-radius:10px;
-                        padding:10px 12px;
-                        cursor:pointer;
-                        font-weight:600;
-                    ">Ajouter / MAJ</button>
-
-                    <button id="tm-highlight-remove" style="
-                        border:none;
-                        background:#3f3f46;
-                        color:#fff;
-                        border-radius:10px;
-                        padding:10px 12px;
-                        cursor:pointer;
-                        font-weight:600;
-                    ">Retirer</button>
-
-                </div>
-
-                <div style="display:grid;gap:8px;margin-top:12px;">
-                    <label style="display:flex;flex-direction:column;gap:6px;">
-                        <span style="display:flex;justify-content:space-between;gap:12px;font-size:12px;color:#c4c4c8;">
-                            <span>Opacité</span>
-                            <span id="tm-highlight-opacity-value">${DEFAULT_HIGHLIGHT_OPACITY}%</span>
-                        </span>
-                        <input id="tm-highlight-opacity-input" type="range" min="0" max="100" step="1" value="${DEFAULT_HIGHLIGHT_OPACITY}"
-                            title="Opacité %"
-                            style="
-                                width:100%;
-                                accent-color:#f59e0b;
-                                cursor:pointer;
-                            ">
-                    </label>
-
-                    <div>
-                        <div style="font-size:12px;color:#c4c4c8;margin-bottom:6px;">Aperçu</div>
-                        <div id="tm-highlight-preview" style="
-                            padding:10px 12px;
-                            border-radius:12px;
-                            background:rgba(245,158,11,0.14);
-                            border:1px solid rgba(245,158,11,0.42);
-                            box-shadow:inset 3px 0 0 rgba(245,158,11,0.75);
-                        ">
-                            <div style="display:flex;align-items:center;gap:8px;font-size:11px;color:#d4d4d8;margin-bottom:4px;">
-                                <span style="font-weight:700;color:#fff;">Pseudo</span>
-                                <span id="tm-highlight-preview-meta">Mise en avant</span>
-                            </div>
-                            <div id="tm-highlight-preview-text" style="font-size:12px;color:#f4f4f5;line-height:1.45;">
-                                Exemple de message mis en avant.
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <div style="margin-top:10px;font-size:12px;color:#a1a1aa;line-height:1.5;">
-                    Mis en avant :
-                </div>
-
-                <div id="tm-highlight-users-list" style="
-                    margin-top:8px;
-                    display:flex;
-                    flex-wrap:wrap;
-                    gap:8px;
-                "></div>
-
-                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.4;">
-                    Clique sur un pseudo pour charger sa couleur. Les messages restent visibles mais sont surlignés avec la couleur choisie.
-                </div>
-            </div>
-
-            <div style="${settingsCardStyle}">
-                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Mentions @moi</div>
-
-                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-                    <input id="tm-mention-user-input" type="text" placeholder="Mon pseudo" value="${escapeHtml(mentionSettings.username)}"
-                        style="
-                            flex:1 1 180px;
-                            min-width:0;
-                            background:#18181b;
-                            color:#fff;
-                            border:1px solid rgba(255,255,255,0.10);
-                            border-radius:10px;
-                            padding:10px 12px;
-                            outline:none;
-                        ">
-
-                    <input id="tm-mention-color-input" type="color" value="${mentionSettings.color}"
-                        style="
-                            width:48px;
-                            height:40px;
-                            padding:4px;
-                            background:#18181b;
-                            border:1px solid rgba(255,255,255,0.10);
-                            border-radius:10px;
-                            cursor:pointer;
-                        ">
-
-                    <input id="tm-mention-blink-input" type="number" min="0" max="30" step="0.5" value="${mentionSettings.blinkSeconds}"
-                        style="
-                            width:90px;
-                            background:#18181b;
-                            color:#fff;
-                            border:1px solid rgba(255,255,255,0.10);
-                            border-radius:10px;
-                            padding:10px 12px;
-                            outline:none;
-                        ">
-                </div>
-
-                <div style="display:grid;gap:10px;margin-top:12px;">
-                    <label style="display:flex;flex-direction:column;gap:6px;">
-                        <span style="display:flex;justify-content:space-between;gap:12px;font-size:12px;color:#c4c4c8;">
-                            <span>Opacité</span>
-                            <span id="tm-mention-opacity-value">${mentionSettings.opacityPercent}%</span>
-                        </span>
-                        <input id="tm-mention-opacity-input" type="range" min="0" max="100" step="1" value="${mentionSettings.opacityPercent}"
-                            title="Opacité %"
-                            style="
-                                width:100%;
-                                accent-color:#22c55e;
-                                cursor:pointer;
-                            ">
-                    </label>
-
-                    <div style="font-size:11px;color:#71717a;line-height:1.4;">
-                        Ajuste la transparence de la surbrillance.
-                    </div>
-
-                    <div>
-                        <div style="font-size:12px;color:#c4c4c8;margin-bottom:6px;">Aperçu</div>
-                        <div id="tm-mention-preview" style="
-                            padding:10px 12px;
-                            border-radius:12px;
-                            background:rgba(34,197,94,0.18);
-                            border:1px solid rgba(34,197,94,0.45);
-                            box-shadow:inset 3px 0 0 rgba(34,197,94,0.7);
-                        ">
-                            <div style="display:flex;align-items:center;gap:8px;font-size:11px;color:#d4d4d8;margin-bottom:4px;">
-                                <span style="font-weight:700;color:#fff;">Pseudo</span>
-                                <span id="tm-mention-preview-meta">Mention @moi</span>
-                            </div>
-                            <div id="tm-mention-preview-text" style="font-size:12px;color:#f4f4f5;line-height:1.45;">
-                                Exemple de message contenant une mention.
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <label style="
-                    ${settingsCheckboxLabelStyle}
-                    margin-top:10px;
-                ">
-                    <input id="tm-mention-keep-highlight-toggle" type="checkbox" ${mentionSettings.keepHighlightAfterBlink ? 'checked' : ''} style="${settingsCheckboxInputStyle('#22c55e')}">
-                    <span>Garder la couleur après le clignotement</span>
-                </label>
-
-                <label style="
-                    ${settingsCheckboxLabelStyle}
-                    margin-top:10px;
-                ">
-                    <input id="tm-mention-include-reply-toggle" type="checkbox" ${mentionSettings.includeReplyContext ? 'checked' : ''} style="${settingsCheckboxInputStyle('#22c55e')}">
-                    <span>Considérer aussi les réponses citées vers @moi</span>
-                </label>
-
-                <div style="margin-top:10px;">
-                    <div style="font-size:12px;color:#c4c4c8;margin-bottom:8px;">Son de notification</div>
-                    <div id="tm-mention-sound-scope-group" data-tm-sound-scope="${mentionSettings.soundScope || DEFAULT_MENTION_SOUND_SCOPE}" style="display:flex;gap:8px;flex-wrap:wrap;">
-                        <button type="button" data-tm-mention-sound-scope="off" style="
-                            border:1px solid rgba(255,255,255,0.08);
-                            background:#27272a;
-                            color:#e4e4e7;
-                            border-radius:999px;
-                            padding:8px 12px;
-                            cursor:pointer;
-                            font-size:12px;
-                            font-weight:600;
-                        ">Désactivé</button>
-                        <button type="button" data-tm-mention-sound-scope="home" style="
-                            border:1px solid rgba(255,255,255,0.08);
-                            background:#27272a;
-                            color:#e4e4e7;
-                            border-radius:999px;
-                            padding:8px 12px;
-                            cursor:pointer;
-                            font-size:12px;
-                            font-weight:600;
-                        ">Accueil</button>
-                        <button type="button" data-tm-mention-sound-scope="chat" style="
-                            border:1px solid rgba(255,255,255,0.08);
-                            background:#27272a;
-                            color:#e4e4e7;
-                            border-radius:999px;
-                            padding:8px 12px;
-                            cursor:pointer;
-                            font-size:12px;
-                            font-weight:600;
-                        ">Chat</button>
-                        <button type="button" data-tm-mention-sound-scope="both" style="
-                            border:1px solid rgba(255,255,255,0.08);
-                            background:#27272a;
-                            color:#e4e4e7;
-                            border-radius:999px;
-                            padding:8px 12px;
-                            cursor:pointer;
-                            font-size:12px;
-                            font-weight:600;
-                        ">Les deux</button>
-                    </div>
-                    <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
-                        Choisis sur quelle vue le son doit se jouer. Le mode désactivé replie les réglages audio pour gagner de la place.
-                    </div>
-                </div>
-
-                <div id="tm-mention-sound-options" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:10px;">
-                    <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:#c4c4c8;">
-                        <span>Son</span>
-                        <select id="tm-mention-sound-style-select"
-                            style="
-                                min-width:120px;
-                                background:#18181b;
-                                color:#fff;
-                                border:1px solid rgba(255,255,255,0.10);
-                                border-radius:10px;
-                                padding:10px 12px;
-                                outline:none;
-                            ">
-                            <option value="ping" ${mentionSettings.soundStyle === 'ping' ? 'selected' : ''}>Ping</option>
-                            <option value="soft" ${mentionSettings.soundStyle === 'soft' ? 'selected' : ''}>Doux</option>
-                            <option value="bell" ${mentionSettings.soundStyle === 'bell' ? 'selected' : ''}>Cloche</option>
-                            <option value="double" ${mentionSettings.soundStyle === 'double' ? 'selected' : ''}>Double</option>
-                            <option value="custom" ${mentionSettings.soundStyle === 'custom' ? 'selected' : ''}>Personnalisé</option>
-                        </select>
-                    </label>
-
-                    <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:#c4c4c8;flex:1 1 240px;min-width:0;">
-                        <span>URL audio</span>
-                        <input id="tm-mention-sound-custom-url-input" type="text" placeholder="https://.../son.mp3" value="${escapeHtml(mentionSettings.soundCustomUrl || '')}"
-                            style="
-                                flex:1 1 180px;
-                                min-width:0;
-                                background:#18181b;
-                                color:#fff;
-                                border:1px solid rgba(255,255,255,0.10);
-                                border-radius:10px;
-                                padding:10px 12px;
-                                outline:none;
-                            ">
-                    </label>
-
-                    <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:#c4c4c8;">
-                        <span>Délai mini</span>
-                        <input id="tm-mention-sound-cooldown-input" type="number" min="0" max="300" step="0.5" value="${mentionSettings.soundCooldownSeconds}"
-                            style="
-                                width:90px;
-                                background:#18181b;
-                                color:#fff;
-                                border:1px solid rgba(255,255,255,0.10);
-                                border-radius:10px;
-                                padding:10px 12px;
-                                outline:none;
-                            ">
-                        <span>s</span>
-                    </label>
-
-                    <button id="tm-mention-sound-test" type="button" style="
-                        border:none;
-                        background:#2563eb;
-                        color:#fff;
-                        border-radius:10px;
-                        padding:10px 12px;
-                        cursor:pointer;
-                        font-weight:600;
-                    ">Tester le son</button>
-                </div>
-
-                <div style="display:flex;justify-content:flex-start;gap:8px;flex-wrap:wrap;margin-top:12px;">
-                    <button id="tm-mention-save" style="
-                        border:none;
-                        background:#059669;
-                        color:#fff;
-                        border-radius:10px;
-                        padding:10px 12px;
-                        cursor:pointer;
-                        font-weight:600;
-                    ">Enregistrer</button>
-                </div>
-
-                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
-                    Quand un message contient @tonpseudo, il est surligné avec cette couleur. Tu peux aussi inclure les réponses citées, régler l'opacité, mettre 0 seconde pour désactiver le clignotement, choisir un son si besoin et laisser le pseudo vide pour couper la surveillance.
-                </div>
-            </div>
-
-            <div style="${settingsCardStyle}">
-                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Debug</div>
-
-                <label style="${settingsCheckboxLabelStyle}">
-                    <input id="tm-debug-toggle" type="checkbox" ${debugMode ? 'checked' : ''} style="${settingsCheckboxInputStyle('#ef4444')}">
-                    <span>Mode debug</span>
-                </label>
-
-                <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
-                    En mode debug, les messages blacklistés ne sont pas cachés : ils sont surlignés en rouge.
-                </div>
-
-            </div>
-        </div>
-
-        <div id="tm-feedback" style="
-            min-height:20px;
-            margin-top:4px;
-            font-size:12px;
-            color:#93c5fd;
-        "></div>
-    `;
+        modal.innerHTML = buildSettingsModalHtml(currentPageLabel, homeView, isChatView, styles);
 
         document.body.appendChild(overlay);
         document.body.appendChild(modal);
-
-        const closeBtn = modal.querySelector('#tm-close-modal');
-        const userInput = modal.querySelector('#tm-user-input');
-        const phrasesConfigureBtn = modal.querySelector('#tm-phrases-configure');
-        const phrasesSummary = modal.querySelector('#tm-phrases-summary');
-        const scriptConfigExportBtn = modal.querySelector('#tm-script-config-export');
-        const scriptConfigImportBtn = modal.querySelector('#tm-script-config-import');
-        const scriptConfigImportFileInput = modal.querySelector('#tm-script-config-import-file');
-        const toggleBtn = modal.querySelector('#tm-user-toggle');
-        const phrasesEnabledToggle = modal.querySelector('#tm-phrases-enabled-toggle');
-        const klipyGifsToggle = modal.querySelector('#tm-klipy-gifs-toggle');
-        const hiddenUsersList = modal.querySelector('#tm-hidden-users-list');
-        const highlightUserInput = modal.querySelector('#tm-highlight-user-input');
-        const highlightColorInput = modal.querySelector('#tm-highlight-color-input');
-        const highlightOpacityInput = modal.querySelector('#tm-highlight-opacity-input');
-        const highlightOpacityValue = modal.querySelector('#tm-highlight-opacity-value');
-        const highlightPreview = modal.querySelector('#tm-highlight-preview');
-        const highlightPreviewMeta = modal.querySelector('#tm-highlight-preview-meta');
-        const highlightPreviewText = modal.querySelector('#tm-highlight-preview-text');
-        const highlightSaveBtn = modal.querySelector('#tm-highlight-save');
-        const highlightRemoveBtn = modal.querySelector('#tm-highlight-remove');
-        const highlightUsersList = modal.querySelector('#tm-highlight-users-list');
-        const mentionUserInput = modal.querySelector('#tm-mention-user-input');
-        const mentionColorInput = modal.querySelector('#tm-mention-color-input');
-        const mentionOpacityInput = modal.querySelector('#tm-mention-opacity-input');
-        const mentionOpacityValue = modal.querySelector('#tm-mention-opacity-value');
-        const mentionBlinkInput = modal.querySelector('#tm-mention-blink-input');
-        const mentionPreview = modal.querySelector('#tm-mention-preview');
-        const mentionPreviewMeta = modal.querySelector('#tm-mention-preview-meta');
-        const mentionPreviewText = modal.querySelector('#tm-mention-preview-text');
-        const mentionKeepHighlightToggle = modal.querySelector('#tm-mention-keep-highlight-toggle');
-        const mentionIncludeReplyToggle = modal.querySelector('#tm-mention-include-reply-toggle');
-        const mentionSoundScopeGroup = modal.querySelector('#tm-mention-sound-scope-group');
-        const mentionSoundScopeButtons = Array.from(modal.querySelectorAll('[data-tm-mention-sound-scope]'));
-        const mentionSoundOptions = modal.querySelector('#tm-mention-sound-options');
-        const mentionSoundStyleSelect = modal.querySelector('#tm-mention-sound-style-select');
-        const mentionSoundCustomUrlInput = modal.querySelector('#tm-mention-sound-custom-url-input');
-        const mentionSoundCooldownInput = modal.querySelector('#tm-mention-sound-cooldown-input');
-        const mentionSoundTestBtn = modal.querySelector('#tm-mention-sound-test');
-        const mentionSaveBtn = modal.querySelector('#tm-mention-save');
-        const fontSizeRange = modal.querySelector('#tm-font-size-range');
-        const fontSizeValue = modal.querySelector('#tm-font-size-value');
-        const fontSizeDecreaseBtn = modal.querySelector('#tm-font-size-decrease');
-        const fontSizeIncreaseBtn = modal.querySelector('#tm-font-size-increase');
-        const fontSizeSaveBtn = modal.querySelector('#tm-font-size-save');
-        const fontSizeResetBtn = modal.querySelector('#tm-font-size-reset');
-        const linkifyUrlsToggle = modal.querySelector('#tm-linkify-urls-toggle');
-        const chatScrollbarToggle = modal.querySelector('#tm-chat-scrollbar-toggle');
-        const messageActionsLeftToggle = modal.querySelector('#tm-message-actions-left-toggle');
-        const chatInputToolbarInlineToggle = modal.querySelector('#tm-chat-input-toolbar-inline-toggle');
-        const chatInputToolbarAlignRightToggle = modal.querySelector('#tm-chat-input-toolbar-align-right-toggle');
-        const hideChatFooterToggle = modal.querySelector('#tm-hide-chat-footer-toggle');
-        const embedUrlImagesToggle = modal.querySelector('#tm-embed-url-images-toggle');
-        const lightThemeToggle = modal.querySelector('#tm-light-theme-toggle');
-        const resetStatsLayoutBtn = modal.querySelector('#tm-reset-stats-layout');
-        const hideStatsToggle = modal.querySelector('#tm-hide-stats-toggle');
-        const debugToggle = modal.querySelector('#tm-debug-toggle');
-        const homeCollapseToggle = modal.querySelector('#tm-home-collapse-toggle-setting');
-        const feedback = modal.querySelector('#tm-feedback');
-
-        function setFeedback(message, isError = false) {
-            feedback.textContent = message;
-            feedback.style.color = isError ? '#fca5a5' : '#93c5fd';
-        }
-
-        function syncSavedPhrasesMainSummary() {
-            if (phrasesSummary) {
-                phrasesSummary.textContent = formatSavedPhrasesSummaryLabel();
-            }
-        }
-
-        function getSelectedMentionSoundScope() {
-            return normalizeMentionSoundScope(
-                mentionSoundScopeGroup?.getAttribute('data-tm-sound-scope') || mentionSettings.soundScope
-            );
-        }
-
-        function syncMentionSoundControlsState() {
-            const soundScope = getSelectedMentionSoundScope();
-            const soundEnabled = isMentionSoundScopeEnabled(soundScope);
-            const customSoundSelected = mentionSoundStyleSelect?.value === 'custom';
-
-            if (mentionSoundScopeGroup) {
-                mentionSoundScopeGroup.setAttribute('data-tm-sound-scope', soundScope);
-            }
-
-            mentionSoundScopeButtons.forEach((button) => {
-                if (!(button instanceof HTMLButtonElement)) return;
-
-                const isActive = normalizeMentionSoundScope(button.getAttribute('data-tm-mention-sound-scope')) === soundScope;
-                button.style.background = isActive ? '#166534' : '#27272a';
-                button.style.borderColor = isActive ? 'rgba(74,222,128,0.42)' : 'rgba(255,255,255,0.08)';
-                button.style.color = isActive ? '#ecfdf5' : '#e4e4e7';
-                button.style.boxShadow = isActive ? 'inset 0 1px 0 rgba(255,255,255,0.08), 0 0 0 1px rgba(34,197,94,0.12)' : 'none';
-            });
-
-            if (mentionSoundOptions) {
-                mentionSoundOptions.style.display = soundEnabled ? 'flex' : 'none';
-            }
-
-            if (mentionSoundStyleSelect) {
-                mentionSoundStyleSelect.disabled = !soundEnabled;
-            }
-
-            if (mentionSoundCooldownInput) {
-                mentionSoundCooldownInput.disabled = !soundEnabled;
-            }
-
-            if (mentionSoundCustomUrlInput) {
-                mentionSoundCustomUrlInput.disabled = !soundEnabled || !customSoundSelected;
-            }
-
-            if (mentionSoundTestBtn) {
-                mentionSoundTestBtn.disabled = !soundEnabled;
-                mentionSoundTestBtn.style.cursor = soundEnabled ? 'pointer' : 'not-allowed';
-            }
-        }
-
-        function syncHighlightOpacityValue() {
-            const opacityPercent = parseOpacityPercentInput(
-                highlightOpacityInput?.value,
-                DEFAULT_HIGHLIGHT_OPACITY
-            );
-            const previewColor = normalizeHexColor(highlightColorInput?.value, DEFAULT_HIGHLIGHT_COLOR);
-            const previewAlpha = opacityPercent / 100;
-            const previewAccent = hexToRgba(previewColor, Math.min(1, previewAlpha * 5.15));
-            const previewUsername = normalizeName(highlightUserInput?.value || '') || 'pseudo';
-
-            if (highlightOpacityInput) {
-                highlightOpacityInput.value = String(opacityPercent);
-            }
-
-            if (highlightOpacityValue) {
-                highlightOpacityValue.textContent = `${opacityPercent}%`;
-            }
-
-            if (highlightPreview instanceof HTMLElement) {
-                highlightPreview.style.background = hexToRgba(previewColor, previewAlpha);
-                highlightPreview.style.border = `1px solid ${previewAccent}`;
-                highlightPreview.style.boxShadow = `inset 3px 0 0 ${previewAccent}`;
-            }
-
-            if (highlightPreviewMeta) {
-                highlightPreviewMeta.textContent = `Mise en avant : ${previewUsername}`;
-            }
-
-            if (highlightPreviewText) {
-                highlightPreviewText.textContent = `Exemple de message de ${previewUsername} mis en avant.`;
-            }
-        }
-
-        function syncMentionOpacityPreview() {
-            const previewColor = normalizeHexColor(mentionColorInput?.value, DEFAULT_MENTION_COLOR);
-            const previewOpacity = parseOpacityPercentInput(mentionOpacityInput?.value, mentionSettings.opacityPercent);
-            const previewAlpha = previewOpacity / 100;
-            const previewAccent = hexToRgba(previewColor, Math.min(1, previewAlpha * 4.55));
-            const previewUsername = normalizeName(mentionUserInput?.value || '') || 'moi';
-
-            if (mentionOpacityInput) {
-                mentionOpacityInput.value = String(previewOpacity);
-            }
-
-            if (mentionOpacityValue) {
-                mentionOpacityValue.textContent = `${previewOpacity}%`;
-            }
-
-            if (mentionPreview instanceof HTMLElement) {
-                mentionPreview.style.background = hexToRgba(previewColor, previewAlpha);
-                mentionPreview.style.border = `1px solid ${previewAccent}`;
-                mentionPreview.style.boxShadow = `inset 3px 0 0 ${previewAccent}`;
-            }
-
-            if (mentionPreviewMeta) {
-                mentionPreviewMeta.textContent = `Mention @${previewUsername}`;
-            }
-
-            if (mentionPreviewText) {
-                mentionPreviewText.textContent = `Exemple de message contenant @${previewUsername}.`;
-            }
-        }
-
-        function refreshHiddenUsersList() {
-            const users = [...hiddenUsers].sort((a, b) => a.localeCompare(b, 'fr'));
-            hiddenUsersList.innerHTML = '';
-
-            if (users.length === 0) {
-                const empty = document.createElement('div');
-                empty.textContent = '(aucun)';
-                empty.style.fontSize = '12px';
-                empty.style.color = '#a1a1aa';
-                hiddenUsersList.appendChild(empty);
-                return;
-            }
-
-            for (const user of users) {
-                const chip = document.createElement('button');
-                chip.type = 'button';
-                chip.textContent = user;
-                chip.style.border = '1px solid rgba(59,130,246,0.25)';
-                chip.style.background = 'rgba(59,130,246,0.10)';
-                chip.style.color = '#93c5fd';
-                chip.style.borderRadius = '999px';
-                chip.style.padding = '6px 10px';
-                chip.style.fontSize = '12px';
-                chip.style.cursor = 'pointer';
-                chip.style.lineHeight = '1.2';
-
-                chip.addEventListener('click', () => {
-                    userInput.value = user;
-                    userInput.focus();
-                    userInput.select();
-                    setFeedback(`Pseudo chargé : ${user}`);
-                });
-
-                hiddenUsersList.appendChild(chip);
-            }
-        }
-
-        function refreshHighlightedUsersList() {
-            const users = Object.entries(highlightedUsers)
-                .sort((a, b) => a[0].localeCompare(b[0], 'fr'));
-
-            highlightUsersList.innerHTML = '';
-
-            if (users.length === 0) {
-                const empty = document.createElement('div');
-                empty.textContent = '(aucun)';
-                empty.style.fontSize = '12px';
-                empty.style.color = '#a1a1aa';
-                highlightUsersList.appendChild(empty);
-                return;
-            }
-
-            for (const [user, config] of users) {
-                const color = normalizeHexColor(config?.color, DEFAULT_HIGHLIGHT_COLOR);
-                const opacityPercent = parseOpacityPercentInput(config?.opacityPercent, DEFAULT_HIGHLIGHT_OPACITY);
-                const chip = document.createElement('button');
-                chip.type = 'button';
-                chip.textContent = user;
-                chip.style.border = `1px solid ${hexToRgba(color, 0.38)}`;
-                chip.style.background = hexToRgba(color, opacityPercent / 100);
-                chip.style.color = color;
-                chip.style.borderRadius = '999px';
-                chip.style.padding = '6px 10px';
-                chip.style.fontSize = '12px';
-                chip.style.cursor = 'pointer';
-                chip.style.lineHeight = '1.2';
-
-                chip.addEventListener('click', () => {
-                    highlightUserInput.value = user;
-                    highlightColorInput.value = normalizeHexColor(color);
-                    if (highlightOpacityInput) {
-                        highlightOpacityInput.value = String(opacityPercent);
-                    }
-                    syncHighlightOpacityValue();
-                    highlightUserInput.focus();
-                    highlightUserInput.select();
-                    setFeedback(`Mise en avant chargee : ${user}`);
-                });
-
-                highlightUsersList.appendChild(chip);
-            }
-        }
-
-        function syncFontSizeValueLabel() {
-            if (fontSizeValue && fontSizeRange) {
-                fontSizeValue.textContent = `${fontSizeRange.value}%`;
-            }
-        }
-
-        function setPreviewFontScale(scale) {
-            if (!fontSizeRange) return;
-            fontSizeRange.value = formatChatFontScalePercent(scale);
-            syncFontSizeValueLabel();
-            applyChatFontScale(scale);
-        }
-
-        closeBtn.addEventListener('click', closeSettingsModal);
-        overlay.addEventListener('click', closeSettingsModal);
-
-        toggleBtn.addEventListener('click', () => {
-            const result = addOrToggleUser(userInput.value);
-            setFeedback(result.message, !result.ok);
-            refreshHiddenUsersList();
-            userInput.focus();
-            userInput.select();
-        });
-
-        userInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') {
-                e.preventDefault();
-                toggleBtn.click();
-            }
-        });
-
-        highlightSaveBtn.addEventListener('click', () => {
-            const result = addOrUpdateHighlightedUser(
-                highlightUserInput.value,
-                highlightColorInput.value,
-                highlightOpacityInput?.value
-            );
-            setFeedback(result.message, !result.ok);
-            refreshHighlightedUsersList();
-            highlightUserInput.focus();
-            highlightUserInput.select();
-        });
-
-        highlightRemoveBtn.addEventListener('click', () => {
-            const result = removeHighlightedUser(highlightUserInput.value);
-            setFeedback(result.message, !result.ok);
-            refreshHighlightedUsersList();
-            highlightUserInput.focus();
-            highlightUserInput.select();
-        });
-
-        highlightUserInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') {
-                e.preventDefault();
-                highlightSaveBtn.click();
-            }
-        });
-
-        highlightUserInput.addEventListener('input', syncHighlightOpacityValue);
-        highlightColorInput?.addEventListener('input', syncHighlightOpacityValue);
-        highlightOpacityInput?.addEventListener('input', syncHighlightOpacityValue);
-
-        mentionSaveBtn.addEventListener('click', () => {
-            const result = updateMentionSettings(
-                mentionUserInput.value,
-                mentionColorInput.value,
-                mentionOpacityInput?.value,
-                mentionBlinkInput.value,
-                mentionKeepHighlightToggle?.checked,
-                mentionIncludeReplyToggle?.checked,
-                getSelectedMentionSoundScope(),
-                mentionSoundStyleSelect?.value,
-                mentionSoundCustomUrlInput?.value,
-                mentionSoundCooldownInput?.value
-            );
-
-            mentionUserInput.value = mentionSettings.username;
-            mentionColorInput.value = mentionSettings.color;
-            if (mentionOpacityInput) {
-                mentionOpacityInput.value = String(mentionSettings.opacityPercent);
-            }
-            syncMentionOpacityPreview();
-            mentionBlinkInput.value = String(mentionSettings.blinkSeconds);
-            if (mentionKeepHighlightToggle) {
-                mentionKeepHighlightToggle.checked = mentionSettings.keepHighlightAfterBlink;
-            }
-            if (mentionIncludeReplyToggle) {
-                mentionIncludeReplyToggle.checked = mentionSettings.includeReplyContext;
-            }
-            if (mentionSoundScopeGroup) {
-                mentionSoundScopeGroup.setAttribute('data-tm-sound-scope', mentionSettings.soundScope || DEFAULT_MENTION_SOUND_SCOPE);
-            }
-            if (mentionSoundStyleSelect) {
-                mentionSoundStyleSelect.value = mentionSettings.soundStyle;
-            }
-            if (mentionSoundCustomUrlInput) {
-                mentionSoundCustomUrlInput.value = mentionSettings.soundCustomUrl || '';
-            }
-            if (mentionSoundCooldownInput) {
-                mentionSoundCooldownInput.value = String(mentionSettings.soundCooldownSeconds);
-            }
-            syncMentionSoundControlsState();
-            setFeedback(result.message, !result.ok);
-        });
-
-        mentionUserInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') {
-                e.preventDefault();
-                mentionSaveBtn.click();
-            }
-        });
-
-        mentionUserInput.addEventListener('input', syncMentionOpacityPreview);
-
-        mentionColorInput?.addEventListener('input', syncMentionOpacityPreview);
-
-        mentionBlinkInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') {
-                e.preventDefault();
-                mentionSaveBtn.click();
-            }
-        });
-
-        mentionOpacityInput?.addEventListener('input', syncMentionOpacityPreview);
-
-        mentionSoundCooldownInput?.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') {
-                e.preventDefault();
-                mentionSaveBtn.click();
-            }
-        });
-
-        mentionSoundScopeButtons.forEach((button) => {
-            if (!(button instanceof HTMLButtonElement)) return;
-
-            button.addEventListener('click', () => {
-                const scope = normalizeMentionSoundScope(button.getAttribute('data-tm-mention-sound-scope'));
-                mentionSoundScopeGroup?.setAttribute('data-tm-sound-scope', scope);
-                syncMentionSoundControlsState();
-            });
-        });
-
-        mentionSoundStyleSelect?.addEventListener('change', syncMentionSoundControlsState);
-
-        mentionSoundCustomUrlInput?.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') {
-                e.preventDefault();
-                mentionSaveBtn.click();
-            }
-        });
-
-        mentionSoundTestBtn?.addEventListener('click', async () => {
-            if (!isMentionSoundScopeEnabled(getSelectedMentionSoundScope())) return;
-
-            const played = await playMentionNotificationSound(
-                mentionSoundStyleSelect?.value,
-                mentionSoundCustomUrlInput?.value
-            );
-            setFeedback(
-                played ? 'Son de notification testé.' : 'Impossible de jouer le son pour le moment.',
-                !played
-            );
-        });
-
-        fontSizeRange?.addEventListener('input', () => {
-            syncFontSizeValueLabel();
-            applyChatFontScale(parseChatFontScalePercentInput(fontSizeRange.value, chatFontScale));
-        });
-
-        fontSizeDecreaseBtn?.addEventListener('click', () => {
-            const nextScale = parseChatFontScalePercentInput((Number(fontSizeRange?.value || formatChatFontScalePercent()) - 5), chatFontScale);
-            setPreviewFontScale(nextScale);
-        });
-
-        fontSizeIncreaseBtn?.addEventListener('click', () => {
-            const nextScale = parseChatFontScalePercentInput((Number(fontSizeRange?.value || formatChatFontScalePercent()) + 5), chatFontScale);
-            setPreviewFontScale(nextScale);
-        });
-
-        fontSizeSaveBtn?.addEventListener('click', () => {
-            const nextScale = parseChatFontScalePercentInput(fontSizeRange?.value || formatChatFontScalePercent(), chatFontScale);
-            saveChatFontScale(nextScale);
-            applyChatFontScale();
-            setPreviewFontScale(chatFontScale);
-            setFeedback(`Taille de police enregistrée : ${formatChatFontScalePercent()}%.`);
-        });
-
-        phrasesConfigureBtn?.addEventListener('click', () => {
-            openSavedPhrasesConfigModal();
-        });
-
-        scriptConfigExportBtn?.addEventListener('click', () => {
-            const result = downloadScriptConfigExport();
-            setFeedback(result.message, !result.ok);
-        });
-
-        scriptConfigImportBtn?.addEventListener('click', () => {
-            scriptConfigImportFileInput?.click();
-        });
-
-        scriptConfigImportFileInput?.addEventListener('change', async () => {
-            const selectedFile = scriptConfigImportFileInput instanceof HTMLInputElement
-                ? scriptConfigImportFileInput.files?.[0]
-                : null;
-            if (!selectedFile) return;
-
-            try {
-                const fileContent = await selectedFile.text();
-                const parsedContent = JSON.parse(fileContent);
-                const result = importScriptConfiguration(parsedContent);
-
-                if (result.ok) {
-                    closeSettingsModal();
-                    showToast(result.message);
-                } else {
-                    setFeedback(result.message, true);
-                }
-            } catch (e) {
-                setFeedback('Import impossible : fichier JSON invalide.', true);
-            } finally {
-                if (scriptConfigImportFileInput instanceof HTMLInputElement) {
-                    scriptConfigImportFileInput.value = '';
-                }
-            }
-        });
-
-        phrasesEnabledToggle?.addEventListener('change', () => {
-            saveSavedPhrasesEnabled(phrasesEnabledToggle.checked);
-            syncSavedPhrasesMainSummary();
-
-            if (savedPhrasesEnabled) {
-                injectSavedPhrasesToolbar();
-                setFeedback('Réponses rapides activées.');
-            } else {
-                removeSavedPhrasesToolbar();
-                setFeedback('Réponses rapides désactivées.');
-            }
-        });
-
-        klipyGifsToggle?.addEventListener('change', () => {
-            saveKlipyGifsEnabled(klipyGifsToggle.checked);
-
-            if (klipyGifsEnabled) {
-                injectKlipyGifToolbar();
-                setFeedback('Bouton GIF Klipy activé.');
-            } else {
-                removeKlipyGifToolbar();
-                setFeedback('Bouton GIF Klipy désactivé.');
-            }
-        });
-
-        fontSizeResetBtn?.addEventListener('click', () => {
-            saveChatFontScale(DEFAULT_CHAT_FONT_SCALE);
-            applyChatFontScale();
-            setPreviewFontScale(chatFontScale);
-            setFeedback('Taille de police réinitialisée.');
-        });
-
-        linkifyUrlsToggle?.addEventListener('change', () => {
-            saveLinkifyUrlsEnabled(linkifyUrlsToggle.checked);
-            processAllMessages();
-            setFeedback(
-                linkifyUrlsEnabled
-                    ? 'URLs cliquables activées.'
-                    : 'URLs cliquables désactivées.'
-            );
-        });
-
-        chatScrollbarToggle?.addEventListener('change', () => {
-            saveChatScrollbarEnabled(chatScrollbarToggle.checked);
-            applyChatPageScrollbarState();
-            setFeedback(chatScrollbarEnabled ? 'Ascenseur du chat activé.' : 'Ascenseur du chat désactivé.');
-        });
-
-        messageActionsLeftToggle?.addEventListener('change', () => {
-            saveMessageActionsLeftEnabled(messageActionsLeftToggle.checked);
-            applyMessageActionsPositionState();
-            processAllMessages();
-            setFeedback(
-                messageActionsLeftEnabled
-                    ? 'Actions natives des messages déplacées à gauche.'
-                    : 'Actions natives des messages replacées à droite.'
-            );
-        });
-
-        chatInputToolbarInlineToggle?.addEventListener('change', () => {
-            saveChatInputToolbarInline(chatInputToolbarInlineToggle.checked);
-            applyChatInputToolbarAlignmentState();
-            setFeedback(
-                chatInputToolbarInline
-                    ? 'Barre d’outils du chat déplacée sur la même ligne que l’input.'
-                    : 'Barre d’outils du chat replacée au-dessus de l’input.'
-            );
-        });
-
-        chatInputToolbarAlignRightToggle?.addEventListener('change', () => {
-            saveChatInputToolbarAlignRight(chatInputToolbarAlignRightToggle.checked);
-            applyChatInputToolbarAlignmentState();
-            setFeedback(
-                chatInputToolbarAlignRight
-                    ? (chatInputToolbarInline
-                        ? 'Barre d’outils du chat alignée à droite de l’input.'
-                        : 'Barre d’outils du chat alignée à droite au-dessus de l’input.')
-                    : (chatInputToolbarInline
-                        ? 'Barre d’outils du chat alignée à gauche de l’input.'
-                        : 'Barre d’outils du chat alignée à gauche au-dessus de l’input.')
-            );
-        });
-
-        hideChatFooterToggle?.addEventListener('change', () => {
-            saveHideChatFooterEnabled(hideChatFooterToggle.checked);
-            applyChatFooterVisibilityState();
-            setFeedback(
-                hideChatFooterEnabled
-                    ? 'Pied de page masqué sur la page chat.'
-                    : 'Pied de page réaffiché sur la page chat.'
-            );
-        });
-
-        embedUrlImagesToggle?.addEventListener('change', () => {
-            saveEmbedUrlImagesEnabled(embedUrlImagesToggle.checked);
-            processAllMessages();
-            setFeedback(
-                embedUrlImagesEnabled
-                    ? 'Prévisualisation des images au survol activée.'
-                    : 'Prévisualisation des images au survol désactivée.'
-            );
-        });
-
-        lightThemeToggle?.addEventListener('change', () => {
-            saveLightThemeEnabled(lightThemeToggle.checked);
-            applyLightThemeState();
-            processAllMessages();
-            if (lightThemeEnabled) {
-                showToast(`Thème clair beta activé pour ${currentPageLabel}. Fonction encore récente, rendu susceptible d’évoluer.`);
-            }
-            setFeedback(lightThemeEnabled ? `Thème clair activé pour ${currentPageLabel}.` : `Thème clair désactivé pour ${currentPageLabel}.`);
-        });
-
-        hideStatsToggle?.addEventListener('change', () => {
-            saveStatsHidden(hideStatsToggle.checked);
-            applyStatsBoxVisibilityState();
-            setFeedback(statsHidden ? `Stats box masquée pour ${currentPageLabel}.` : `Stats box affichée pour ${currentPageLabel}.`);
-        });
-
-        resetStatsLayoutBtn?.addEventListener('click', () => {
-            resetPosition();
-            resetStatsBoxSize();
-            applyStatsBoxDisplayModeState();
-            applyBoxPosition(loadPosition());
-            constrainStatsBoxToViewport(false, false);
-            updateStatsBox();
-            setFeedback(`Taille et position de la stats box réinitialisées pour ${currentPageLabel}.`);
-        });
-
-        debugToggle.addEventListener('change', () => {
-            saveDebugMode(debugToggle.checked);
-            processAllMessages();
-            updateStatsBox();
-            setFeedback(debugMode ? 'Mode debug activé.' : 'Mode debug désactivé.');
-        });
-
-        homeCollapseToggle?.addEventListener('change', () => {
-            toggleHomepageChatCollapsed(homeCollapseToggle.checked);
-            setFeedback(homeChatCollapsed ? 'Shoutbox d’accueil repliée.' : 'Shoutbox d’accueil réaffichée.');
-        });
-
-        modal.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') {
-                e.preventDefault();
-                closeSettingsModal();
-            }
-        });
-
-        refreshHiddenUsersList();
-        refreshHighlightedUsersList();
-        userInput.focus();
-        syncHighlightOpacityValue();
-        syncMentionSoundControlsState();
-        syncMentionOpacityPreview();
-        syncFontSizeValueLabel();
+        const elements = getSettingsModalElements(modal);
+        const controls = createSettingsModalController(elements);
+        bindSettingsModalEvents(modal, overlay, elements, controls, currentPageLabel);
+        initializeSettingsModal(elements, controls);
     }
 
     function isScriptUiElement(element) {
@@ -8786,7 +9193,42 @@
         }
     }
 
-    function showSavedPhrasesMenu(menu) {
+    function getSavedPhrasesMenuFocusableButtons(menu) {
+        if (!(menu instanceof HTMLElement)) return [];
+
+        return Array.from(menu.querySelectorAll('button[type="button"]')).filter((button) =>
+            button instanceof HTMLButtonElement &&
+            button.offsetParent !== null &&
+            !button.disabled
+        );
+    }
+
+    function focusSavedPhrasesMenuButton(menu, index = 0) {
+        const buttons = getSavedPhrasesMenuFocusableButtons(menu);
+        if (buttons.length === 0) return false;
+
+        const normalizedIndex = ((Number(index) || 0) % buttons.length + buttons.length) % buttons.length;
+        menu.dataset.tmActiveIndex = String(normalizedIndex);
+        buttons[normalizedIndex].focus();
+        return true;
+    }
+
+    function moveSavedPhrasesMenuFocus(menu, delta) {
+        const buttons = getSavedPhrasesMenuFocusableButtons(menu);
+        if (buttons.length === 0) return false;
+
+        const activeElement = document.activeElement;
+        const currentIndex = buttons.findIndex((button) => button === activeElement);
+        const fallbackIndex = Number(menu.dataset.tmActiveIndex || 0);
+        const baseIndex = currentIndex >= 0 ? currentIndex : fallbackIndex;
+        const nextIndex = ((baseIndex + delta) % buttons.length + buttons.length) % buttons.length;
+
+        menu.dataset.tmActiveIndex = String(nextIndex);
+        buttons[nextIndex].focus();
+        return true;
+    }
+
+    function showSavedPhrasesMenu(menu, options = {}) {
         if (!(menu instanceof HTMLElement)) return;
 
         clearSavedPhrasesMenuHideTimer(menu);
@@ -8795,6 +9237,13 @@
         void menu.offsetWidth;
         menu.style.opacity = '1';
         menu.style.transform = 'translateY(0) scale(1)';
+
+        if (options.focusFirstItem === true) {
+            window.requestAnimationFrame(() => {
+                if (menu.dataset.tmOpen !== '1') return;
+                focusSavedPhrasesMenuButton(menu, 0);
+            });
+        }
     }
 
     function hideSavedPhrasesMenu(menu) {
@@ -8802,6 +9251,7 @@
 
         clearSavedPhrasesMenuHideTimer(menu);
         menu.dataset.tmOpen = '0';
+        delete menu.dataset.tmActiveIndex;
         menu.style.opacity = '0';
         menu.style.transform = 'translateY(10px) scale(0.95)';
 
@@ -8859,6 +9309,25 @@
         window.addEventListener('blur', () => {
             closeSavedPhrasesMenu();
         });
+    }
+
+    function openSavedPhrasesMenuFromShortcut() {
+        if (!isSupportedPage()) return false;
+        if (!savedPhrasesEnabled || savedPhrases.length === 0) return false;
+
+        const textInput = getChatInput();
+        if (!(textInput instanceof HTMLElement)) return false;
+
+        injectSavedPhrasesToolbar();
+
+        const menu = getSavedPhrasesMenu();
+        if (!(menu instanceof HTMLElement)) return false;
+
+        buildSavedPhrasesMenuContent(menu, textInput);
+        closeKlipyGifMenu();
+        closeSavedPhrasesMenu();
+        showSavedPhrasesMenu(menu, { focusFirstItem: true });
+        return true;
     }
 
     function getChatInput() {
@@ -9203,6 +9672,25 @@
         scheduleMovedNativeChatInputActionPopoversSync();
     }
 
+    function scheduleChatInputToolbarResync(frameCount = 4) {
+        let remainingFrames = Math.max(1, Number(frameCount) || 1);
+
+        const tick = () => {
+            const input = getChatInput();
+            if (input instanceof HTMLElement) {
+                applyChatInputToolbarAlignmentState();
+                syncNativeChatInputActionButtons(input);
+            }
+
+            remainingFrames -= 1;
+            if (remainingFrames > 0) {
+                window.requestAnimationFrame(tick);
+            }
+        };
+
+        window.requestAnimationFrame(tick);
+    }
+
     function shouldUseChatInputToolbarRail() {
         return isSupportedPage() && (
             klipyGifsEnabled ||
@@ -9218,6 +9706,10 @@
 
         const railHost = getChatInputToolbarRailHost(context);
         if (!(railHost instanceof HTMLElement) || rail.parentElement !== railHost) {
+            return false;
+        }
+
+        if (getNativeChatInputActionButtons(context?.input).length > 0) {
             return false;
         }
 
@@ -9765,6 +10257,15 @@
         return { ok: true, message: 'Message envoyé.' };
     }
 
+    /**
+     * Insère ou remplace du texte dans l'input natif du chat tout en déclenchant les events attendus par l'UI.
+     *
+     * @param {HTMLElement} input
+     * @param {string} textToInsert
+     * @param {string} [successMessage='Texte inséré.']
+     * @param {{ replaceExistingText?: boolean }} [options={}]
+     * @returns {{ ok: boolean, message: string }}
+     */
     function insertTextIntoChatInput(input, textToInsert, successMessage = 'Texte inséré.', options = {}) {
         if (!(input instanceof HTMLElement)) {
             return { ok: false, message: 'Champ de texte non trouvé.' };
@@ -9883,6 +10384,14 @@
         }, true);
     }
 
+    /**
+     * Insère une réponse rapide normalisée dans l'input du chat.
+     *
+     * @param {HTMLElement} input
+     * @param {string} phraseText
+     * @param {{ replaceExistingText?: boolean }} [options={}]
+     * @returns {{ ok: boolean, message: string }}
+     */
     function insertSavedPhraseIntoChatInput(input, phraseText, options = {}) {
         const phrase = normalizeSavedPhraseText(phraseText);
         if (!phrase) {
@@ -9892,6 +10401,13 @@
         return insertTextIntoChatInput(input, phrase, 'Phrase insérée.', options);
     }
 
+    /**
+     * Insère un GIF Klipy sous forme de balise BBCode image dans le chat.
+     *
+     * @param {HTMLElement} input
+     * @param {string} gifUrl
+     * @returns {{ ok: boolean, message: string }}
+     */
     function insertGifIntoChatInput(input, gifUrl) {
         const embedMarkup = buildKlipyGifEmbedMarkup(gifUrl);
         if (!embedMarkup) {
@@ -9901,15 +10417,56 @@
         return insertTextIntoChatInput(input, embedMarkup, 'Balise BBCode GIF insérée.');
     }
 
-    function buildSavedPhrasesMenuContent(menu, input = getChatInput()) {
-        if (!(menu instanceof HTMLElement)) return;
+    function createSavedPhrasesMenuReplaceInfoBadge() {
+        const replaceInfo = document.createElement('span');
+        replaceInfo.textContent = 'i';
+        replaceInfo.title = 'Si cette option est cochée, le texte déjà présent dans l’input sera entièrement remplacé par la réponse rapide sélectionnée.';
+        replaceInfo.setAttribute('aria-label', replaceInfo.title);
+        replaceInfo.style.display = 'inline-flex';
+        replaceInfo.style.alignItems = 'center';
+        replaceInfo.style.justifyContent = 'center';
+        replaceInfo.style.width = '16px';
+        replaceInfo.style.height = '16px';
+        replaceInfo.style.borderRadius = '999px';
+        replaceInfo.style.background = 'rgba(59,130,246,0.18)';
+        replaceInfo.style.border = '1px solid rgba(96,165,250,0.26)';
+        replaceInfo.style.color = '#bfdbfe';
+        replaceInfo.style.fontSize = '10px';
+        replaceInfo.style.fontWeight = '700';
+        replaceInfo.style.cursor = 'help';
+        replaceInfo.style.lineHeight = '1';
+        replaceInfo.style.userSelect = 'none';
+        return replaceInfo;
+    }
 
-        menu.innerHTML = '';
+    function createSavedPhrasesMenuReplaceToggle() {
+        const replaceToggleLabel = document.createElement('label');
+        replaceToggleLabel.style.display = 'inline-flex';
+        replaceToggleLabel.style.alignItems = 'center';
+        replaceToggleLabel.style.cursor = 'pointer';
 
-        const rankedPhrases = getRankedSavedPhrases(input);
-        const visiblePhraseCount = Math.min(rankedPhrases.length, MAX_VISIBLE_SAVED_PHRASES_IN_MENU);
-        const contextualSortingActive = rankedPhrases.length > 0 && rankedPhrases[0].score > 0;
+        const replaceToggle = document.createElement('input');
+        replaceToggle.type = 'checkbox';
+        replaceToggle.checked = savedPhrasesReplaceInput === true;
+        replaceToggle.style.margin = '0';
+        replaceToggle.style.cursor = 'pointer';
+        replaceToggle.style.accentColor = '#8b5cf6';
+        replaceToggle.title = 'Vider complètement l’input avant insertion';
+        replaceToggle.setAttribute('aria-label', replaceToggle.title);
 
+        replaceToggle.addEventListener('click', (event) => {
+            event.stopPropagation();
+        });
+        replaceToggle.addEventListener('change', (event) => {
+            const nextValue = event.target instanceof HTMLInputElement && event.target.checked;
+            saveSavedPhrasesReplaceInput(nextValue);
+        });
+
+        replaceToggleLabel.appendChild(replaceToggle);
+        return replaceToggleLabel;
+    }
+
+    function createSavedPhrasesMenuHeader(contextualSortingActive) {
         const header = document.createElement('div');
         header.style.display = 'flex';
         header.style.justifyContent = 'space-between';
@@ -9930,205 +10487,231 @@
         replaceControls.style.justifyContent = 'flex-end';
         replaceControls.style.gap = '6px';
         replaceControls.style.flexShrink = '0';
+        replaceControls.appendChild(createSavedPhrasesMenuReplaceInfoBadge());
+        replaceControls.appendChild(createSavedPhrasesMenuReplaceToggle());
 
-        const replaceInfo = document.createElement('span');
-        replaceInfo.textContent = 'i';
-        replaceInfo.title = 'Si cette option est cochée, le texte déjà présent dans l’input sera entièrement remplacé par la réponse rapide sélectionnée.';
-        replaceInfo.setAttribute('aria-label', replaceInfo.title);
-        replaceInfo.style.display = 'inline-flex';
-        replaceInfo.style.alignItems = 'center';
-        replaceInfo.style.justifyContent = 'center';
-        replaceInfo.style.width = '16px';
-        replaceInfo.style.height = '16px';
-        replaceInfo.style.borderRadius = '999px';
-        replaceInfo.style.background = 'rgba(59,130,246,0.18)';
-        replaceInfo.style.border = '1px solid rgba(96,165,250,0.26)';
-        replaceInfo.style.color = '#bfdbfe';
-        replaceInfo.style.fontSize = '10px';
-        replaceInfo.style.fontWeight = '700';
-        replaceInfo.style.cursor = 'help';
-        replaceInfo.style.lineHeight = '1';
-        replaceInfo.style.userSelect = 'none';
-
-        const replaceToggleLabel = document.createElement('label');
-        replaceToggleLabel.style.display = 'inline-flex';
-        replaceToggleLabel.style.alignItems = 'center';
-        replaceToggleLabel.style.cursor = 'pointer';
-
-        const replaceToggle = document.createElement('input');
-        replaceToggle.type = 'checkbox';
-        replaceToggle.checked = savedPhrasesReplaceInput === true;
-        replaceToggle.style.margin = '0';
-        replaceToggle.style.cursor = 'pointer';
-        replaceToggle.style.accentColor = '#8b5cf6';
-        replaceToggle.title = 'Vider complètement l’input avant insertion';
-        replaceToggle.setAttribute('aria-label', replaceToggle.title);
-
-        replaceToggle.addEventListener('click', (event) => {
-            event.stopPropagation();
-        });
-
-        replaceToggle.addEventListener('change', (event) => {
-            const nextValue = event.target instanceof HTMLInputElement && event.target.checked;
-            saveSavedPhrasesReplaceInput(nextValue);
-        });
-
-        replaceToggleLabel.appendChild(replaceToggle);
-        replaceControls.appendChild(replaceInfo);
-        replaceControls.appendChild(replaceToggleLabel);
         header.appendChild(headerTitle);
         header.appendChild(replaceControls);
-        menu.appendChild(header);
+        return header;
+    }
+
+    function createSavedPhrasesMenuContextLabel() {
+        const helperLabel = document.createElement('div');
+        helperLabel.textContent = 'Tri contextuel actif';
+        helperLabel.style.padding = '0 10px 8px';
+        helperLabel.style.fontSize = '11px';
+        helperLabel.style.color = '#a78bfa';
+        helperLabel.style.opacity = '0.92';
+        return helperLabel;
+    }
+
+    function buildSavedPhrasesMenuItemTitle(rankedPhrase, contextualSortingActive) {
+        const phraseText = rankedPhrase.phrase.text;
+        const keywordsLabel = formatSavedPhraseKeywordsLabel(rankedPhrase.phrase.keywords);
+        const titleParts = [phraseText];
+
+        if (rankedPhrase.phrase.keywords.length > 0) {
+            titleParts.push(`Mots-clés : ${keywordsLabel}`);
+        }
+        if (rankedPhrase.matchedKeywords.length > 0) {
+            titleParts.push(`Correspondance : ${rankedPhrase.matchedKeywords.join(', ')}`);
+        }
+        if (contextualSortingActive && rankedPhrase.matchPercent > 0) {
+            titleParts.push(`Match estimé : ${rankedPhrase.matchPercent}%`);
+        }
+
+        return titleParts.join('\n');
+    }
+
+    function createSavedPhrasesMenuMatchBadge(matchPercent) {
+        const percentBadge = document.createElement('span');
+        percentBadge.textContent = `${matchPercent}%`;
+        percentBadge.style.display = 'inline-flex';
+        percentBadge.style.alignItems = 'center';
+        percentBadge.style.justifyContent = 'center';
+        percentBadge.style.padding = '3px 7px';
+        percentBadge.style.borderRadius = '999px';
+        percentBadge.style.background = 'rgba(34,197,94,0.18)';
+        percentBadge.style.border = '1px solid rgba(74,222,128,0.28)';
+        percentBadge.style.color = '#bbf7d0';
+        percentBadge.style.fontSize = '10px';
+        percentBadge.style.fontWeight = '700';
+        percentBadge.style.flexShrink = '0';
+        return percentBadge;
+    }
+
+    function createSavedPhrasesMenuTextLabel(previewText) {
+        const textLabel = document.createElement('span');
+        textLabel.textContent = previewText;
+        textLabel.style.flex = '1';
+        textLabel.style.minWidth = '0';
+        textLabel.style.textAlign = 'left';
+        textLabel.style.whiteSpace = 'nowrap';
+        textLabel.style.overflow = 'hidden';
+        textLabel.style.textOverflow = 'ellipsis';
+        return textLabel;
+    }
+
+    function createSavedPhrasesMenuItem(menu, rankedPhrase, contextualSortingActive) {
+        const phraseText = rankedPhrase.phrase.text;
+        const previewText = truncateSavedPhrasePreviewText(phraseText);
+        const item = document.createElement('button');
+        item.type = 'button';
+        item.title = buildSavedPhrasesMenuItemTitle(rankedPhrase, contextualSortingActive);
+        item.style.background = 'transparent';
+        item.style.border = 'none';
+        item.style.color = '#e4e4e7';
+        item.style.padding = '8px 12px';
+        item.style.borderRadius = '8px';
+        item.style.fontSize = '12px';
+        item.style.cursor = 'pointer';
+        item.style.width = '100%';
+        item.style.display = 'flex';
+        item.style.alignItems = 'center';
+        item.style.justifyContent = 'space-between';
+        item.style.gap = '10px';
+        item.style.transition = 'all 0.15s ease';
+
+        const applyIdleState = () => {
+            item.style.background = 'transparent';
+            item.style.color = '#e4e4e7';
+        };
+
+        const applyActiveState = () => {
+            item.style.background = 'rgba(139, 92, 246, 0.15)';
+            item.style.color = '#fff';
+        };
+
+        if (contextualSortingActive && rankedPhrase.matchPercent > 0) {
+            item.appendChild(createSavedPhrasesMenuMatchBadge(rankedPhrase.matchPercent));
+        }
+
+        item.appendChild(createSavedPhrasesMenuTextLabel(previewText));
+
+        item.addEventListener('mouseenter', applyActiveState);
+        item.addEventListener('mouseleave', () => {
+            if (document.activeElement === item) return;
+            applyIdleState();
+        });
+        item.addEventListener('focus', applyActiveState);
+        item.addEventListener('blur', applyIdleState);
+        item.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+
+            const nextInput = getChatInput();
+            if (!nextInput) {
+                if (typeof showToast === 'function') showToast('Champ de texte non trouvé.', true);
+                return;
+            }
+
+            const result = insertSavedPhraseIntoChatInput(nextInput, phraseText, {
+                replaceExistingText: savedPhrasesReplaceInput === true
+            });
+            if (!result.ok) {
+                if (typeof showToast === 'function') showToast(result.message, true);
+                return;
+            }
+
+            hideSavedPhrasesMenu(menu);
+        });
+
+        return item;
+    }
+
+    function createSavedPhrasesMenuDivider() {
+        const divider = document.createElement('div');
+        divider.style.height = '1px';
+        divider.style.margin = '6px 4px';
+        divider.style.background = 'rgba(255,255,255,0.08)';
+        return divider;
+    }
+
+    function createSavedPhrasesMenuMoreButton(menu, hiddenCount) {
+        const moreBtn = document.createElement('button');
+        moreBtn.type = 'button';
+        moreBtn.textContent = `Autres (${hiddenCount})`;
+        moreBtn.style.background = 'rgba(124,58,237,0.16)';
+        moreBtn.style.border = '1px solid rgba(139,92,246,0.22)';
+        moreBtn.style.color = '#ddd6fe';
+        moreBtn.style.padding = '9px 12px';
+        moreBtn.style.borderRadius = '10px';
+        moreBtn.style.fontSize = '12px';
+        moreBtn.style.fontWeight = '600';
+        moreBtn.style.textAlign = 'left';
+        moreBtn.style.cursor = 'pointer';
+        moreBtn.style.width = '100%';
+        moreBtn.style.transition = 'all 0.15s ease';
+
+        const applyIdleState = () => {
+            moreBtn.style.background = 'rgba(124,58,237,0.16)';
+            moreBtn.style.borderColor = 'rgba(139,92,246,0.22)';
+        };
+
+        const applyActiveState = () => {
+            moreBtn.style.background = 'rgba(124,58,237,0.24)';
+            moreBtn.style.borderColor = 'rgba(139,92,246,0.34)';
+        };
+
+        moreBtn.addEventListener('mouseenter', applyActiveState);
+        moreBtn.addEventListener('mouseleave', () => {
+            if (document.activeElement === moreBtn) return;
+            applyIdleState();
+        });
+        moreBtn.addEventListener('focus', applyActiveState);
+        moreBtn.addEventListener('blur', applyIdleState);
+        moreBtn.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            hideSavedPhrasesMenu(menu);
+            openSavedPhrasesPickerModal();
+        });
+
+        return moreBtn;
+    }
+
+    /**
+     * Reconstruit le menu compact des réponses rapides à partir du classement contextuel courant.
+     *
+     * @param {HTMLElement} menu
+     * @param {HTMLElement|null} [input=getChatInput()]
+     * @returns {void}
+     */
+    function buildSavedPhrasesMenuContent(menu, input = getChatInput()) {
+        if (!(menu instanceof HTMLElement)) return;
+
+        menu.innerHTML = '';
+
+        const rankedPhrases = getRankedSavedPhrases(input);
+        const visiblePhraseCount = Math.min(rankedPhrases.length, MAX_VISIBLE_SAVED_PHRASES_IN_MENU);
+        const contextualSortingActive = rankedPhrases.length > 0 && rankedPhrases[0].score > 0;
+
+        menu.appendChild(createSavedPhrasesMenuHeader(contextualSortingActive));
 
         if (contextualSortingActive) {
-            const helperLabel = document.createElement('div');
-            helperLabel.textContent = 'Tri contextuel actif';
-            helperLabel.style.padding = '0 10px 8px';
-            helperLabel.style.fontSize = '11px';
-            helperLabel.style.color = '#a78bfa';
-            helperLabel.style.opacity = '0.92';
-            menu.appendChild(helperLabel);
+            menu.appendChild(createSavedPhrasesMenuContextLabel());
         }
 
         for (let i = 0; i < visiblePhraseCount; i++) {
             const rankedPhrase = rankedPhrases[i];
             if (!rankedPhrase?.phrase) continue;
-
-            const phraseText = rankedPhrase.phrase.text;
-            const previewText = truncateSavedPhrasePreviewText(phraseText);
-            const keywordsLabel = formatSavedPhraseKeywordsLabel(rankedPhrase.phrase.keywords);
-            const item = document.createElement('button');
-            item.type = 'button';
-
-            const titleParts = [phraseText];
-            if (rankedPhrase.phrase.keywords.length > 0) {
-                titleParts.push(`Mots-clés : ${keywordsLabel}`);
-            }
-            if (rankedPhrase.matchedKeywords.length > 0) {
-                titleParts.push(`Correspondance : ${rankedPhrase.matchedKeywords.join(', ')}`);
-            }
-            if (contextualSortingActive && rankedPhrase.matchPercent > 0) {
-                titleParts.push(`Match estimé : ${rankedPhrase.matchPercent}%`);
-            }
-            item.title = titleParts.join('\n');
-            item.style.background = 'transparent';
-            item.style.border = 'none';
-            item.style.color = '#e4e4e7';
-            item.style.padding = '8px 12px';
-            item.style.borderRadius = '8px';
-            item.style.fontSize = '12px';
-            item.style.cursor = 'pointer';
-            item.style.width = '100%';
-            item.style.display = 'flex';
-            item.style.alignItems = 'center';
-            item.style.justifyContent = 'space-between';
-            item.style.gap = '10px';
-            item.style.transition = 'all 0.15s ease';
-
-            if (contextualSortingActive && rankedPhrase.matchPercent > 0) {
-                const percentBadge = document.createElement('span');
-                percentBadge.textContent = `${rankedPhrase.matchPercent}%`;
-                percentBadge.style.display = 'inline-flex';
-                percentBadge.style.alignItems = 'center';
-                percentBadge.style.justifyContent = 'center';
-                percentBadge.style.padding = '3px 7px';
-                percentBadge.style.borderRadius = '999px';
-                percentBadge.style.background = 'rgba(34,197,94,0.18)';
-                percentBadge.style.border = '1px solid rgba(74,222,128,0.28)';
-                percentBadge.style.color = '#bbf7d0';
-                percentBadge.style.fontSize = '10px';
-                percentBadge.style.fontWeight = '700';
-                percentBadge.style.flexShrink = '0';
-                item.appendChild(percentBadge);
-            }
-
-            const textLabel = document.createElement('span');
-            textLabel.textContent = previewText;
-            textLabel.style.flex = '1';
-            textLabel.style.minWidth = '0';
-            textLabel.style.textAlign = 'left';
-            textLabel.style.whiteSpace = 'nowrap';
-            textLabel.style.overflow = 'hidden';
-            textLabel.style.textOverflow = 'ellipsis';
-            item.appendChild(textLabel);
-
-            item.addEventListener('mouseenter', () => {
-                item.style.background = 'rgba(139, 92, 246, 0.15)';
-                item.style.color = '#fff';
-            });
-            item.addEventListener('mouseleave', () => {
-                item.style.background = 'transparent';
-                item.style.color = '#e4e4e7';
-            });
-
-            item.addEventListener('click', (event) => {
-                event.preventDefault();
-                event.stopPropagation();
-
-                const nextInput = getChatInput();
-
-                if (!nextInput) {
-                    if (typeof showToast === 'function') showToast('Champ de texte non trouvé.', true);
-                    return;
-                }
-
-                const result = insertSavedPhraseIntoChatInput(nextInput, phraseText, {
-                    replaceExistingText: savedPhrasesReplaceInput === true
-                });
-                if (!result.ok) {
-                    if (typeof showToast === 'function') showToast(result.message, true);
-                    return;
-                }
-
-                hideSavedPhrasesMenu(menu);
-            });
-
-            menu.appendChild(item);
+            menu.appendChild(createSavedPhrasesMenuItem(menu, rankedPhrase, contextualSortingActive));
         }
 
         if (rankedPhrases.length > MAX_VISIBLE_SAVED_PHRASES_IN_MENU) {
-            const divider = document.createElement('div');
-            divider.style.height = '1px';
-            divider.style.margin = '6px 4px';
-            divider.style.background = 'rgba(255,255,255,0.08)';
-            menu.appendChild(divider);
-
-            const moreBtn = document.createElement('button');
-            moreBtn.type = 'button';
-            moreBtn.textContent = `Autres (${rankedPhrases.length - MAX_VISIBLE_SAVED_PHRASES_IN_MENU})`;
-            moreBtn.style.background = 'rgba(124,58,237,0.16)';
-            moreBtn.style.border = '1px solid rgba(139,92,246,0.22)';
-            moreBtn.style.color = '#ddd6fe';
-            moreBtn.style.padding = '9px 12px';
-            moreBtn.style.borderRadius = '10px';
-            moreBtn.style.fontSize = '12px';
-            moreBtn.style.fontWeight = '600';
-            moreBtn.style.textAlign = 'left';
-            moreBtn.style.cursor = 'pointer';
-            moreBtn.style.width = '100%';
-            moreBtn.style.transition = 'all 0.15s ease';
-
-            moreBtn.addEventListener('mouseenter', () => {
-                moreBtn.style.background = 'rgba(124,58,237,0.24)';
-                moreBtn.style.borderColor = 'rgba(139,92,246,0.34)';
-            });
-
-            moreBtn.addEventListener('mouseleave', () => {
-                moreBtn.style.background = 'rgba(124,58,237,0.16)';
-                moreBtn.style.borderColor = 'rgba(139,92,246,0.22)';
-            });
-
-            moreBtn.addEventListener('click', (event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                hideSavedPhrasesMenu(menu);
-                openSavedPhrasesPickerModal();
-            });
-
-            menu.appendChild(moreBtn);
+            menu.appendChild(createSavedPhrasesMenuDivider());
+            menu.appendChild(createSavedPhrasesMenuMoreButton(
+                menu,
+                rankedPhrases.length - MAX_VISIBLE_SAVED_PHRASES_IN_MENU
+            ));
         }
     }
 
+    /**
+     * Monte le bouton et le menu compact des réponses rapides dans la toolbar du chat.
+     *
+     * @returns {void}
+     */
     function injectSavedPhrasesToolbar() {
         if (!isSupportedPage()) return;
         if (!savedPhrasesEnabled) {
@@ -10279,6 +10862,40 @@
         });
 
         menu.addEventListener('click', (e) => e.stopPropagation());
+        menu.addEventListener('keydown', (event) => {
+            if (menu.dataset.tmOpen !== '1') return;
+
+            if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
+                event.preventDefault();
+                event.stopPropagation();
+                moveSavedPhrasesMenuFocus(menu, 1);
+                return;
+            }
+
+            if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
+                event.preventDefault();
+                event.stopPropagation();
+                moveSavedPhrasesMenuFocus(menu, -1);
+                return;
+            }
+
+            if (event.key === 'Home') {
+                event.preventDefault();
+                event.stopPropagation();
+                focusSavedPhrasesMenuButton(menu, 0);
+                return;
+            }
+
+            if (event.key === 'End') {
+                const buttons = getSavedPhrasesMenuFocusableButtons(menu);
+                if (buttons.length === 0) return;
+
+                event.preventDefault();
+                event.stopPropagation();
+                focusSavedPhrasesMenuButton(menu, buttons.length - 1);
+                return;
+            }
+        });
 
         quickAddBtn.addEventListener('click', (event) => {
             event.preventDefault();
@@ -10399,6 +11016,44 @@
         }
     }
 
+    function clearKlipyGifMenuRepositionFrame(menu) {
+        if (!(menu instanceof HTMLElement)) return;
+
+        const frameId = Number(menu.dataset.tmPositionFrameId || 0);
+        if (frameId > 0) {
+            window.cancelAnimationFrame(frameId);
+            delete menu.dataset.tmPositionFrameId;
+        }
+    }
+
+    function scheduleKlipyGifMenuReposition(menu, frameCount = 2) {
+        if (!(menu instanceof HTMLElement)) return;
+
+        clearKlipyGifMenuRepositionFrame(menu);
+
+        let remainingFrames = Math.max(1, Number(frameCount) || 1);
+        const tick = () => {
+            if (!(menu instanceof HTMLElement) || menu.dataset.tmOpen !== '1') {
+                delete menu.dataset.tmPositionFrameId;
+                return;
+            }
+
+            positionKlipyGifMenu(menu);
+            remainingFrames -= 1;
+
+            if (remainingFrames <= 0) {
+                delete menu.dataset.tmPositionFrameId;
+                return;
+            }
+
+            const nextFrameId = window.requestAnimationFrame(tick);
+            menu.dataset.tmPositionFrameId = String(nextFrameId);
+        };
+
+        const initialFrameId = window.requestAnimationFrame(tick);
+        menu.dataset.tmPositionFrameId = String(initialFrameId);
+    }
+
     function showKlipyGifMenu(menu) {
         if (!(menu instanceof HTMLElement)) return;
 
@@ -10406,6 +11061,7 @@
         menu.style.display = 'flex';
         menu.dataset.tmOpen = '1';
         positionKlipyGifMenu(menu);
+        scheduleKlipyGifMenuReposition(menu, 3);
         void menu.offsetWidth;
         menu.style.opacity = '1';
         menu.style.transform = 'translateY(0) scale(1)';
@@ -10416,6 +11072,7 @@
 
         clearKlipyGifSearchDebounce();
         clearKlipyGifMenuHideTimer(menu);
+        clearKlipyGifMenuRepositionFrame(menu);
         menu.dataset.tmOpen = '0';
         menu.style.opacity = '0';
         menu.style.transform = 'translateY(10px) scale(0.95)';
@@ -10443,6 +11100,7 @@
         const menu = getKlipyGifMenu();
         if (menu) {
             clearKlipyGifMenuHideTimer(menu);
+            clearKlipyGifMenuRepositionFrame(menu);
             menu.remove();
         }
 
@@ -10455,6 +11113,7 @@
         syncChatInputToolbarReservedSpace();
     }
 
+    // Klipy GIF picker - toolbar/menu UI
     function installKlipyGifToolbarGlobalHandlers() {
         if (klipyGifToolbarEventsInstalled) return;
 
@@ -10633,6 +11292,13 @@
         });
     }
 
+    /**
+     * Charge et affiche les résultats Klipy dans le menu GIF, en mode initial ou pagination.
+     *
+     * @param {HTMLElement} menu
+     * @param {{ append?: boolean }} [options={}]
+     * @returns {Promise<void>}
+     */
     async function loadKlipyGifResults(menu, { append = false } = {}) {
         if (!(menu instanceof HTMLElement)) return;
 
@@ -10691,6 +11357,7 @@
             }
 
             updateKlipyGifMoreButton(menu, !!payload.next, false);
+            scheduleKlipyGifMenuReposition(menu, append ? 2 : 3);
         } catch (error) {
             if (menu.dataset.tmKlipyRequestId !== requestId) return;
 
@@ -10704,6 +11371,7 @@
                 `Erreur Klipy: ${error instanceof Error ? error.message : 'chargement impossible.'}`,
                 true
             );
+            scheduleKlipyGifMenuReposition(menu, 2);
         }
     }
 
@@ -10715,21 +11383,7 @@
         }, KLIPY_SEARCH_DEBOUNCE_MS);
     }
 
-    function injectKlipyGifToolbar() {
-        if (!isSupportedPage()) return;
-        if (!klipyGifsEnabled) {
-            removeKlipyGifToolbar();
-            return;
-        }
-
-        installKlipyGifToolbarGlobalHandlers();
-
-        const textInput = getChatInput();
-        if (!textInput) return;
-        const mountContext = getChatInputToolbarMountContext(textInput);
-        const rail = getOrCreateChatInputToolbarRail(mountContext);
-        if (!(rail instanceof HTMLElement)) return;
-
+    function getOrCreateKlipyGifToolbarWrapper(rail) {
         let wrapper = document.getElementById(GIF_MENU_WRAPPER_ID);
         if (!wrapper) {
             wrapper = document.createElement('div');
@@ -10757,15 +11411,16 @@
         }
 
         wrapper.style.display = 'flex';
-        if (wrapper.dataset.tmInitialized === '1') {
-            applyKlipyGifMenuAlignmentState();
-            syncChatInputToolbarReservedSpace(textInput);
-            syncNativeChatInputActionButtons(textInput);
-            return;
-        }
+        return wrapper;
+    }
 
-        wrapper.innerHTML = '';
+    function syncKlipyGifToolbarMountState(textInput, menu = null) {
+        applyKlipyGifMenuAlignmentState(menu);
+        syncChatInputToolbarReservedSpace(textInput);
+        syncNativeChatInputActionButtons(textInput);
+    }
 
+    function createKlipyGifToggleButton() {
         const toggleBtn = document.createElement('button');
         toggleBtn.type = 'button';
         toggleBtn.innerHTML = '<span style="margin-right:4px;">🎞</span> GIF';
@@ -10797,6 +11452,10 @@
             toggleBtn.style.border = '1px solid rgba(74,222,128,0.26)';
         });
 
+        return toggleBtn;
+    }
+
+    function createKlipyGifMenuSurface() {
         const menu = document.createElement('div');
         menu.setAttribute('data-tm-klipy-gif-menu', '1');
         menu.style.display = 'none';
@@ -10818,7 +11477,10 @@
         menu.style.transform = 'translateY(10px) scale(0.95)';
         menu.style.transition = 'opacity 0.2s cubic-bezier(0.16, 1, 0.3, 1), transform 0.2s cubic-bezier(0.16, 1, 0.3, 1)';
         applyKlipyGifMenuAlignmentState(menu);
+        return menu;
+    }
 
+    function buildKlipyGifMenuHeader() {
         const header = document.createElement('div');
         header.style.display = 'flex';
         header.style.alignItems = 'center';
@@ -10852,7 +11514,10 @@
 
         header.appendChild(titleBlock);
         header.appendChild(providerLink);
+        return header;
+    }
 
+    function createKlipyGifSearchInput() {
         const searchInput = document.createElement('input');
         searchInput.type = 'text';
         searchInput.placeholder = 'Rechercher un GIF Klipy';
@@ -10865,14 +11530,20 @@
         searchInput.style.padding = '10px 12px';
         searchInput.style.outline = 'none';
         searchInput.style.fontSize = '12px';
+        return searchInput;
+    }
 
+    function createKlipyGifStatusElement() {
         const status = document.createElement('div');
         status.setAttribute('data-tm-klipy-status', '1');
         status.textContent = `Tendances Klipy. Tape au moins ${KLIPY_SEARCH_MIN_LENGTH} caractères pour chercher.`;
         status.style.fontSize = '11px';
         status.style.lineHeight = '1.45';
         status.style.color = '#cbd5f5';
+        return status;
+    }
 
+    function createKlipyGifResultsGrid() {
         const results = document.createElement('div');
         results.setAttribute('data-tm-klipy-results', '1');
         results.style.display = 'grid';
@@ -10881,7 +11552,10 @@
         results.style.maxHeight = '420px';
         results.style.overflowY = 'auto';
         results.style.paddingRight = '2px';
+        return results;
+    }
 
+    function createKlipyGifLoadMoreButton() {
         const loadMoreBtn = document.createElement('button');
         loadMoreBtn.type = 'button';
         loadMoreBtn.setAttribute('data-tm-klipy-more', '1');
@@ -10896,12 +11570,26 @@
         loadMoreBtn.style.fontSize = '11px';
         loadMoreBtn.style.fontWeight = '700';
         loadMoreBtn.style.cursor = 'pointer';
+        return loadMoreBtn;
+    }
 
+    function createKlipyGifMenuFooter() {
         const footer = document.createElement('div');
         footer.textContent = '';
         footer.style.fontSize = '10px';
         footer.style.lineHeight = '1.45';
         footer.style.color = '#64748b';
+        return footer;
+    }
+
+    function createKlipyGifMenuView() {
+        const menu = createKlipyGifMenuSurface();
+        const header = buildKlipyGifMenuHeader();
+        const searchInput = createKlipyGifSearchInput();
+        const status = createKlipyGifStatusElement();
+        const results = createKlipyGifResultsGrid();
+        const loadMoreBtn = createKlipyGifLoadMoreButton();
+        const footer = createKlipyGifMenuFooter();
 
         menu.appendChild(header);
         menu.appendChild(searchInput);
@@ -10910,6 +11598,10 @@
         menu.appendChild(loadMoreBtn);
         menu.appendChild(footer);
 
+        return { menu, searchInput, loadMoreBtn };
+    }
+
+    function bindKlipyGifToolbarInteractions(toggleBtn, menu, searchInput, loadMoreBtn) {
         toggleBtn.addEventListener('click', (event) => {
             event.preventDefault();
             event.stopPropagation();
@@ -10958,12 +11650,49 @@
         menu.addEventListener('click', (event) => {
             event.stopPropagation();
         });
+    }
+
+    function initializeKlipyGifToolbarWrapper(wrapper) {
+        wrapper.innerHTML = '';
+
+        const toggleBtn = createKlipyGifToggleButton();
+        const { menu, searchInput, loadMoreBtn } = createKlipyGifMenuView();
+
+        bindKlipyGifToolbarInteractions(toggleBtn, menu, searchInput, loadMoreBtn);
 
         wrapper.appendChild(toggleBtn);
         wrapper.appendChild(menu);
         wrapper.dataset.tmInitialized = '1';
-        syncChatInputToolbarReservedSpace(textInput);
-        syncNativeChatInputActionButtons(textInput);
+    }
+
+    /**
+     * Monte le bouton et le picker GIF Klipy dans la toolbar du chat.
+     *
+     * @returns {void}
+     */
+    function injectKlipyGifToolbar() {
+        if (!isSupportedPage()) return;
+        if (!klipyGifsEnabled) {
+            removeKlipyGifToolbar();
+            return;
+        }
+
+        installKlipyGifToolbarGlobalHandlers();
+
+        const textInput = getChatInput();
+        if (!textInput) return;
+        const mountContext = getChatInputToolbarMountContext(textInput);
+        const rail = getOrCreateChatInputToolbarRail(mountContext);
+        if (!(rail instanceof HTMLElement)) return;
+
+        const wrapper = getOrCreateKlipyGifToolbarWrapper(rail);
+        if (wrapper.dataset.tmInitialized === '1') {
+            syncKlipyGifToolbarMountState(textInput);
+            return;
+        }
+
+        initializeKlipyGifToolbarWrapper(wrapper);
+        syncKlipyGifToolbarMountState(textInput, getKlipyGifMenu());
     }
 
     function startObserver() {
@@ -11278,7 +12007,7 @@
         picker.style.right = 'auto';
         picker.style.left = '-9999px';
         picker.style.top = '-9999px';
-        picker.style.zIndex = '260';
+        picker.style.zIndex = String(REACTION_PICKER_Z_INDEX);
 
         const rect = picker.getBoundingClientRect();
         const maxLeft = Math.max(8, window.innerWidth - rect.width - 8);
@@ -12046,6 +12775,7 @@
             if (clickedButton !== replyButton && !replyButton.contains(clickedButton)) return;
 
             setSavedPhrasesReplyContextFromMessage(messageEl);
+            scheduleChatInputToolbarResync();
         }, true);
     }
 
@@ -12471,12 +13201,25 @@
         const isMacShortcut = e.ctrlKey && e.metaKey && !e.altKey && key === 'c';
         const isClassicAfkShortcut = e.ctrlKey && e.altKey && !e.metaKey && key === 'a';
         const isMacAfkShortcut = e.ctrlKey && e.metaKey && !e.altKey && key === 'a';
+        const isClassicSavedPhrasesShortcut = e.ctrlKey && e.altKey && !e.metaKey && key === 'r';
+        const isMacSavedPhrasesShortcut = e.ctrlKey && e.metaKey && !e.altKey && key === 'r';
 
         if (isClassicShortcut || isMacShortcut) {
             if (!isSupportedPage()) return;
             if (imageViewerOpen) return;
             e.preventDefault();
             openSettingsModal();
+            return;
+        }
+
+        if (isClassicSavedPhrasesShortcut || isMacSavedPhrasesShortcut) {
+            if (!isSupportedPage()) return;
+            if (imageViewerOpen || modalOpen) return;
+            e.preventDefault();
+
+            if (!openSavedPhrasesMenuFromShortcut()) {
+                showToast('Réponses rapides indisponibles.', true);
+            }
             return;
         }
 
@@ -12509,7 +13252,7 @@
         installRouteWatcher();
         document.addEventListener('click', handleStatsBoxActionClick, true);
         refreshForRoute();
-        console.log(`[Torr9 Chat] Script actif. Raccourcis : Ctrl+Alt+C / Ctrl+Cmd+C · ${formatAfkShortcutLabel()}`);
+        console.log(`[Torr9 Chat] Script actif. Raccourcis : Ctrl+Alt+C / Ctrl+Cmd+C · Ctrl+Alt+R / Ctrl+Cmd+R · ${formatAfkShortcutLabel()}`);
     }
 
     if (document.readyState === 'loading') {
