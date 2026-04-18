@@ -31,6 +31,7 @@ Ce fichier suit l'état fonctionnel du userscript à partir de la version actuel
 - Refactorisation du panneau AFK avec séparation du modèle de vue, du rendu HTML, de la récupération des éléments et des bindings pour sortir `renderAfkPanel` des fonctions trop volumineuses.
 - Refactorisation du bloc Klipy GIF avec séparation plus nette entre helpers API et helpers UI, et découpage de `injectKlipyGifToolbar` en helpers de montage, rendu et bindings.
 - Ajout de commentaires JSDoc sur les structures de données et les points d’entrée critiques des modules stockage, réponses rapides, AFK, modales de configuration et picker GIF.
+- Ajout du raccourci `Ctrl+Alt+R` / `Ctrl+Cmd+R` pour ouvrir directement les réponses rapides, avec navigation clavier dans le menu compact via les flèches, `Home`, `End` et `Entrée`.
 
 ## v2.64 - 2026-04-15
 

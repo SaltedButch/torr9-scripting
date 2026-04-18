@@ -6193,6 +6193,13 @@
                         </div>
                     </div>
 
+                    <div style="padding:10px 12px;border-radius:12px;background:rgba(124,58,237,0.14);border:1px solid rgba(139,92,246,0.26);">
+                        <div style="font-size:12px;font-weight:700;color:#ddd6fe;">Ctrl+Alt+R ou Ctrl+Cmd+R</div>
+                        <div style="margin-top:4px;font-size:11px;color:#c4b5fd;line-height:1.45;">
+                            Ouvre directement les réponses rapides. Utilise ensuite les flèches, `Home`, `End` et `Entrée` pour naviguer sans souris.
+                        </div>
+                    </div>
+
                     <div style="padding:10px 12px;border-radius:12px;background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.24);">
                         <div style="font-size:12px;font-weight:700;color:#fde68a;">Alt+clic sur un pseudo</div>
                         <div style="margin-top:4px;font-size:11px;color:#fcd34d;line-height:1.45;">
@@ -8681,6 +8688,7 @@
         const phrase = entry.phrase;
         const previewText = truncateSavedPhrasePreviewText(phrase.text);
         const row = document.createElement('div');
+        row.title = buildSavedPhrasesMenuItemTitle(entry, contextualSortingActive);
         row.style.width = '100%';
         row.style.textAlign = 'left';
         row.style.padding = '12px';
@@ -9185,7 +9193,42 @@
         }
     }
 
-    function showSavedPhrasesMenu(menu) {
+    function getSavedPhrasesMenuFocusableButtons(menu) {
+        if (!(menu instanceof HTMLElement)) return [];
+
+        return Array.from(menu.querySelectorAll('button[type="button"]')).filter((button) =>
+            button instanceof HTMLButtonElement &&
+            button.offsetParent !== null &&
+            !button.disabled
+        );
+    }
+
+    function focusSavedPhrasesMenuButton(menu, index = 0) {
+        const buttons = getSavedPhrasesMenuFocusableButtons(menu);
+        if (buttons.length === 0) return false;
+
+        const normalizedIndex = ((Number(index) || 0) % buttons.length + buttons.length) % buttons.length;
+        menu.dataset.tmActiveIndex = String(normalizedIndex);
+        buttons[normalizedIndex].focus();
+        return true;
+    }
+
+    function moveSavedPhrasesMenuFocus(menu, delta) {
+        const buttons = getSavedPhrasesMenuFocusableButtons(menu);
+        if (buttons.length === 0) return false;
+
+        const activeElement = document.activeElement;
+        const currentIndex = buttons.findIndex((button) => button === activeElement);
+        const fallbackIndex = Number(menu.dataset.tmActiveIndex || 0);
+        const baseIndex = currentIndex >= 0 ? currentIndex : fallbackIndex;
+        const nextIndex = ((baseIndex + delta) % buttons.length + buttons.length) % buttons.length;
+
+        menu.dataset.tmActiveIndex = String(nextIndex);
+        buttons[nextIndex].focus();
+        return true;
+    }
+
+    function showSavedPhrasesMenu(menu, options = {}) {
         if (!(menu instanceof HTMLElement)) return;
 
         clearSavedPhrasesMenuHideTimer(menu);
@@ -9194,6 +9237,13 @@
         void menu.offsetWidth;
         menu.style.opacity = '1';
         menu.style.transform = 'translateY(0) scale(1)';
+
+        if (options.focusFirstItem === true) {
+            window.requestAnimationFrame(() => {
+                if (menu.dataset.tmOpen !== '1') return;
+                focusSavedPhrasesMenuButton(menu, 0);
+            });
+        }
     }
 
     function hideSavedPhrasesMenu(menu) {
@@ -9201,6 +9251,7 @@
 
         clearSavedPhrasesMenuHideTimer(menu);
         menu.dataset.tmOpen = '0';
+        delete menu.dataset.tmActiveIndex;
         menu.style.opacity = '0';
         menu.style.transform = 'translateY(10px) scale(0.95)';
 
@@ -9258,6 +9309,25 @@
         window.addEventListener('blur', () => {
             closeSavedPhrasesMenu();
         });
+    }
+
+    function openSavedPhrasesMenuFromShortcut() {
+        if (!isSupportedPage()) return false;
+        if (!savedPhrasesEnabled || savedPhrases.length === 0) return false;
+
+        const textInput = getChatInput();
+        if (!(textInput instanceof HTMLElement)) return false;
+
+        injectSavedPhrasesToolbar();
+
+        const menu = getSavedPhrasesMenu();
+        if (!(menu instanceof HTMLElement)) return false;
+
+        buildSavedPhrasesMenuContent(menu, textInput);
+        closeKlipyGifMenu();
+        closeSavedPhrasesMenu();
+        showSavedPhrasesMenu(menu, { focusFirstItem: true });
+        return true;
     }
 
     function getChatInput() {
@@ -10502,20 +10572,29 @@
         item.style.gap = '10px';
         item.style.transition = 'all 0.15s ease';
 
+        const applyIdleState = () => {
+            item.style.background = 'transparent';
+            item.style.color = '#e4e4e7';
+        };
+
+        const applyActiveState = () => {
+            item.style.background = 'rgba(139, 92, 246, 0.15)';
+            item.style.color = '#fff';
+        };
+
         if (contextualSortingActive && rankedPhrase.matchPercent > 0) {
             item.appendChild(createSavedPhrasesMenuMatchBadge(rankedPhrase.matchPercent));
         }
 
         item.appendChild(createSavedPhrasesMenuTextLabel(previewText));
 
-        item.addEventListener('mouseenter', () => {
-            item.style.background = 'rgba(139, 92, 246, 0.15)';
-            item.style.color = '#fff';
-        });
+        item.addEventListener('mouseenter', applyActiveState);
         item.addEventListener('mouseleave', () => {
-            item.style.background = 'transparent';
-            item.style.color = '#e4e4e7';
+            if (document.activeElement === item) return;
+            applyIdleState();
         });
+        item.addEventListener('focus', applyActiveState);
+        item.addEventListener('blur', applyIdleState);
         item.addEventListener('click', (event) => {
             event.preventDefault();
             event.stopPropagation();
@@ -10564,14 +10643,23 @@
         moreBtn.style.width = '100%';
         moreBtn.style.transition = 'all 0.15s ease';
 
-        moreBtn.addEventListener('mouseenter', () => {
-            moreBtn.style.background = 'rgba(124,58,237,0.24)';
-            moreBtn.style.borderColor = 'rgba(139,92,246,0.34)';
-        });
-        moreBtn.addEventListener('mouseleave', () => {
+        const applyIdleState = () => {
             moreBtn.style.background = 'rgba(124,58,237,0.16)';
             moreBtn.style.borderColor = 'rgba(139,92,246,0.22)';
+        };
+
+        const applyActiveState = () => {
+            moreBtn.style.background = 'rgba(124,58,237,0.24)';
+            moreBtn.style.borderColor = 'rgba(139,92,246,0.34)';
+        };
+
+        moreBtn.addEventListener('mouseenter', applyActiveState);
+        moreBtn.addEventListener('mouseleave', () => {
+            if (document.activeElement === moreBtn) return;
+            applyIdleState();
         });
+        moreBtn.addEventListener('focus', applyActiveState);
+        moreBtn.addEventListener('blur', applyIdleState);
         moreBtn.addEventListener('click', (event) => {
             event.preventDefault();
             event.stopPropagation();
@@ -10774,6 +10862,40 @@
         });
 
         menu.addEventListener('click', (e) => e.stopPropagation());
+        menu.addEventListener('keydown', (event) => {
+            if (menu.dataset.tmOpen !== '1') return;
+
+            if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
+                event.preventDefault();
+                event.stopPropagation();
+                moveSavedPhrasesMenuFocus(menu, 1);
+                return;
+            }
+
+            if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
+                event.preventDefault();
+                event.stopPropagation();
+                moveSavedPhrasesMenuFocus(menu, -1);
+                return;
+            }
+
+            if (event.key === 'Home') {
+                event.preventDefault();
+                event.stopPropagation();
+                focusSavedPhrasesMenuButton(menu, 0);
+                return;
+            }
+
+            if (event.key === 'End') {
+                const buttons = getSavedPhrasesMenuFocusableButtons(menu);
+                if (buttons.length === 0) return;
+
+                event.preventDefault();
+                event.stopPropagation();
+                focusSavedPhrasesMenuButton(menu, buttons.length - 1);
+                return;
+            }
+        });
 
         quickAddBtn.addEventListener('click', (event) => {
             event.preventDefault();
@@ -13079,12 +13201,25 @@
         const isMacShortcut = e.ctrlKey && e.metaKey && !e.altKey && key === 'c';
         const isClassicAfkShortcut = e.ctrlKey && e.altKey && !e.metaKey && key === 'a';
         const isMacAfkShortcut = e.ctrlKey && e.metaKey && !e.altKey && key === 'a';
+        const isClassicSavedPhrasesShortcut = e.ctrlKey && e.altKey && !e.metaKey && key === 'r';
+        const isMacSavedPhrasesShortcut = e.ctrlKey && e.metaKey && !e.altKey && key === 'r';
 
         if (isClassicShortcut || isMacShortcut) {
             if (!isSupportedPage()) return;
             if (imageViewerOpen) return;
             e.preventDefault();
             openSettingsModal();
+            return;
+        }
+
+        if (isClassicSavedPhrasesShortcut || isMacSavedPhrasesShortcut) {
+            if (!isSupportedPage()) return;
+            if (imageViewerOpen || modalOpen) return;
+            e.preventDefault();
+
+            if (!openSavedPhrasesMenuFromShortcut()) {
+                showToast('Réponses rapides indisponibles.', true);
+            }
             return;
         }
 
@@ -13117,7 +13252,7 @@
         installRouteWatcher();
         document.addEventListener('click', handleStatsBoxActionClick, true);
         refreshForRoute();
-        console.log(`[Torr9 Chat] Script actif. Raccourcis : Ctrl+Alt+C / Ctrl+Cmd+C · ${formatAfkShortcutLabel()}`);
+        console.log(`[Torr9 Chat] Script actif. Raccourcis : Ctrl+Alt+C / Ctrl+Cmd+C · Ctrl+Alt+R / Ctrl+Cmd+R · ${formatAfkShortcutLabel()}`);
     }
 
     if (document.readyState === 'loading') {
