@@ -14,6 +14,21 @@ Ce fichier suit l'état fonctionnel du userscript à partir de la version actuel
 - Ajout d’un audit statique local pour relever la taille du script, les fonctions trop longues et quelques hotspots de maintenabilité.
 - Correction de la métadonnée `@icon` du userscript, qui contenait un caractère parasite.
 - Début du chantier de refactorisation avec centralisation des accès `localStorage/sessionStorage` et normalisation unifiée des réglages de mentions.
+- Refactor initial de la modale de paramètres avec extraction de la collecte des éléments DOM et de la logique d’interaction hors de `openSettingsModal`.
+- Poursuite du découpage de la modale de paramètres avec séparation des handlers par domaine (`blacklist`, `mentions`, accessibilité, import/export, toggles de features).
+- Extraction du template HTML de la modale de paramètres en helpers de rendu par section, avec sortie complète du bloc `settings` des fonctions surdimensionnées relevées par l’audit.
+- Refactorisation des modales de réponses rapides avec extraction du rendu, des contrôleurs et des bindings pour sortir `openSavedPhrasesConfigModal`, `openSavedPhraseQuickAddModal` et `openSavedPhrasesPickerModal` des fonctions trop volumineuses.
+
+### TODO reprise refactor
+
+- Refactoriser `renderAfkPanel`, encore signalée par l’audit comme fonction surdimensionnée.
+- Refactoriser `injectKlipyGifToolbar` pour séparer rendu, état local et bindings d’événements.
+- Refactoriser `buildSavedPhrasesMenuContent` pour homogénéiser toute la zone `réponses rapides`.
+- Continuer à extraire des helpers partagés pour la création des modales et des composants UI répétitifs.
+- Réduire progressivement la taille globale de `blacklist-shoutbox.user.js`, toujours au-dessus de 10 000 lignes.
+- Traiter le point `KLIPY_API_KEY` en dur, relevé par l’audit comme dette technique à clarifier ou isoler proprement.
+- Rejouer `python3 tools/build_userscripts.py --check` et `python3 tools/audit_userscripts.py` après chaque bloc de refactor pour garder un suivi stable.
+
 ## v2.64 - 2026-04-15
 
 - Correction du z-index du picker GIF sur la page chat pour éviter qu’il passe derrière le menu de message privé sur les petites fenêtres.
