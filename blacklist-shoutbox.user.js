@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torr9 Chat - Shoutbox 2.0
 // @namespace    https://github.com/SaltedButch/torr9-scripting
-// @version      2.65
+// @version      2.66
 // @description  Blacklist, mise en avant, mentions, réponses rapides contextuelles, Gif et confort avancé pour la shoutbox Torr9
 // @icon         https://torr9.net/favicon.ico?favicon.71918ed5.ico
 // @author       Butchered
@@ -6199,7 +6199,7 @@
                     <div style="padding:10px 12px;border-radius:12px;background:rgba(124,58,237,0.14);border:1px solid rgba(139,92,246,0.26);">
                         <div style="font-size:12px;font-weight:700;color:#ddd6fe;">Ctrl+Alt+R ou Ctrl+Cmd+R</div>
                         <div style="margin-top:4px;font-size:11px;color:#c4b5fd;line-height:1.45;">
-                            Ouvre directement les réponses rapides. Utilise ensuite les flèches, `Home`, `End` et `Entrée` pour naviguer sans souris.
+                            Ouvre directement les réponses rapides. Utilise ensuite les flèches, Home, End et Entrée pour naviguer sans souris.
                         </div>
                     </div>
 
