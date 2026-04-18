@@ -10,7 +10,10 @@ Ce fichier suit l'état fonctionnel du userscript à partir de la version actuel
 
 ## Version en préparation
 
-- Rien pour le moment.
+- Validation renforcée des métadonnées userscript au build pour détecter les URLs invalides avant génération du `dist`.
+- Ajout d’un audit statique local pour relever la taille du script, les fonctions trop longues et quelques hotspots de maintenabilité.
+- Correction de la métadonnée `@icon` du userscript, qui contenait un caractère parasite.
+- Début du chantier de refactorisation avec centralisation des accès `localStorage/sessionStorage` et normalisation unifiée des réglages de mentions.
 ## v2.64 - 2026-04-15
 
 - Correction du z-index du picker GIF sur la page chat pour éviter qu’il passe derrière le menu de message privé sur les petites fenêtres.

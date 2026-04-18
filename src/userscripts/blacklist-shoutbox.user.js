@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @version      2.64
 // @description  Blacklist, mise en avant, mentions, réponses rapides contextuelles, Gif et confort avancé pour la shoutbox Torr9
-// @icon         https://torr9.net/favicon.ico?favicon.71918ed5.ico`
+// @icon         https://torr9.net/favicon.ico?favicon.71918ed5.ico
 // @author       Butchered
 // @match        https://torr9.net/*
 // @grant        none
@@ -297,18 +297,65 @@
         return isChatPage() ? STORAGE_KEY_LIGHT_THEME_CHAT : STORAGE_KEY_LIGHT_THEME_HOME;
     }
 
-    function loadHiddenUsers() {
+    function readStorageItem(key, storage = localStorage) {
         try {
-            const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY_USERS) || '[]');
-            if (!Array.isArray(parsed)) return new Set();
-            return new Set(parsed.map(normalizeName).filter(Boolean));
+            return storage.getItem(key);
         } catch (e) {
-            return new Set();
+            return null;
         }
     }
 
+    function writeStorageItem(key, value, storage = localStorage) {
+        try {
+            storage.setItem(key, value);
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function removeStorageItem(key, storage = localStorage) {
+        try {
+            storage.removeItem(key);
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function readStorageJson(key, fallbackValue, storage = localStorage) {
+        const rawValue = readStorageItem(key, storage);
+        if (rawValue === null) return fallbackValue;
+
+        try {
+            return JSON.parse(rawValue);
+        } catch (e) {
+            return fallbackValue;
+        }
+    }
+
+    function writeStorageJson(key, value, storage = localStorage) {
+        return writeStorageItem(key, JSON.stringify(value), storage);
+    }
+
+    function readStorageBoolean(key, defaultValue = false, storage = localStorage) {
+        const rawValue = readStorageItem(key, storage);
+        if (rawValue === null) return !!defaultValue;
+        return rawValue === '1';
+    }
+
+    function writeStorageBoolean(key, value, storage = localStorage) {
+        return writeStorageItem(key, value ? '1' : '0', storage);
+    }
+
+    function loadHiddenUsers() {
+        const parsed = readStorageJson(STORAGE_KEY_USERS, []);
+        if (!Array.isArray(parsed)) return new Set();
+        return new Set(parsed.map(normalizeName).filter(Boolean));
+    }
+
     function saveHiddenUsers() {
-        localStorage.setItem(STORAGE_KEY_USERS, JSON.stringify([...hiddenUsers]));
+        writeStorageJson(STORAGE_KEY_USERS, [...hiddenUsers]);
     }
 
     function extractSavedPhraseStringValue(value, depth = 0) {
@@ -410,46 +457,44 @@
     }
 
     function loadSavedPhrases() {
-        try {
-            const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY_SAVED_PHRASES) || '[]');
-            if (!Array.isArray(parsed)) return [];
-
-            savedPhrasesStorageNeedsRepair = false;
-
-            const normalizedEntries = [];
-            const seenTexts = new Set();
-
-            parsed.forEach((entry) => {
-                const normalizedEntry = normalizeSavedPhraseRecord(entry, true);
-                if (!normalizedEntry) {
-                    savedPhrasesStorageNeedsRepair = true;
-                    return;
-                }
-
-                if (
-                    typeof entry !== 'object' ||
-                    entry === null ||
-                    Array.isArray(entry) ||
-                    typeof entry.text !== 'string' ||
-                    !Array.isArray(entry.keywords)
-                ) {
-                    savedPhrasesStorageNeedsRepair = true;
-                }
-
-                if (seenTexts.has(normalizedEntry.text)) {
-                    savedPhrasesStorageNeedsRepair = true;
-                    return;
-                }
-
-                seenTexts.add(normalizedEntry.text);
-                normalizedEntries.push(normalizedEntry);
-            });
-
-            return normalizedEntries;
-        } catch (e) {
+        const parsed = readStorageJson(STORAGE_KEY_SAVED_PHRASES, []);
+        if (!Array.isArray(parsed)) {
             savedPhrasesStorageNeedsRepair = false;
             return [];
         }
+
+        savedPhrasesStorageNeedsRepair = false;
+
+        const normalizedEntries = [];
+        const seenTexts = new Set();
+
+        parsed.forEach((entry) => {
+            const normalizedEntry = normalizeSavedPhraseRecord(entry, true);
+            if (!normalizedEntry) {
+                savedPhrasesStorageNeedsRepair = true;
+                return;
+            }
+
+            if (
+                typeof entry !== 'object' ||
+                entry === null ||
+                Array.isArray(entry) ||
+                typeof entry.text !== 'string' ||
+                !Array.isArray(entry.keywords)
+            ) {
+                savedPhrasesStorageNeedsRepair = true;
+            }
+
+            if (seenTexts.has(normalizedEntry.text)) {
+                savedPhrasesStorageNeedsRepair = true;
+                return;
+            }
+
+            seenTexts.add(normalizedEntry.text);
+            normalizedEntries.push(normalizedEntry);
+        });
+
+        return normalizedEntries;
     }
 
     function saveSavedPhrases() {
@@ -459,84 +504,60 @@
 
         savedPhrases.splice(0, savedPhrases.length, ...normalizedEntries);
 
-        localStorage.setItem(
+        writeStorageJson(
             STORAGE_KEY_SAVED_PHRASES,
-            JSON.stringify(normalizedEntries.map((phrase) => ({
+            normalizedEntries.map((phrase) => ({
                 text: phrase.text,
                 keywords: [...phrase.keywords]
-            })))
+            }))
         );
 
         savedPhrasesStorageNeedsRepair = false;
     }
 
     function loadSavedPhrasesEnabled() {
-        try {
-            const rawValue = localStorage.getItem(STORAGE_KEY_SAVED_PHRASES_ENABLED);
-            if (rawValue === null) return false;
-            return rawValue === '1';
-        } catch (e) {
-            return false;
-        }
+        return readStorageBoolean(STORAGE_KEY_SAVED_PHRASES_ENABLED, false);
     }
 
     function saveSavedPhrasesEnabled(value) {
         savedPhrasesEnabled = !!value;
-        localStorage.setItem(STORAGE_KEY_SAVED_PHRASES_ENABLED, savedPhrasesEnabled ? '1' : '0');
+        writeStorageBoolean(STORAGE_KEY_SAVED_PHRASES_ENABLED, savedPhrasesEnabled);
     }
 
     function loadSavedPhrasesReplaceInput() {
-        try {
-            return localStorage.getItem(STORAGE_KEY_SAVED_PHRASES_REPLACE_INPUT) === '1';
-        } catch (e) {
-            return false;
-        }
+        return readStorageBoolean(STORAGE_KEY_SAVED_PHRASES_REPLACE_INPUT, false);
     }
 
     function saveSavedPhrasesReplaceInput(value) {
         savedPhrasesReplaceInput = !!value;
-        localStorage.setItem(STORAGE_KEY_SAVED_PHRASES_REPLACE_INPUT, savedPhrasesReplaceInput ? '1' : '0');
+        writeStorageBoolean(STORAGE_KEY_SAVED_PHRASES_REPLACE_INPUT, savedPhrasesReplaceInput);
     }
 
     function loadKlipyGifsEnabled() {
-        try {
-            const rawValue = localStorage.getItem(STORAGE_KEY_KLIPY_GIFS_ENABLED);
-            if (rawValue === null) return DEFAULT_KLIPY_GIFS_ENABLED;
-            return rawValue === '1';
-        } catch (e) {
-            return DEFAULT_KLIPY_GIFS_ENABLED;
-        }
+        return readStorageBoolean(STORAGE_KEY_KLIPY_GIFS_ENABLED, DEFAULT_KLIPY_GIFS_ENABLED);
     }
 
     function saveKlipyGifsEnabled(value) {
         klipyGifsEnabled = !!value;
-        localStorage.setItem(STORAGE_KEY_KLIPY_GIFS_ENABLED, klipyGifsEnabled ? '1' : '0');
+        writeStorageBoolean(STORAGE_KEY_KLIPY_GIFS_ENABLED, klipyGifsEnabled);
     }
 
     function loadChatInputToolbarInline() {
-        try {
-            return localStorage.getItem(STORAGE_KEY_CHAT_INPUT_TOOLBAR_INLINE) === '1';
-        } catch (e) {
-            return false;
-        }
+        return readStorageBoolean(STORAGE_KEY_CHAT_INPUT_TOOLBAR_INLINE, false);
     }
 
     function saveChatInputToolbarInline(value) {
         chatInputToolbarInline = !!value;
-        localStorage.setItem(STORAGE_KEY_CHAT_INPUT_TOOLBAR_INLINE, chatInputToolbarInline ? '1' : '0');
+        writeStorageBoolean(STORAGE_KEY_CHAT_INPUT_TOOLBAR_INLINE, chatInputToolbarInline);
     }
 
     function loadChatInputToolbarAlignRight() {
-        try {
-            return localStorage.getItem(STORAGE_KEY_CHAT_INPUT_TOOLBAR_ALIGN_RIGHT) === '1';
-        } catch (e) {
-            return false;
-        }
+        return readStorageBoolean(STORAGE_KEY_CHAT_INPUT_TOOLBAR_ALIGN_RIGHT, false);
     }
 
     function saveChatInputToolbarAlignRight(value) {
         chatInputToolbarAlignRight = !!value;
-        localStorage.setItem(STORAGE_KEY_CHAT_INPUT_TOOLBAR_ALIGN_RIGHT, chatInputToolbarAlignRight ? '1' : '0');
+        writeStorageBoolean(STORAGE_KEY_CHAT_INPUT_TOOLBAR_ALIGN_RIGHT, chatInputToolbarAlignRight);
     }
 
     function normalizeAfkAutoReplyMessage(value) {
@@ -590,11 +611,7 @@
     }
 
     function loadAfkState() {
-        try {
-            return normalizeAfkState(JSON.parse(localStorage.getItem(STORAGE_KEY_AFK_STATE) || 'null'));
-        } catch (e) {
-            return normalizeAfkState(null);
-        }
+        return normalizeAfkState(readStorageJson(STORAGE_KEY_AFK_STATE, null));
     }
 
     function createAfkTabId() {
@@ -606,21 +623,20 @@
     }
 
     function loadAfkTabId() {
-        try {
-            const existingValue = String(sessionStorage.getItem(SESSION_STORAGE_KEY_AFK_TAB_ID) || '').trim();
-            if (existingValue) return existingValue;
+        const existingValue = String(readStorageItem(SESSION_STORAGE_KEY_AFK_TAB_ID, sessionStorage) || '').trim();
+        if (existingValue) return existingValue;
 
-            const nextValue = createAfkTabId();
-            sessionStorage.setItem(SESSION_STORAGE_KEY_AFK_TAB_ID, nextValue);
-            return nextValue;
-        } catch (e) {
+        const nextValue = createAfkTabId();
+        if (!writeStorageItem(SESSION_STORAGE_KEY_AFK_TAB_ID, nextValue, sessionStorage)) {
             return createAfkTabId();
         }
+
+        return nextValue;
     }
 
     function saveAfkState(nextState) {
         afkState = normalizeAfkState(nextState);
-        localStorage.setItem(STORAGE_KEY_AFK_STATE, JSON.stringify(afkState));
+        writeStorageJson(STORAGE_KEY_AFK_STATE, afkState);
     }
 
     function buildAfkMessageKey(signature) {
@@ -698,20 +714,16 @@
     }
 
     function loadAfkActivityRecords() {
-        try {
-            const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY_AFK_ACTIVITY) || '[]');
-            if (!Array.isArray(parsed)) return [];
+        const parsed = readStorageJson(STORAGE_KEY_AFK_ACTIVITY, []);
+        if (!Array.isArray(parsed)) return [];
 
-            return pruneAfkActivityRecords(parsed);
-        } catch (e) {
-            return [];
-        }
+        return pruneAfkActivityRecords(parsed);
     }
 
     function saveAfkActivityRecords() {
         afkActivityRecords = pruneAfkActivityRecords(afkActivityRecords);
 
-        localStorage.setItem(STORAGE_KEY_AFK_ACTIVITY, JSON.stringify(afkActivityRecords));
+        writeStorageJson(STORAGE_KEY_AFK_ACTIVITY, afkActivityRecords);
     }
 
     function normalizeAfkPanelPosition(value) {
@@ -726,41 +738,29 @@
     }
 
     function loadAfkPanelPosition() {
-        try {
-            return normalizeAfkPanelPosition(JSON.parse(localStorage.getItem(STORAGE_KEY_AFK_PANEL_POSITION) || 'null'));
-        } catch (e) {
-            return null;
-        }
+        return normalizeAfkPanelPosition(readStorageJson(STORAGE_KEY_AFK_PANEL_POSITION, null));
     }
 
     function saveAfkPanelPosition(position) {
         const normalizedPosition = normalizeAfkPanelPosition(position);
         afkPanelPosition = normalizedPosition;
 
-        try {
-            if (!normalizedPosition) {
-                localStorage.removeItem(STORAGE_KEY_AFK_PANEL_POSITION);
-                return;
-            }
+        if (!normalizedPosition) {
+            removeStorageItem(STORAGE_KEY_AFK_PANEL_POSITION);
+            return;
+        }
 
-            localStorage.setItem(STORAGE_KEY_AFK_PANEL_POSITION, JSON.stringify(normalizedPosition));
-        } catch (e) {}
+        writeStorageJson(STORAGE_KEY_AFK_PANEL_POSITION, normalizedPosition);
     }
 
     function loadAfkPanelHidden() {
-        try {
-            return localStorage.getItem(STORAGE_KEY_AFK_PANEL_HIDDEN) === '1';
-        } catch (e) {
-            return false;
-        }
+        return readStorageBoolean(STORAGE_KEY_AFK_PANEL_HIDDEN, false);
     }
 
     function saveAfkPanelHidden(value) {
         afkPanelHidden = !!value;
 
-        try {
-            localStorage.setItem(STORAGE_KEY_AFK_PANEL_HIDDEN, afkPanelHidden ? '1' : '0');
-        } catch (e) {}
+        writeStorageBoolean(STORAGE_KEY_AFK_PANEL_HIDDEN, afkPanelHidden);
     }
 
     function applyAfkPanelPosition(panel) {
@@ -1215,7 +1215,7 @@
         const storage = {};
 
         SCRIPT_CONFIG_STORAGE_KEYS.forEach((storageKey) => {
-            const rawValue = localStorage.getItem(storageKey);
+            const rawValue = readStorageItem(storageKey);
             if (rawValue !== null) {
                 storage[storageKey] = rawValue;
             }
@@ -1338,11 +1338,11 @@
         SCRIPT_CONFIG_STORAGE_KEYS.forEach((storageKey) => {
             const rawValue = importedStorage[storageKey];
             if (typeof rawValue === 'string') {
-                localStorage.setItem(storageKey, rawValue);
+                writeStorageItem(storageKey, rawValue);
                 return;
             }
 
-            localStorage.removeItem(storageKey);
+            removeStorageItem(storageKey);
         });
 
         reloadScriptConfigurationFromStorage();
@@ -1355,7 +1355,7 @@
         });
 
         afkActivityRecords = [];
-        localStorage.removeItem(STORAGE_KEY_AFK_ACTIVITY);
+        removeStorageItem(STORAGE_KEY_AFK_ACTIVITY);
         clearAfkReplayProtection();
         applyReloadedScriptConfiguration();
 
@@ -1467,29 +1467,21 @@
     }
 
     function loadDebugMode() {
-        try {
-            return localStorage.getItem(STORAGE_KEY_DEBUG) === '1';
-        } catch (e) {
-            return false;
-        }
+        return readStorageBoolean(STORAGE_KEY_DEBUG, false);
     }
 
     function saveDebugMode(value) {
         debugMode = !!value;
-        localStorage.setItem(STORAGE_KEY_DEBUG, debugMode ? '1' : '0');
+        writeStorageBoolean(STORAGE_KEY_DEBUG, debugMode);
     }
 
     function loadHomeChatCollapsed() {
-        try {
-            return localStorage.getItem(STORAGE_KEY_HOME_COLLAPSED) === '1';
-        } catch (e) {
-            return false;
-        }
+        return readStorageBoolean(STORAGE_KEY_HOME_COLLAPSED, false);
     }
 
     function saveHomeChatCollapsed(value) {
         homeChatCollapsed = !!value;
-        localStorage.setItem(STORAGE_KEY_HOME_COLLAPSED, homeChatCollapsed ? '1' : '0');
+        writeStorageBoolean(STORAGE_KEY_HOME_COLLAPSED, homeChatCollapsed);
     }
 
     function normalizeStatsDisplayMode(value) {
@@ -1507,132 +1499,89 @@
     }
 
     function loadStatsDisplayMode() {
-        try {
-            return normalizeStatsDisplayMode(localStorage.getItem(getStatsCollapsedStorageKey()));
-        } catch (e) {
-            return STATS_DISPLAY_MODE_EXPANDED;
-        }
+        return normalizeStatsDisplayMode(readStorageItem(getStatsCollapsedStorageKey()));
     }
 
     function saveStatsDisplayMode(value) {
         statsDisplayMode = normalizeStatsDisplayMode(value);
-        localStorage.setItem(getStatsCollapsedStorageKey(), statsDisplayMode);
+        writeStorageItem(getStatsCollapsedStorageKey(), statsDisplayMode);
     }
 
     function loadStatsHidden() {
-        try {
-            return localStorage.getItem(getStatsHiddenStorageKey()) === '1';
-        } catch (e) {
-            return false;
-        }
+        return readStorageBoolean(getStatsHiddenStorageKey(), false);
     }
 
     function saveStatsHidden(value) {
         statsHidden = !!value;
-        localStorage.setItem(getStatsHiddenStorageKey(), statsHidden ? '1' : '0');
+        writeStorageBoolean(getStatsHiddenStorageKey(), statsHidden);
+    }
+
+    function getDefaultMentionSettings() {
+        return {
+            username: '',
+            color: DEFAULT_MENTION_COLOR,
+            opacityPercent: DEFAULT_MENTION_OPACITY,
+            blinkSeconds: DEFAULT_MENTION_BLINK_SECONDS,
+            keepHighlightAfterBlink: DEFAULT_MENTION_KEEP_HIGHLIGHT,
+            includeReplyContext: DEFAULT_MENTION_INCLUDE_REPLY_CONTEXT,
+            soundEnabled: DEFAULT_MENTION_SOUND_ENABLED,
+            soundScope: DEFAULT_MENTION_SOUND_SCOPE,
+            soundStyle: DEFAULT_MENTION_SOUND_STYLE,
+            soundCustomUrl: DEFAULT_MENTION_SOUND_CUSTOM_URL,
+            soundCooldownSeconds: DEFAULT_MENTION_SOUND_COOLDOWN_SECONDS
+        };
+    }
+
+    function normalizeMentionSettings(value) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+            return getDefaultMentionSettings();
+        }
+
+        const soundScope = normalizeMentionSoundScope(
+            value.soundScope ?? (value.soundEnabled === true ? 'both' : 'off')
+        );
+
+        return {
+            username: normalizeName(value.username || ''),
+            color: normalizeHexColor(value.color, DEFAULT_MENTION_COLOR),
+            opacityPercent: parseOpacityPercentInput(value.opacityPercent, DEFAULT_MENTION_OPACITY),
+            blinkSeconds: clamp(Number(value.blinkSeconds) || 0, 0, 30),
+            keepHighlightAfterBlink: value.keepHighlightAfterBlink !== false,
+            includeReplyContext: value.includeReplyContext === true,
+            soundEnabled: isMentionSoundScopeEnabled(soundScope),
+            soundScope,
+            soundStyle: normalizeMentionSoundStyle(value.soundStyle),
+            soundCustomUrl: normalizeMentionSoundCustomUrl(value.soundCustomUrl),
+            soundCooldownSeconds: clamp(Number(value.soundCooldownSeconds) || 0, 0, 300)
+        };
     }
 
     function loadHighlightedUsers() {
-        try {
-            const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY_HIGHLIGHTED_USERS) || '{}');
-            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+        const parsed = readStorageJson(STORAGE_KEY_HIGHLIGHTED_USERS, {});
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
 
-            return Object.fromEntries(
-                Object.entries(parsed)
-                    .map(([username, value]) => [normalizeName(username), normalizeHighlightUserConfig(value)])
-                    .filter(([username]) => !!username)
-            );
-        } catch (e) {
-            return {};
-        }
+        return Object.fromEntries(
+            Object.entries(parsed)
+                .map(([username, value]) => [normalizeName(username), normalizeHighlightUserConfig(value)])
+                .filter(([username]) => !!username)
+        );
     }
 
     function saveHighlightedUsers() {
-        localStorage.setItem(STORAGE_KEY_HIGHLIGHTED_USERS, JSON.stringify(highlightedUsers));
+        writeStorageJson(STORAGE_KEY_HIGHLIGHTED_USERS, highlightedUsers);
     }
 
     function loadMentionSettings() {
-        try {
-            const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY_MENTION_SETTINGS) || '{}');
-            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-                return {
-                    username: '',
-                    color: DEFAULT_MENTION_COLOR,
-                    opacityPercent: DEFAULT_MENTION_OPACITY,
-                    blinkSeconds: DEFAULT_MENTION_BLINK_SECONDS,
-                    keepHighlightAfterBlink: DEFAULT_MENTION_KEEP_HIGHLIGHT,
-                    includeReplyContext: DEFAULT_MENTION_INCLUDE_REPLY_CONTEXT,
-                    soundEnabled: DEFAULT_MENTION_SOUND_ENABLED,
-                    soundScope: DEFAULT_MENTION_SOUND_SCOPE,
-                    soundStyle: DEFAULT_MENTION_SOUND_STYLE,
-                    soundCustomUrl: DEFAULT_MENTION_SOUND_CUSTOM_URL,
-                    soundCooldownSeconds: DEFAULT_MENTION_SOUND_COOLDOWN_SECONDS
-                };
-            }
-
-            const soundScope = normalizeMentionSoundScope(
-                parsed.soundScope ?? (parsed.soundEnabled === true ? 'both' : 'off')
-            );
-
-            return {
-                username: normalizeName(parsed.username || ''),
-                color: normalizeHexColor(parsed.color, DEFAULT_MENTION_COLOR),
-                opacityPercent: parseOpacityPercentInput(parsed.opacityPercent, DEFAULT_MENTION_OPACITY),
-                blinkSeconds: clamp(Number(parsed.blinkSeconds) || 0, 0, 30),
-                keepHighlightAfterBlink: parsed.keepHighlightAfterBlink !== false,
-                includeReplyContext: parsed.includeReplyContext === true,
-                soundEnabled: isMentionSoundScopeEnabled(soundScope),
-                soundScope,
-                soundStyle: normalizeMentionSoundStyle(parsed.soundStyle),
-                soundCustomUrl: normalizeMentionSoundCustomUrl(parsed.soundCustomUrl),
-                soundCooldownSeconds: clamp(Number(parsed.soundCooldownSeconds) || 0, 0, 300)
-            };
-        } catch (e) {
-            return {
-                username: '',
-                color: DEFAULT_MENTION_COLOR,
-                opacityPercent: DEFAULT_MENTION_OPACITY,
-                blinkSeconds: DEFAULT_MENTION_BLINK_SECONDS,
-                keepHighlightAfterBlink: DEFAULT_MENTION_KEEP_HIGHLIGHT,
-                includeReplyContext: DEFAULT_MENTION_INCLUDE_REPLY_CONTEXT,
-                soundEnabled: DEFAULT_MENTION_SOUND_ENABLED,
-                soundScope: DEFAULT_MENTION_SOUND_SCOPE,
-                soundStyle: DEFAULT_MENTION_SOUND_STYLE,
-                soundCustomUrl: DEFAULT_MENTION_SOUND_CUSTOM_URL,
-                soundCooldownSeconds: DEFAULT_MENTION_SOUND_COOLDOWN_SECONDS
-            };
-        }
+        return normalizeMentionSettings(readStorageJson(STORAGE_KEY_MENTION_SETTINGS, null));
     }
 
     function saveMentionSettings(nextSettings) {
-        const soundScope = normalizeMentionSoundScope(
-            nextSettings?.soundScope ?? (nextSettings?.soundEnabled === true ? 'both' : 'off')
-        );
-
-        mentionSettings = {
-            username: normalizeName(nextSettings?.username || ''),
-            color: normalizeHexColor(nextSettings?.color, DEFAULT_MENTION_COLOR),
-            opacityPercent: parseOpacityPercentInput(nextSettings?.opacityPercent, DEFAULT_MENTION_OPACITY),
-            blinkSeconds: clamp(Number(nextSettings?.blinkSeconds) || 0, 0, 30),
-            keepHighlightAfterBlink: nextSettings?.keepHighlightAfterBlink !== false,
-            includeReplyContext: nextSettings?.includeReplyContext === true,
-            soundEnabled: isMentionSoundScopeEnabled(soundScope),
-            soundScope,
-            soundStyle: normalizeMentionSoundStyle(nextSettings?.soundStyle),
-            soundCustomUrl: normalizeMentionSoundCustomUrl(nextSettings?.soundCustomUrl),
-            soundCooldownSeconds: clamp(Number(nextSettings?.soundCooldownSeconds) || 0, 0, 300)
-        };
-
-        localStorage.setItem(STORAGE_KEY_MENTION_SETTINGS, JSON.stringify(mentionSettings));
+        mentionSettings = normalizeMentionSettings(nextSettings);
+        writeStorageJson(STORAGE_KEY_MENTION_SETTINGS, mentionSettings);
     }
 
     function loadLastMentionSoundRecord() {
-        try {
-            const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY_LAST_MENTION_SOUND_NOTIFICATION) || 'null');
-            return normalizeMentionSoundRecord(parsed);
-        } catch (e) {
-            return null;
-        }
+        return normalizeMentionSoundRecord(readStorageJson(STORAGE_KEY_LAST_MENTION_SOUND_NOTIFICATION, null));
     }
 
     function normalizeMentionSoundRecord(record) {
@@ -1654,16 +1603,14 @@
     }
 
     function loadRecentMentionSoundRecords(fallbackRecord = null) {
-        try {
-            const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY_RECENT_MENTION_SOUND_NOTIFICATIONS) || '[]');
-            const records = Array.isArray(parsed)
-                ? parsed.map(normalizeMentionSoundRecord).filter(Boolean)
-                : [];
+        const parsed = readStorageJson(STORAGE_KEY_RECENT_MENTION_SOUND_NOTIFICATIONS, []);
+        const records = Array.isArray(parsed)
+            ? parsed.map(normalizeMentionSoundRecord).filter(Boolean)
+            : [];
 
-            if (records.length > 0) {
-                return records.slice(-MAX_RECENT_MENTION_SOUND_RECORDS);
-            }
-        } catch (e) {}
+        if (records.length > 0) {
+            return records.slice(-MAX_RECENT_MENTION_SOUND_RECORDS);
+        }
 
         return fallbackRecord ? [fallbackRecord] : [];
     }
@@ -1673,18 +1620,18 @@
 
         if (!normalizedRecord) {
             lastMentionSoundRecord = null;
-            localStorage.removeItem(STORAGE_KEY_LAST_MENTION_SOUND_NOTIFICATION);
+            removeStorageItem(STORAGE_KEY_LAST_MENTION_SOUND_NOTIFICATION);
             return;
         }
 
         lastMentionSoundRecord = normalizedRecord;
-        localStorage.setItem(STORAGE_KEY_LAST_MENTION_SOUND_NOTIFICATION, JSON.stringify(lastMentionSoundRecord));
+        writeStorageJson(STORAGE_KEY_LAST_MENTION_SOUND_NOTIFICATION, lastMentionSoundRecord);
     }
 
     function saveRecentMentionSoundRecords() {
-        localStorage.setItem(
+        writeStorageJson(
             STORAGE_KEY_RECENT_MENTION_SOUND_NOTIFICATIONS,
-            JSON.stringify(recentMentionSoundRecords.slice(-MAX_RECENT_MENTION_SOUND_RECORDS))
+            recentMentionSoundRecords.slice(-MAX_RECENT_MENTION_SOUND_RECORDS)
         );
     }
 
@@ -1717,103 +1664,71 @@
     }
 
     function loadChatFontScale() {
-        try {
-            const rawValue = localStorage.getItem(STORAGE_KEY_CHAT_FONT_SCALE);
-            if (!rawValue) return DEFAULT_CHAT_FONT_SCALE;
+        const rawValue = readStorageItem(STORAGE_KEY_CHAT_FONT_SCALE);
+        if (!rawValue) return DEFAULT_CHAT_FONT_SCALE;
 
-            const parsed = Number(String(rawValue).trim().replace(',', '.'));
-            if (Number.isNaN(parsed)) return DEFAULT_CHAT_FONT_SCALE;
-            return clampChatFontScale(parsed);
-        } catch (e) {
-            return DEFAULT_CHAT_FONT_SCALE;
-        }
+        const parsed = Number(String(rawValue).trim().replace(',', '.'));
+        if (Number.isNaN(parsed)) return DEFAULT_CHAT_FONT_SCALE;
+        return clampChatFontScale(parsed);
     }
 
     function saveChatFontScale(value) {
         chatFontScale = clampChatFontScale(value);
-        localStorage.setItem(STORAGE_KEY_CHAT_FONT_SCALE, String(chatFontScale));
+        writeStorageItem(STORAGE_KEY_CHAT_FONT_SCALE, String(chatFontScale));
     }
 
     function loadLightThemeEnabled() {
-        try {
-            return localStorage.getItem(getLightThemeStorageKey()) === '1';
-        } catch (e) {
-            return false;
-        }
+        return readStorageBoolean(getLightThemeStorageKey(), false);
     }
 
     function loadChatScrollbarEnabled() {
-        try {
-            return localStorage.getItem(STORAGE_KEY_CHAT_SCROLLBAR_ENABLED) === '1';
-        } catch (e) {
-            return false;
-        }
+        return readStorageBoolean(STORAGE_KEY_CHAT_SCROLLBAR_ENABLED, false);
     }
 
     function saveChatScrollbarEnabled(value) {
         chatScrollbarEnabled = !!value;
-        localStorage.setItem(STORAGE_KEY_CHAT_SCROLLBAR_ENABLED, chatScrollbarEnabled ? '1' : '0');
+        writeStorageBoolean(STORAGE_KEY_CHAT_SCROLLBAR_ENABLED, chatScrollbarEnabled);
     }
 
     function loadMessageActionsLeftEnabled() {
-        try {
-            return localStorage.getItem(STORAGE_KEY_MESSAGE_ACTIONS_LEFT_ENABLED) === '1';
-        } catch (e) {
-            return false;
-        }
+        return readStorageBoolean(STORAGE_KEY_MESSAGE_ACTIONS_LEFT_ENABLED, false);
     }
 
     function saveMessageActionsLeftEnabled(value) {
         messageActionsLeftEnabled = !!value;
-        localStorage.setItem(STORAGE_KEY_MESSAGE_ACTIONS_LEFT_ENABLED, messageActionsLeftEnabled ? '1' : '0');
+        writeStorageBoolean(STORAGE_KEY_MESSAGE_ACTIONS_LEFT_ENABLED, messageActionsLeftEnabled);
     }
 
     function loadHideChatFooterEnabled() {
-        try {
-            return localStorage.getItem(STORAGE_KEY_HIDE_CHAT_FOOTER_ENABLED) === '1';
-        } catch (e) {
-            return false;
-        }
+        return readStorageBoolean(STORAGE_KEY_HIDE_CHAT_FOOTER_ENABLED, false);
     }
 
     function saveHideChatFooterEnabled(value) {
         hideChatFooterEnabled = !!value;
-        localStorage.setItem(STORAGE_KEY_HIDE_CHAT_FOOTER_ENABLED, hideChatFooterEnabled ? '1' : '0');
+        writeStorageBoolean(STORAGE_KEY_HIDE_CHAT_FOOTER_ENABLED, hideChatFooterEnabled);
     }
 
     function saveLightThemeEnabled(value) {
         lightThemeEnabled = !!value;
-        localStorage.setItem(getLightThemeStorageKey(), lightThemeEnabled ? '1' : '0');
+        writeStorageBoolean(getLightThemeStorageKey(), lightThemeEnabled);
     }
 
     function loadLinkifyUrlsEnabled() {
-        try {
-            const rawValue = localStorage.getItem(STORAGE_KEY_LINKIFY_URLS);
-            if (rawValue === null) return true;
-            return rawValue === '1';
-        } catch (e) {
-            return true;
-        }
+        return readStorageBoolean(STORAGE_KEY_LINKIFY_URLS, true);
     }
 
     function saveLinkifyUrlsEnabled(value) {
         linkifyUrlsEnabled = !!value;
-        localStorage.setItem(STORAGE_KEY_LINKIFY_URLS, linkifyUrlsEnabled ? '1' : '0');
+        writeStorageBoolean(STORAGE_KEY_LINKIFY_URLS, linkifyUrlsEnabled);
     }
 
     function loadEmbedUrlImagesEnabled() {
-        try {
-            const rawValue = localStorage.getItem(STORAGE_KEY_EMBED_URL_IMAGES);
-            if (rawValue === null) return true;
-            return rawValue === '1';
-        } catch (e) {
-            return true;
-        }
+        return readStorageBoolean(STORAGE_KEY_EMBED_URL_IMAGES, true);
     }
 
     function saveEmbedUrlImagesEnabled(value) {
         embedUrlImagesEnabled = !!value;
-        localStorage.setItem(STORAGE_KEY_EMBED_URL_IMAGES, embedUrlImagesEnabled ? '1' : '0');
+        writeStorageBoolean(STORAGE_KEY_EMBED_URL_IMAGES, embedUrlImagesEnabled);
     }
 
     function formatChatFontScalePercent(value = chatFontScale) {
@@ -2300,19 +2215,16 @@
     }
 
     function loadPosition() {
-        try {
-            return normalizeStatsBoxPosition(JSON.parse(localStorage.getItem(getPositionStorageKey()) || 'null')) || { ...DEFAULT_POSITION };
-        } catch (e) {}
-        return { ...DEFAULT_POSITION };
+        return normalizeStatsBoxPosition(readStorageJson(getPositionStorageKey(), null)) || { ...DEFAULT_POSITION };
     }
 
     function savePosition(position) {
         const normalizedPosition = normalizeStatsBoxPosition(position) || { ...DEFAULT_POSITION };
-        localStorage.setItem(getPositionStorageKey(), JSON.stringify(normalizedPosition));
+        writeStorageJson(getPositionStorageKey(), normalizedPosition);
     }
 
     function resetPosition() {
-        localStorage.removeItem(getPositionStorageKey());
+        removeStorageItem(getPositionStorageKey());
     }
 
     function normalizeStatsBoxSize(value) {
@@ -2327,27 +2239,21 @@
     }
 
     function loadStatsBoxSize() {
-        try {
-            return normalizeStatsBoxSize(JSON.parse(localStorage.getItem(getStatsBoxSizeStorageKey()) || 'null'));
-        } catch (e) {
-            return null;
-        }
+        return normalizeStatsBoxSize(readStorageJson(getStatsBoxSizeStorageKey(), null));
     }
 
     function saveStatsBoxSize(size) {
         const normalizedSize = normalizeStatsBoxSize(size);
-        try {
-            if (!normalizedSize) {
-                localStorage.removeItem(getStatsBoxSizeStorageKey());
-                return;
-            }
+        if (!normalizedSize) {
+            removeStorageItem(getStatsBoxSizeStorageKey());
+            return;
+        }
 
-            localStorage.setItem(getStatsBoxSizeStorageKey(), JSON.stringify(normalizedSize));
-        } catch (e) {}
+        writeStorageJson(getStatsBoxSizeStorageKey(), normalizedSize);
     }
 
     function resetStatsBoxSize() {
-        localStorage.removeItem(getStatsBoxSizeStorageKey());
+        removeStorageItem(getStatsBoxSizeStorageKey());
     }
 
     function clamp(value, min, max) {
