@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torr9 Chat - Shoutbox 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.64
+// @version      2.65
 // @description  Blacklist, mise en avant, mentions, réponses rapides contextuelles, Gif et confort avancé pour la shoutbox Torr9
 // @icon         https://torr9.net/favicon.ico?favicon.71918ed5.ico
 // @author       Butchered
@@ -245,6 +245,101 @@
     const youtubeVideoTitleCache = new Map();
     const afkSeenMessageKeys = new Set();
 
+    /**
+     * @typedef {Object} SavedPhraseRecord
+     * @property {string} id
+     * @property {string} text
+     * @property {string[]} keywords
+     */
+
+    /**
+     * @typedef {Object} RankedSavedPhraseEntry
+     * @property {SavedPhraseRecord} phrase
+     * @property {number} score
+     * @property {string[]} matchedKeywords
+     * @property {number} matchPercent
+     */
+
+    /**
+     * @typedef {Object} MentionSettings
+     * @property {string} username
+     * @property {string} color
+     * @property {number} opacityPercent
+     * @property {number} blinkSeconds
+     * @property {boolean} keepHighlightAfterBlink
+     * @property {boolean} includeReplyContext
+     * @property {string} soundScope
+     * @property {string} soundStyle
+     * @property {string} soundCustomUrl
+     * @property {number} soundCooldownSeconds
+     */
+
+    /**
+     * @typedef {Object} AfkState
+     * @property {boolean} enabled
+     * @property {boolean} autoReplyEnabled
+     * @property {boolean} muteMentionSound
+     * @property {string} ownerTabId
+     * @property {string} contextKey
+     * @property {string} contextLabel
+     * @property {string} username
+     * @property {string} autoReplyMessage
+     * @property {number} activatedAt
+     * @property {number} lastAutoReplyAt
+     * @property {Object.<string, number>} perUserReplyAt
+     */
+
+    /**
+     * @typedef {Object} AfkActivityRecord
+     * @property {string} id
+     * @property {string} contextKey
+     * @property {string} contextLabel
+     * @property {string} username
+     * @property {string} displayUsername
+     * @property {string} messageText
+     * @property {string} replyContextText
+     * @property {string} reason
+     * @property {string} messageTimestamp
+     * @property {number} capturedAt
+     * @property {boolean} isRead
+     * @property {number} readAt
+     * @property {boolean} autoReplySent
+     * @property {string} autoReplyStatus
+     * @property {string} autoReplyText
+     * @property {string} signatureHash
+     * @property {number} signatureTimestampKey
+     */
+
+    /**
+     * @typedef {Object} AfkPanelViewModel
+     * @property {string} statusLabel
+     * @property {string} currentAfkMessage
+     * @property {number} activityCount
+     * @property {number} unreadCount
+     * @property {number} readCount
+     * @property {boolean} autoReplyEnabled
+     * @property {boolean} autoReplyWindowExpired
+     * @property {string} toggleLabel
+     */
+
+    /**
+     * @typedef {Object} KlipyGifResult
+     * @property {string} id
+     * @property {string} title
+     * @property {string} gifUrl
+     * @property {string} previewUrl
+     * @property {string} itemUrl
+     * @property {number} width
+     * @property {number} height
+     * @property {string[]} tags
+     */
+
+    /**
+     * @typedef {Object} KlipyGifFeedPayload
+     * @property {KlipyGifResult[]} results
+     * @property {string} next
+     */
+
     function isChatPage() {
         return location.pathname.startsWith('/chat');
     }
@@ -297,6 +392,13 @@
         return isChatPage() ? STORAGE_KEY_LIGHT_THEME_CHAT : STORAGE_KEY_LIGHT_THEME_HOME;
     }
 
+    /**
+     * Lit une valeur brute depuis un stockage navigateur sans interrompre le script.
+     *
+     * @param {string} key
+     * @param {Storage} [storage=localStorage]
+     * @returns {string|null}
+     */
     function readStorageItem(key, storage = localStorage) {
         try {
             return storage.getItem(key);
@@ -305,6 +407,14 @@
         }
     }
 
+    /**
+     * Écrit une valeur brute dans un stockage navigateur.
+     *
+     * @param {string} key
+     * @param {string} value
+     * @param {Storage} [storage=localStorage]
+     * @returns {boolean}
+     */
     function writeStorageItem(key, value, storage = localStorage) {
         try {
             storage.setItem(key, value);
@@ -314,6 +424,13 @@
         }
     }
 
+    /**
+     * Supprime une clé de stockage sans laisser remonter d'exception.
+     *
+     * @param {string} key
+     * @param {Storage} [storage=localStorage]
+     * @returns {boolean}
+     */
     function removeStorageItem(key, storage = localStorage) {
         try {
             storage.removeItem(key);
@@ -323,6 +440,15 @@
         }
     }
 
+    /**
+     * Lit et parse un JSON stocké, avec valeur de repli en cas d'absence ou d'erreur.
+     *
+     * @template T
+     * @param {string} key
+     * @param {T} fallbackValue
+     * @param {Storage} [storage=localStorage]
+     * @returns {T}
+     */
     function readStorageJson(key, fallbackValue, storage = localStorage) {
         const rawValue = readStorageItem(key, storage);
         if (rawValue === null) return fallbackValue;
@@ -334,6 +460,14 @@
         }
     }
 
+    /**
+     * Sérialise puis écrit une valeur JSON.
+     *
+     * @param {string} key
+     * @param {unknown} value
+     * @param {Storage} [storage=localStorage]
+     * @returns {boolean}
+     */
     function writeStorageJson(key, value, storage = localStorage) {
         return writeStorageItem(key, JSON.stringify(value), storage);
     }
@@ -434,6 +568,13 @@
         return normalizeSavedPhraseKeywords(mergedKeywords);
     }
 
+    /**
+     * Normalise une entrée de réponse rapide en structure stable exploitable partout dans le script.
+     *
+     * @param {unknown} record
+     * @param {boolean} [truncateText=true]
+     * @returns {SavedPhraseRecord|null}
+     */
     function normalizeSavedPhraseRecord(record, truncateText = true) {
         if (typeof record === 'string' || typeof record === 'number' || typeof record === 'boolean') {
             const text = normalizeSavedPhraseText(record, truncateText);
@@ -578,6 +719,12 @@
         );
     }
 
+    /**
+     * Garantit une forme cohérente de l'état AFK, quelle que soit la source des données.
+     *
+     * @param {unknown} value
+     * @returns {AfkState}
+     */
     function normalizeAfkState(value) {
         if (!value || typeof value !== 'object' || Array.isArray(value)) {
             return {
@@ -649,6 +796,12 @@
         return `${hash}:${timestampKey}`;
     }
 
+    /**
+     * Convertit une entrée AFK brute en enregistrement complet, filtré et prêt au rendu.
+     *
+     * @param {unknown} value
+     * @returns {AfkActivityRecord|null}
+     */
     function normalizeAfkActivityRecord(value) {
         if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
 
@@ -1025,6 +1178,12 @@
         return clamp(Math.round((1 - Math.exp(-numericScore / 14)) * 100), 0, 100);
     }
 
+    /**
+     * Retourne les réponses rapides triées selon le contexte courant du chat.
+     *
+     * @param {HTMLElement|null} [input=getChatInput()]
+     * @returns {RankedSavedPhraseEntry[]}
+     */
     function getRankedSavedPhrases(input = getChatInput()) {
         const rankingContext = getSavedPhrasesRankingContext(input);
         const rankedPhrases = savedPhrases
@@ -2383,6 +2542,7 @@
         return raw;
     }
 
+    // Klipy GIF picker - API/data helpers
     function buildKlipyGifEmbedMarkup(gifUrl) {
         const normalizedGifUrl = normalizeUrlForChatInsertion(gifUrl);
         if (!normalizedGifUrl) return '';
@@ -2439,6 +2599,12 @@
         }
     }
 
+    /**
+     * Convertit un résultat Klipy brut en objet minimal et sûr pour le picker GIF.
+     *
+     * @param {unknown} result
+     * @returns {KlipyGifResult|null}
+     */
     function normalizeKlipyGifResult(result) {
         const gifUrl = normalizeUrlForChatInsertion(result?.media_formats?.gif?.url || result?.url);
         const previewUrl = normalizeUrlForChatInsertion(result?.media_formats?.tinygif?.url || gifUrl);
@@ -2465,6 +2631,12 @@
         };
     }
 
+    /**
+     * Charge une page de résultats Klipy, en tendances ou en recherche, avec mise en cache locale.
+     *
+     * @param {{ query?: string, pos?: string }} [options]
+     * @returns {Promise<KlipyGifFeedPayload>}
+     */
     async function fetchKlipyGifFeed({ query = '', pos = '' } = {}) {
         const normalizedQuery = String(query || '').trim();
         const endpoint = normalizedQuery ? 'search' : 'featured';
@@ -3469,88 +3641,85 @@
         afkMessageDraft = null;
     }
 
-    function renderAfkPanel() {
-        if (!shouldDisplayAfkPanelForCurrentPage()) {
-            removeAfkPanel();
-            return;
-        }
-
-        if (isAfkEnabledForCurrentContext() && afkPanelHidden) {
-            saveAfkPanelHidden(false);
-        }
-
-        if (!afkState.enabled && afkPanelHidden) {
-            removeAfkPanel();
-            return;
-        }
-
-        const panel = getOrCreateAfkPanel();
-        if (!(panel instanceof HTMLElement)) return;
-        const existingAfkMessageInput = panel.querySelector('#tm-afk-message-input');
-        if (
-            existingAfkMessageInput instanceof HTMLTextAreaElement &&
-            document.activeElement === existingAfkMessageInput
-        ) {
-            afkMessageDraft = existingAfkMessageInput.value.slice(0, MAX_AFK_AUTO_REPLY_MESSAGE_LENGTH);
-            return;
-        }
-
-        const statusLabel = afkState.enabled
-            ? `Actif sur ${escapeHtml(afkState.contextLabel || 'ce chat')}`
-            : 'Inactif';
-        const currentAfkMessage = escapeHtml(
-            afkMessageDraft !== null
-                ? String(afkMessageDraft).slice(0, MAX_AFK_AUTO_REPLY_MESSAGE_LENGTH)
-                : (afkState.autoReplyMessage || DEFAULT_AFK_AUTO_REPLY_MESSAGE)
-        );
+    /**
+     * Prépare les données dérivées utilisées par le rendu du panneau AFK.
+     *
+     * @returns {AfkPanelViewModel}
+     */
+    function getAfkPanelViewModel() {
         const activityCount = afkActivityRecords.length;
         const unreadCount = afkActivityRecords.filter((record) => !record.isRead).length;
         const readCount = Math.max(0, activityCount - unreadCount);
         const autoReplyEnabled = isAfkAutoReplyEnabled();
         const autoReplyWindowExpired = autoReplyEnabled && isAfkAutoReplyWindowExpired();
-        const toggleLabel = isAfkEnabledForCurrentContext()
-            ? 'Désactiver ici'
-            : (afkState.enabled ? 'Basculer ici' : 'Activer ici');
-        const closeButtonHtml = afkState.enabled
-            ? ''
-            : `
-                <button
-                    type="button"
-                    data-tm-afk-action="hide-panel"
-                    title="Masquer le panneau AFK"
-                    aria-label="Masquer le panneau AFK"
-                    style="
-                        border:none;
-                        background:#27272a;
-                        color:#fff;
-                        width:30px;
-                        height:30px;
-                        border-radius:10px;
-                        cursor:pointer;
-                        font-size:18px;
-                        line-height:1;
-                        flex:0 0 auto;
-                    "
-                >×</button>
-            `;
 
-        panel.innerHTML = `
+        return {
+            statusLabel: afkState.enabled
+                ? `Actif sur ${escapeHtml(afkState.contextLabel || 'ce chat')}`
+                : 'Inactif',
+            currentAfkMessage: escapeHtml(
+                afkMessageDraft !== null
+                    ? String(afkMessageDraft).slice(0, MAX_AFK_AUTO_REPLY_MESSAGE_LENGTH)
+                    : (afkState.autoReplyMessage || DEFAULT_AFK_AUTO_REPLY_MESSAGE)
+            ),
+            activityCount,
+            unreadCount,
+            readCount,
+            autoReplyEnabled,
+            autoReplyWindowExpired,
+            toggleLabel: isAfkEnabledForCurrentContext()
+                ? 'Désactiver ici'
+                : (afkState.enabled ? 'Basculer ici' : 'Activer ici')
+        };
+    }
+
+    function renderAfkPanelCloseButton() {
+        if (afkState.enabled) return '';
+
+        return `
+            <button
+                type="button"
+                data-tm-afk-action="hide-panel"
+                title="Masquer le panneau AFK"
+                aria-label="Masquer le panneau AFK"
+                style="
+                    border:none;
+                    background:#27272a;
+                    color:#fff;
+                    width:30px;
+                    height:30px;
+                    border-radius:10px;
+                    cursor:pointer;
+                    font-size:18px;
+                    line-height:1;
+                    flex:0 0 auto;
+                "
+            >×</button>
+        `;
+    }
+
+    function renderAfkPanelHeader(viewModel) {
+        return `
             <div
                 data-tm-afk-drag-handle="1"
                 style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:12px;cursor:move;user-select:none;"
             >
                 <div style="flex:1 1 auto;min-width:0;">
                     <div style="font-size:15px;font-weight:700;">Mode AFK</div>
-                    <div style="margin-top:4px;font-size:11px;color:${afkState.enabled ? '#86efac' : '#a1a1aa'};">${statusLabel}</div>
+                    <div style="margin-top:4px;font-size:11px;color:${afkState.enabled ? '#86efac' : '#a1a1aa'};">${viewModel.statusLabel}</div>
                 </div>
                 <div style="display:flex;align-items:flex-start;gap:8px;flex:0 0 auto;">
                     <div style="font-size:11px;color:#a1a1aa;text-align:right;line-height:1.4;">
                         ${formatAfkShortcutLabel()}
                     </div>
-                    ${closeButtonHtml}
+                    ${renderAfkPanelCloseButton()}
                 </div>
             </div>
+        `;
+    }
 
+    function renderAfkPanelReplySection(viewModel) {
+        return `
             <div style="padding:12px;border-radius:14px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);margin-bottom:12px;">
                 <div style="font-size:12px;font-weight:700;color:#d4d4d8;">Réponse automatique</div>
                 <div style="margin-top:8px;font-size:11px;color:#a1a1aa;line-height:1.45;">
@@ -3560,20 +3729,20 @@
                     <input
                         id="tm-afk-auto-reply-enabled"
                         type="checkbox"
-                        ${autoReplyEnabled ? 'checked' : ''}
+                        ${viewModel.autoReplyEnabled ? 'checked' : ''}
                         ${afkState.enabled ? '' : 'disabled'}
                         style="width:14px;height:14px;cursor:${afkState.enabled ? 'pointer' : 'not-allowed'};"
                     >
                     <span>Activer réponse automatique</span>
                 </label>
-                <div style="margin-top:8px;font-size:11px;color:${autoReplyWindowExpired ? '#facc15' : '#71717a'};line-height:1.45;">
+                <div style="margin-top:8px;font-size:11px;color:${viewModel.autoReplyWindowExpired ? '#facc15' : '#71717a'};line-height:1.45;">
                     ${!afkState.enabled
                         ? 'Active d’abord le mode AFK pour pouvoir autoriser les réponses automatiques.'
-                        : !autoReplyEnabled
+                        : !viewModel.autoReplyEnabled
                             ? 'Réponses automatiques désactivées. Le panneau continue simplement à enregistrer les messages à relire.'
-                        : autoReplyWindowExpired
-                        ? 'Les réponses automatiques sont coupées après 30 minutes d’inactivité, mais les messages continuent d’être enregistrés.'
-                        : 'Les réponses automatiques s’arrêtent d’elles-mêmes après 30 minutes d’inactivité, mais le suivi des messages continue.'}
+                            : viewModel.autoReplyWindowExpired
+                                ? 'Les réponses automatiques sont coupées après 30 minutes d’inactivité, mais les messages continuent d’être enregistrés.'
+                                : 'Les réponses automatiques s’arrêtent d’elles-mêmes après 30 minutes d’inactivité, mais le suivi des messages continue.'}
                 </div>
                 <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:12px;color:#e4e4e7;cursor:pointer;">
                     <input
@@ -3599,7 +3768,7 @@
                     padding:10px 12px;
                     outline:none;
                     line-height:1.45;
-                ">${currentAfkMessage}</textarea>
+                ">${viewModel.currentAfkMessage}</textarea>
                 <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
                     Message personnalisable, limité à ${MAX_AFK_AUTO_REPLY_MESSAGE_LENGTH} caractères.
                 </div>
@@ -3627,7 +3796,7 @@
                             cursor:pointer;
                             font-size:12px;
                             font-weight:600;
-                        ">${toggleLabel}</button>
+                        ">${viewModel.toggleLabel}</button>
                         <button type="button" data-tm-afk-action="clear" style="
                             border:none;
                             background:#3f3f46;
@@ -3641,11 +3810,59 @@
                     </div>
                 </div>
             </div>
+        `;
+    }
 
+    function renderAfkPanelRecord(record) {
+        return `
+            <div style="padding:10px 12px;border-radius:12px;background:${record.isRead ? 'rgba(255,255,255,0.03)' : 'rgba(59,130,246,0.08)'};border:1px solid ${record.isRead ? 'rgba(255,255,255,0.08)' : 'rgba(59,130,246,0.16)'};opacity:${record.isRead ? '0.82' : '1'};">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap;">
+                    <div style="font-size:12px;font-weight:700;color:#e0f2fe;">${escapeHtml(record.displayUsername)}</div>
+                    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                        <span style="display:inline-flex;align-items:center;padding:3px 7px;border-radius:999px;background:${record.isRead ? 'rgba(113,113,122,0.18)' : 'rgba(250,204,21,0.14)'};border:1px solid ${record.isRead ? 'rgba(113,113,122,0.28)' : 'rgba(250,204,21,0.22)'};color:${record.isRead ? '#d4d4d8' : '#fde68a'};font-size:10px;font-weight:700;">${escapeHtml(getAfkReadStatusLabel(record))}</span>
+                        <span style="display:inline-flex;align-items:center;padding:3px 7px;border-radius:999px;background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.22);color:#bbf7d0;font-size:10px;font-weight:700;">${escapeHtml(getAfkReasonLabel(record.reason))}</span>
+                        <span style="font-size:10px;color:#a1a1aa;">${escapeHtml(formatAfkRecordTimestamp(record))}</span>
+                    </div>
+                </div>
+                <div style="margin-top:8px;font-size:12px;line-height:1.45;color:#e4e4e7;white-space:pre-wrap;word-break:break-word;">${escapeHtml(record.messageText || '(message vide)')}</div>
+                ${record.replyContextText ? `
+                    <div style="margin-top:6px;font-size:11px;color:#c4b5fd;">
+                        Contexte réponse : ${escapeHtml(record.replyContextText)}
+                    </div>
+                ` : ''}
+                <div style="margin-top:8px;font-size:10px;color:${record.autoReplySent ? '#86efac' : '#a1a1aa'};">
+                    ${escapeHtml(getAfkAutoReplyStatusLabel(record))}
+                </div>
+                <div style="margin-top:4px;font-size:10px;color:#71717a;">
+                    ${escapeHtml(record.contextLabel || 'Contexte inconnu')}
+                </div>
+                <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px;">
+                    <button
+                        type="button"
+                        data-tm-afk-record-action="toggle-read"
+                        data-tm-afk-record-id="${escapeHtml(record.id)}"
+                        style="
+                            border:none;
+                            background:${record.isRead ? '#3b82f6' : '#3f3f46'};
+                            color:#fff;
+                            border-radius:10px;
+                            padding:7px 10px;
+                            cursor:pointer;
+                            font-size:11px;
+                            font-weight:600;
+                        "
+                    >${record.isRead ? 'Remettre non lu' : 'Marquer lu'}</button>
+                </div>
+            </div>
+        `;
+    }
+
+    function renderAfkPanelRecordsSection(viewModel) {
+        return `
             <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px;">
                 <div style="font-size:12px;font-weight:700;color:#d4d4d8;">Messages à relire</div>
                 <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
-                    ${unreadCount > 2 ? `
+                    ${viewModel.unreadCount > 2 ? `
                         <button
                             type="button"
                             data-tm-afk-action="mark-all-read"
@@ -3662,108 +3879,44 @@
                         >Marquer tout lu</button>
                     ` : ''}
                     <div style="font-size:11px;color:#a1a1aa;text-align:right;line-height:1.4;">
-                        ${unreadCount} non lu${unreadCount > 1 ? 's' : ''} · ${readCount} lu${readCount > 1 ? 's' : ''}
+                        ${viewModel.unreadCount} non lu${viewModel.unreadCount > 1 ? 's' : ''} · ${viewModel.readCount} lu${viewModel.readCount > 1 ? 's' : ''}
                     </div>
                 </div>
             </div>
 
             <div id="tm-afk-records" style="display:grid;gap:8px;">
                 ${afkActivityRecords.length === 0
-                    ? `<div style="font-size:12px;color:#a1a1aa;padding:8px 2px;">Aucun message AFK enregistré pour le moment.</div>`
-                    : afkActivityRecords.map((record) => `
-                        <div style="padding:10px 12px;border-radius:12px;background:${record.isRead ? 'rgba(255,255,255,0.03)' : 'rgba(59,130,246,0.08)'};border:1px solid ${record.isRead ? 'rgba(255,255,255,0.08)' : 'rgba(59,130,246,0.16)'};opacity:${record.isRead ? '0.82' : '1'};">
-                            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap;">
-                                <div style="font-size:12px;font-weight:700;color:#e0f2fe;">${escapeHtml(record.displayUsername)}</div>
-                                <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-                                    <span style="display:inline-flex;align-items:center;padding:3px 7px;border-radius:999px;background:${record.isRead ? 'rgba(113,113,122,0.18)' : 'rgba(250,204,21,0.14)'};border:1px solid ${record.isRead ? 'rgba(113,113,122,0.28)' : 'rgba(250,204,21,0.22)'};color:${record.isRead ? '#d4d4d8' : '#fde68a'};font-size:10px;font-weight:700;">${escapeHtml(getAfkReadStatusLabel(record))}</span>
-                                    <span style="display:inline-flex;align-items:center;padding:3px 7px;border-radius:999px;background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.22);color:#bbf7d0;font-size:10px;font-weight:700;">${escapeHtml(getAfkReasonLabel(record.reason))}</span>
-                                    <span style="font-size:10px;color:#a1a1aa;">${escapeHtml(formatAfkRecordTimestamp(record))}</span>
-                                </div>
-                            </div>
-                            <div style="margin-top:8px;font-size:12px;line-height:1.45;color:#e4e4e7;white-space:pre-wrap;word-break:break-word;">${escapeHtml(record.messageText || '(message vide)')}</div>
-                            ${record.replyContextText ? `
-                                <div style="margin-top:6px;font-size:11px;color:#c4b5fd;">
-                                    Contexte réponse : ${escapeHtml(record.replyContextText)}
-                                </div>
-                            ` : ''}
-                            <div style="margin-top:8px;font-size:10px;color:${record.autoReplySent ? '#86efac' : '#a1a1aa'};">
-                                ${escapeHtml(getAfkAutoReplyStatusLabel(record))}
-                            </div>
-                            <div style="margin-top:4px;font-size:10px;color:#71717a;">
-                                ${escapeHtml(record.contextLabel || 'Contexte inconnu')}
-                            </div>
-                            <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px;">
-                                <button
-                                    type="button"
-                                    data-tm-afk-record-action="toggle-read"
-                                    data-tm-afk-record-id="${escapeHtml(record.id)}"
-                                    style="
-                                        border:none;
-                                        background:${record.isRead ? '#3b82f6' : '#3f3f46'};
-                                        color:#fff;
-                                        border-radius:10px;
-                                        padding:7px 10px;
-                                        cursor:pointer;
-                                        font-size:11px;
-                                        font-weight:600;
-                                    "
-                                >${record.isRead ? 'Remettre non lu' : 'Marquer lu'}</button>
-                            </div>
-                        </div>
-                    `).join('')
-                }
+                    ? '<div style="font-size:12px;color:#a1a1aa;padding:8px 2px;">Aucun message AFK enregistré pour le moment.</div>'
+                    : afkActivityRecords.map((record) => renderAfkPanelRecord(record)).join('')}
             </div>
         `;
+    }
 
-        const saveMessageBtn = panel.querySelector('[data-tm-afk-action="save-message"]');
-        const toggleBtn = panel.querySelector('[data-tm-afk-action="toggle"]');
-        const clearBtn = panel.querySelector('[data-tm-afk-action="clear"]');
-        const markAllReadBtn = panel.querySelector('[data-tm-afk-action="mark-all-read"]');
-        const hidePanelBtn = panel.querySelector('[data-tm-afk-action="hide-panel"]');
-        const afkMessageInput = panel.querySelector('#tm-afk-message-input');
-        const autoReplyEnabledInput = panel.querySelector('#tm-afk-auto-reply-enabled');
-        const muteMentionSoundInput = panel.querySelector('#tm-afk-mute-mention-sound-enabled');
-        const dragHandle = panel.querySelector('[data-tm-afk-drag-handle="1"]');
+    function buildAfkPanelHtml(viewModel) {
+        return `
+            ${renderAfkPanelHeader(viewModel)}
+            ${renderAfkPanelReplySection(viewModel)}
+            ${renderAfkPanelRecordsSection(viewModel)}
+        `;
+    }
 
-        saveMessageBtn?.addEventListener('click', () => {
-            updateAfkAutoReplyMessage(afkMessageInput instanceof HTMLTextAreaElement ? afkMessageInput.value : '');
-            showToast('Message AFK enregistré.');
-        });
+    function getAfkPanelElements(panel) {
+        return {
+            saveMessageBtn: panel.querySelector('[data-tm-afk-action="save-message"]'),
+            toggleBtn: panel.querySelector('[data-tm-afk-action="toggle"]'),
+            clearBtn: panel.querySelector('[data-tm-afk-action="clear"]'),
+            markAllReadBtn: panel.querySelector('[data-tm-afk-action="mark-all-read"]'),
+            hidePanelBtn: panel.querySelector('[data-tm-afk-action="hide-panel"]'),
+            afkMessageInput: panel.querySelector('#tm-afk-message-input'),
+            autoReplyEnabledInput: panel.querySelector('#tm-afk-auto-reply-enabled'),
+            muteMentionSoundInput: panel.querySelector('#tm-afk-mute-mention-sound-enabled'),
+            dragHandle: panel.querySelector('[data-tm-afk-drag-handle="1"]'),
+            recordToggleButtons: Array.from(panel.querySelectorAll('[data-tm-afk-record-action="toggle-read"]'))
+        };
+    }
 
-        toggleBtn?.addEventListener('click', () => {
-            const result = toggleAfkModeForCurrentContext();
-            showToast(result.message, !result.ok);
-        });
-
-        clearBtn?.addEventListener('click', () => {
-            clearAfkActivityRecords();
-            showToast('Historique AFK effacé.');
-        });
-
-        markAllReadBtn?.addEventListener('click', () => {
-            const result = markAllAfkActivityRecordsRead();
-            showToast(result.message, !result.ok);
-        });
-
-        autoReplyEnabledInput?.addEventListener('change', () => {
-            if (!(autoReplyEnabledInput instanceof HTMLInputElement)) return;
-            const result = updateAfkAutoReplyEnabled(autoReplyEnabledInput.checked);
-            showToast(result.message, !result.ok);
-        });
-
-        muteMentionSoundInput?.addEventListener('change', () => {
-            if (!(muteMentionSoundInput instanceof HTMLInputElement)) return;
-            const result = updateAfkMuteMentionSound(muteMentionSoundInput.checked);
-            showToast(result.message, !result.ok);
-        });
-
-        hidePanelBtn?.addEventListener('click', () => {
-            saveAfkPanelHidden(true);
-            removeAfkPanel();
-            showToast('Panneau AFK masqué.');
-        });
-
-        panel.querySelectorAll('[data-tm-afk-record-action="toggle-read"]').forEach((button) => {
+    function bindAfkPanelRecordEvents(elements) {
+        elements.recordToggleButtons.forEach((button) => {
             if (!(button instanceof HTMLButtonElement)) return;
 
             button.addEventListener('click', () => {
@@ -3773,64 +3926,146 @@
                 showToast(result.message, !result.ok);
             });
         });
+    }
 
-        afkMessageInput?.addEventListener('keydown', (event) => {
+    function bindAfkPanelDrag(panel, dragHandle) {
+        if (!(dragHandle instanceof HTMLElement)) return;
+
+        let dragState = null;
+
+        function finishDrag() {
+            if (!dragState) return;
+            constrainAfkPanelToViewport(panel);
+            stopDrag();
+        }
+
+        function stopDrag() {
+            dragState = null;
+            document.removeEventListener('mousemove', handleDrag, true);
+            document.removeEventListener('mouseup', finishDrag, true);
+        }
+
+        function handleDrag(event) {
+            if (!dragState) return;
+
+            const nextLeft = dragState.startLeft + (event.clientX - dragState.startX);
+            const nextTop = dragState.startTop + (event.clientY - dragState.startY);
+
+            panel.style.left = `${nextLeft}px`;
+            panel.style.top = `${nextTop}px`;
+            panel.style.right = 'auto';
+            panel.style.bottom = 'auto';
+        }
+
+        dragHandle.addEventListener('mousedown', (event) => {
+            if (event.button !== 0) return;
+            if (event.target instanceof Element && event.target.closest('button, textarea, input, a, select, label')) return;
+
+            const rect = panel.getBoundingClientRect();
+            dragState = {
+                startX: event.clientX,
+                startY: event.clientY,
+                startLeft: rect.left,
+                startTop: rect.top
+            };
+
+            document.addEventListener('mousemove', handleDrag, true);
+            document.addEventListener('mouseup', finishDrag, true);
+            event.preventDefault();
+        });
+    }
+
+    function bindAfkPanelEvents(panel, elements) {
+        elements.saveMessageBtn?.addEventListener('click', () => {
+            updateAfkAutoReplyMessage(elements.afkMessageInput instanceof HTMLTextAreaElement ? elements.afkMessageInput.value : '');
+            showToast('Message AFK enregistré.');
+        });
+
+        elements.toggleBtn?.addEventListener('click', () => {
+            const result = toggleAfkModeForCurrentContext();
+            showToast(result.message, !result.ok);
+        });
+
+        elements.clearBtn?.addEventListener('click', () => {
+            clearAfkActivityRecords();
+            showToast('Historique AFK effacé.');
+        });
+
+        elements.markAllReadBtn?.addEventListener('click', () => {
+            const result = markAllAfkActivityRecordsRead();
+            showToast(result.message, !result.ok);
+        });
+
+        elements.autoReplyEnabledInput?.addEventListener('change', () => {
+            if (!(elements.autoReplyEnabledInput instanceof HTMLInputElement)) return;
+            const result = updateAfkAutoReplyEnabled(elements.autoReplyEnabledInput.checked);
+            showToast(result.message, !result.ok);
+        });
+
+        elements.muteMentionSoundInput?.addEventListener('change', () => {
+            if (!(elements.muteMentionSoundInput instanceof HTMLInputElement)) return;
+            const result = updateAfkMuteMentionSound(elements.muteMentionSoundInput.checked);
+            showToast(result.message, !result.ok);
+        });
+
+        elements.hidePanelBtn?.addEventListener('click', () => {
+            saveAfkPanelHidden(true);
+            removeAfkPanel();
+            showToast('Panneau AFK masqué.');
+        });
+
+        elements.afkMessageInput?.addEventListener('keydown', (event) => {
             if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
                 event.preventDefault();
-                updateAfkAutoReplyMessage(afkMessageInput.value);
+                updateAfkAutoReplyMessage(elements.afkMessageInput.value);
                 showToast('Message AFK enregistré.');
             }
         });
 
-        afkMessageInput?.addEventListener('input', () => {
-            afkMessageDraft = afkMessageInput.value.slice(0, MAX_AFK_AUTO_REPLY_MESSAGE_LENGTH);
+        elements.afkMessageInput?.addEventListener('input', () => {
+            afkMessageDraft = elements.afkMessageInput.value.slice(0, MAX_AFK_AUTO_REPLY_MESSAGE_LENGTH);
         });
 
-        if (dragHandle instanceof HTMLElement) {
-            let dragState = null;
+        bindAfkPanelRecordEvents(elements);
+        bindAfkPanelDrag(panel, elements.dragHandle);
+    }
 
-            function finishDrag() {
-                if (!dragState) return;
-                constrainAfkPanelToViewport(panel);
-                stopDrag();
-            }
-
-            function stopDrag() {
-                dragState = null;
-                document.removeEventListener('mousemove', handleDrag, true);
-                document.removeEventListener('mouseup', finishDrag, true);
-            }
-
-            function handleDrag(event) {
-                if (!dragState) return;
-
-                const nextLeft = dragState.startLeft + (event.clientX - dragState.startX);
-                const nextTop = dragState.startTop + (event.clientY - dragState.startY);
-
-                panel.style.left = `${nextLeft}px`;
-                panel.style.top = `${nextTop}px`;
-                panel.style.right = 'auto';
-                panel.style.bottom = 'auto';
-            }
-
-            dragHandle.addEventListener('mousedown', (event) => {
-                if (event.button !== 0) return;
-                if (event.target instanceof Element && event.target.closest('button, textarea, input, a, select, label')) return;
-
-                const rect = panel.getBoundingClientRect();
-                dragState = {
-                    startX: event.clientX,
-                    startY: event.clientY,
-                    startLeft: rect.left,
-                    startTop: rect.top
-                };
-
-                document.addEventListener('mousemove', handleDrag, true);
-                document.addEventListener('mouseup', finishDrag, true);
-                event.preventDefault();
-            });
+    /**
+     * Rend ou retire le panneau AFK selon le contexte courant, puis réattache ses interactions.
+     *
+     * @returns {void}
+     */
+    function renderAfkPanel() {
+        if (!shouldDisplayAfkPanelForCurrentPage()) {
+            removeAfkPanel();
+            return;
         }
 
+        if (isAfkEnabledForCurrentContext() && afkPanelHidden) {
+            saveAfkPanelHidden(false);
+        }
+
+        if (!afkState.enabled && afkPanelHidden) {
+            removeAfkPanel();
+            return;
+        }
+
+        const panel = getOrCreateAfkPanel();
+        if (!(panel instanceof HTMLElement)) return;
+        const existingAfkMessageInput = panel.querySelector('#tm-afk-message-input');
+        if (
+            existingAfkMessageInput instanceof HTMLTextAreaElement &&
+            document.activeElement === existingAfkMessageInput
+        ) {
+            afkMessageDraft = existingAfkMessageInput.value.slice(0, MAX_AFK_AUTO_REPLY_MESSAGE_LENGTH);
+            return;
+        }
+
+        const viewModel = getAfkPanelViewModel();
+        panel.innerHTML = buildAfkPanelHtml(viewModel);
+        const elements = getAfkPanelElements(panel);
+
+        bindAfkPanelEvents(panel, elements);
         applyAfkPanelPosition(panel);
         constrainAfkPanelToViewport(panel, false);
     }
@@ -5461,6 +5696,12 @@
         syncSettingsMentionSoundControls(elements);
     }
 
+    /**
+     * Construit l'API interne de la modale de paramètres pour mutualiser feedback et rafraîchissements UI.
+     *
+     * @param {Object.<string, Element|null>} elements
+     * @returns {Object}
+     */
     function createSettingsModalController(elements) {
         function setFeedback(message, isError = false) {
             if (!(elements.feedback instanceof HTMLElement)) return;
@@ -7469,6 +7710,13 @@
         return chip;
     }
 
+    /**
+     * Regroupe l'état local et les actions de la modale de gestion complète des réponses rapides.
+     *
+     * @param {HTMLElement} modal
+     * @param {Object.<string, Element|null>} elements
+     * @returns {Object}
+     */
     function createSavedPhrasesConfigController(modal, elements) {
         const controller = {
             editingPhraseIndex: null,
@@ -8009,6 +8257,13 @@
         };
     }
 
+    /**
+     * Construit le contrôleur local de la modale d'ajout rapide de réponse.
+     *
+     * @param {HTMLElement|null} sourceInput
+     * @param {Object.<string, Element|null>} elements
+     * @returns {Object}
+     */
     function createSavedPhraseQuickAddController(sourceInput, elements) {
         return {
             restoreSourceInputFocus() {
@@ -8087,6 +8342,13 @@
         }
     }
 
+    /**
+     * Ouvre la modale compacte d'ajout rapide à partir du contenu actuel du chat.
+     *
+     * @param {string} [initialText='']
+     * @param {HTMLElement|null} [sourceInput=null]
+     * @returns {void}
+     */
     function openSavedPhraseQuickAddModal(initialText = '', sourceInput = null) {
         if (!isSupportedPage()) return;
 
@@ -8137,6 +8399,11 @@
         initializeSavedPhraseQuickAddModal(elements);
     }
 
+    /**
+     * Ouvre la modale complète de gestion des réponses rapides.
+     *
+     * @returns {void}
+     */
     function openSavedPhrasesConfigModal() {
         if (!isSupportedPage()) return;
 
@@ -8283,6 +8550,12 @@
         return chip;
     }
 
+    /**
+     * Maintient l'état local du picker complet des réponses rapides et de ses filtres.
+     *
+     * @param {Object.<string, Element|null>} elements
+     * @returns {Object}
+     */
     function createSavedPhrasesPickerController(elements) {
         const controller = {
             activeKeywordFilters: new Set(),
@@ -8587,6 +8860,11 @@
         controller.refreshList();
     }
 
+    /**
+     * Ouvre le picker complet des réponses rapides avec filtres par mots-clés.
+     *
+     * @returns {void}
+     */
     function openSavedPhrasesPickerModal() {
         if (!isSupportedPage()) return;
         if (savedPhrases.length === 0) return;
@@ -8698,6 +8976,11 @@
 
     }
 
+    /**
+     * Ouvre la modale principale de configuration du script.
+     *
+     * @returns {void}
+     */
     function openSettingsModal() {
         if (!isSupportedPage()) return;
         if (modalOpen) return;
@@ -9880,6 +10163,15 @@
         return { ok: true, message: 'Message envoyé.' };
     }
 
+    /**
+     * Insère ou remplace du texte dans l'input natif du chat tout en déclenchant les events attendus par l'UI.
+     *
+     * @param {HTMLElement} input
+     * @param {string} textToInsert
+     * @param {string} [successMessage='Texte inséré.']
+     * @param {{ replaceExistingText?: boolean }} [options={}]
+     * @returns {{ ok: boolean, message: string }}
+     */
     function insertTextIntoChatInput(input, textToInsert, successMessage = 'Texte inséré.', options = {}) {
         if (!(input instanceof HTMLElement)) {
             return { ok: false, message: 'Champ de texte non trouvé.' };
@@ -9998,6 +10290,14 @@
         }, true);
     }
 
+    /**
+     * Insère une réponse rapide normalisée dans l'input du chat.
+     *
+     * @param {HTMLElement} input
+     * @param {string} phraseText
+     * @param {{ replaceExistingText?: boolean }} [options={}]
+     * @returns {{ ok: boolean, message: string }}
+     */
     function insertSavedPhraseIntoChatInput(input, phraseText, options = {}) {
         const phrase = normalizeSavedPhraseText(phraseText);
         if (!phrase) {
@@ -10007,6 +10307,13 @@
         return insertTextIntoChatInput(input, phrase, 'Phrase insérée.', options);
     }
 
+    /**
+     * Insère un GIF Klipy sous forme de balise BBCode image dans le chat.
+     *
+     * @param {HTMLElement} input
+     * @param {string} gifUrl
+     * @returns {{ ok: boolean, message: string }}
+     */
     function insertGifIntoChatInput(input, gifUrl) {
         const embedMarkup = buildKlipyGifEmbedMarkup(gifUrl);
         if (!embedMarkup) {
@@ -10016,15 +10323,56 @@
         return insertTextIntoChatInput(input, embedMarkup, 'Balise BBCode GIF insérée.');
     }
 
-    function buildSavedPhrasesMenuContent(menu, input = getChatInput()) {
-        if (!(menu instanceof HTMLElement)) return;
+    function createSavedPhrasesMenuReplaceInfoBadge() {
+        const replaceInfo = document.createElement('span');
+        replaceInfo.textContent = 'i';
+        replaceInfo.title = 'Si cette option est cochée, le texte déjà présent dans l’input sera entièrement remplacé par la réponse rapide sélectionnée.';
+        replaceInfo.setAttribute('aria-label', replaceInfo.title);
+        replaceInfo.style.display = 'inline-flex';
+        replaceInfo.style.alignItems = 'center';
+        replaceInfo.style.justifyContent = 'center';
+        replaceInfo.style.width = '16px';
+        replaceInfo.style.height = '16px';
+        replaceInfo.style.borderRadius = '999px';
+        replaceInfo.style.background = 'rgba(59,130,246,0.18)';
+        replaceInfo.style.border = '1px solid rgba(96,165,250,0.26)';
+        replaceInfo.style.color = '#bfdbfe';
+        replaceInfo.style.fontSize = '10px';
+        replaceInfo.style.fontWeight = '700';
+        replaceInfo.style.cursor = 'help';
+        replaceInfo.style.lineHeight = '1';
+        replaceInfo.style.userSelect = 'none';
+        return replaceInfo;
+    }
 
-        menu.innerHTML = '';
+    function createSavedPhrasesMenuReplaceToggle() {
+        const replaceToggleLabel = document.createElement('label');
+        replaceToggleLabel.style.display = 'inline-flex';
+        replaceToggleLabel.style.alignItems = 'center';
+        replaceToggleLabel.style.cursor = 'pointer';
 
-        const rankedPhrases = getRankedSavedPhrases(input);
-        const visiblePhraseCount = Math.min(rankedPhrases.length, MAX_VISIBLE_SAVED_PHRASES_IN_MENU);
-        const contextualSortingActive = rankedPhrases.length > 0 && rankedPhrases[0].score > 0;
+        const replaceToggle = document.createElement('input');
+        replaceToggle.type = 'checkbox';
+        replaceToggle.checked = savedPhrasesReplaceInput === true;
+        replaceToggle.style.margin = '0';
+        replaceToggle.style.cursor = 'pointer';
+        replaceToggle.style.accentColor = '#8b5cf6';
+        replaceToggle.title = 'Vider complètement l’input avant insertion';
+        replaceToggle.setAttribute('aria-label', replaceToggle.title);
 
+        replaceToggle.addEventListener('click', (event) => {
+            event.stopPropagation();
+        });
+        replaceToggle.addEventListener('change', (event) => {
+            const nextValue = event.target instanceof HTMLInputElement && event.target.checked;
+            saveSavedPhrasesReplaceInput(nextValue);
+        });
+
+        replaceToggleLabel.appendChild(replaceToggle);
+        return replaceToggleLabel;
+    }
+
+    function createSavedPhrasesMenuHeader(contextualSortingActive) {
         const header = document.createElement('div');
         header.style.display = 'flex';
         header.style.justifyContent = 'space-between';
@@ -10045,205 +10393,213 @@
         replaceControls.style.justifyContent = 'flex-end';
         replaceControls.style.gap = '6px';
         replaceControls.style.flexShrink = '0';
+        replaceControls.appendChild(createSavedPhrasesMenuReplaceInfoBadge());
+        replaceControls.appendChild(createSavedPhrasesMenuReplaceToggle());
 
-        const replaceInfo = document.createElement('span');
-        replaceInfo.textContent = 'i';
-        replaceInfo.title = 'Si cette option est cochée, le texte déjà présent dans l’input sera entièrement remplacé par la réponse rapide sélectionnée.';
-        replaceInfo.setAttribute('aria-label', replaceInfo.title);
-        replaceInfo.style.display = 'inline-flex';
-        replaceInfo.style.alignItems = 'center';
-        replaceInfo.style.justifyContent = 'center';
-        replaceInfo.style.width = '16px';
-        replaceInfo.style.height = '16px';
-        replaceInfo.style.borderRadius = '999px';
-        replaceInfo.style.background = 'rgba(59,130,246,0.18)';
-        replaceInfo.style.border = '1px solid rgba(96,165,250,0.26)';
-        replaceInfo.style.color = '#bfdbfe';
-        replaceInfo.style.fontSize = '10px';
-        replaceInfo.style.fontWeight = '700';
-        replaceInfo.style.cursor = 'help';
-        replaceInfo.style.lineHeight = '1';
-        replaceInfo.style.userSelect = 'none';
-
-        const replaceToggleLabel = document.createElement('label');
-        replaceToggleLabel.style.display = 'inline-flex';
-        replaceToggleLabel.style.alignItems = 'center';
-        replaceToggleLabel.style.cursor = 'pointer';
-
-        const replaceToggle = document.createElement('input');
-        replaceToggle.type = 'checkbox';
-        replaceToggle.checked = savedPhrasesReplaceInput === true;
-        replaceToggle.style.margin = '0';
-        replaceToggle.style.cursor = 'pointer';
-        replaceToggle.style.accentColor = '#8b5cf6';
-        replaceToggle.title = 'Vider complètement l’input avant insertion';
-        replaceToggle.setAttribute('aria-label', replaceToggle.title);
-
-        replaceToggle.addEventListener('click', (event) => {
-            event.stopPropagation();
-        });
-
-        replaceToggle.addEventListener('change', (event) => {
-            const nextValue = event.target instanceof HTMLInputElement && event.target.checked;
-            saveSavedPhrasesReplaceInput(nextValue);
-        });
-
-        replaceToggleLabel.appendChild(replaceToggle);
-        replaceControls.appendChild(replaceInfo);
-        replaceControls.appendChild(replaceToggleLabel);
         header.appendChild(headerTitle);
         header.appendChild(replaceControls);
-        menu.appendChild(header);
+        return header;
+    }
+
+    function createSavedPhrasesMenuContextLabel() {
+        const helperLabel = document.createElement('div');
+        helperLabel.textContent = 'Tri contextuel actif';
+        helperLabel.style.padding = '0 10px 8px';
+        helperLabel.style.fontSize = '11px';
+        helperLabel.style.color = '#a78bfa';
+        helperLabel.style.opacity = '0.92';
+        return helperLabel;
+    }
+
+    function buildSavedPhrasesMenuItemTitle(rankedPhrase, contextualSortingActive) {
+        const phraseText = rankedPhrase.phrase.text;
+        const keywordsLabel = formatSavedPhraseKeywordsLabel(rankedPhrase.phrase.keywords);
+        const titleParts = [phraseText];
+
+        if (rankedPhrase.phrase.keywords.length > 0) {
+            titleParts.push(`Mots-clés : ${keywordsLabel}`);
+        }
+        if (rankedPhrase.matchedKeywords.length > 0) {
+            titleParts.push(`Correspondance : ${rankedPhrase.matchedKeywords.join(', ')}`);
+        }
+        if (contextualSortingActive && rankedPhrase.matchPercent > 0) {
+            titleParts.push(`Match estimé : ${rankedPhrase.matchPercent}%`);
+        }
+
+        return titleParts.join('\n');
+    }
+
+    function createSavedPhrasesMenuMatchBadge(matchPercent) {
+        const percentBadge = document.createElement('span');
+        percentBadge.textContent = `${matchPercent}%`;
+        percentBadge.style.display = 'inline-flex';
+        percentBadge.style.alignItems = 'center';
+        percentBadge.style.justifyContent = 'center';
+        percentBadge.style.padding = '3px 7px';
+        percentBadge.style.borderRadius = '999px';
+        percentBadge.style.background = 'rgba(34,197,94,0.18)';
+        percentBadge.style.border = '1px solid rgba(74,222,128,0.28)';
+        percentBadge.style.color = '#bbf7d0';
+        percentBadge.style.fontSize = '10px';
+        percentBadge.style.fontWeight = '700';
+        percentBadge.style.flexShrink = '0';
+        return percentBadge;
+    }
+
+    function createSavedPhrasesMenuTextLabel(previewText) {
+        const textLabel = document.createElement('span');
+        textLabel.textContent = previewText;
+        textLabel.style.flex = '1';
+        textLabel.style.minWidth = '0';
+        textLabel.style.textAlign = 'left';
+        textLabel.style.whiteSpace = 'nowrap';
+        textLabel.style.overflow = 'hidden';
+        textLabel.style.textOverflow = 'ellipsis';
+        return textLabel;
+    }
+
+    function createSavedPhrasesMenuItem(menu, rankedPhrase, contextualSortingActive) {
+        const phraseText = rankedPhrase.phrase.text;
+        const previewText = truncateSavedPhrasePreviewText(phraseText);
+        const item = document.createElement('button');
+        item.type = 'button';
+        item.title = buildSavedPhrasesMenuItemTitle(rankedPhrase, contextualSortingActive);
+        item.style.background = 'transparent';
+        item.style.border = 'none';
+        item.style.color = '#e4e4e7';
+        item.style.padding = '8px 12px';
+        item.style.borderRadius = '8px';
+        item.style.fontSize = '12px';
+        item.style.cursor = 'pointer';
+        item.style.width = '100%';
+        item.style.display = 'flex';
+        item.style.alignItems = 'center';
+        item.style.justifyContent = 'space-between';
+        item.style.gap = '10px';
+        item.style.transition = 'all 0.15s ease';
+
+        if (contextualSortingActive && rankedPhrase.matchPercent > 0) {
+            item.appendChild(createSavedPhrasesMenuMatchBadge(rankedPhrase.matchPercent));
+        }
+
+        item.appendChild(createSavedPhrasesMenuTextLabel(previewText));
+
+        item.addEventListener('mouseenter', () => {
+            item.style.background = 'rgba(139, 92, 246, 0.15)';
+            item.style.color = '#fff';
+        });
+        item.addEventListener('mouseleave', () => {
+            item.style.background = 'transparent';
+            item.style.color = '#e4e4e7';
+        });
+        item.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+
+            const nextInput = getChatInput();
+            if (!nextInput) {
+                if (typeof showToast === 'function') showToast('Champ de texte non trouvé.', true);
+                return;
+            }
+
+            const result = insertSavedPhraseIntoChatInput(nextInput, phraseText, {
+                replaceExistingText: savedPhrasesReplaceInput === true
+            });
+            if (!result.ok) {
+                if (typeof showToast === 'function') showToast(result.message, true);
+                return;
+            }
+
+            hideSavedPhrasesMenu(menu);
+        });
+
+        return item;
+    }
+
+    function createSavedPhrasesMenuDivider() {
+        const divider = document.createElement('div');
+        divider.style.height = '1px';
+        divider.style.margin = '6px 4px';
+        divider.style.background = 'rgba(255,255,255,0.08)';
+        return divider;
+    }
+
+    function createSavedPhrasesMenuMoreButton(menu, hiddenCount) {
+        const moreBtn = document.createElement('button');
+        moreBtn.type = 'button';
+        moreBtn.textContent = `Autres (${hiddenCount})`;
+        moreBtn.style.background = 'rgba(124,58,237,0.16)';
+        moreBtn.style.border = '1px solid rgba(139,92,246,0.22)';
+        moreBtn.style.color = '#ddd6fe';
+        moreBtn.style.padding = '9px 12px';
+        moreBtn.style.borderRadius = '10px';
+        moreBtn.style.fontSize = '12px';
+        moreBtn.style.fontWeight = '600';
+        moreBtn.style.textAlign = 'left';
+        moreBtn.style.cursor = 'pointer';
+        moreBtn.style.width = '100%';
+        moreBtn.style.transition = 'all 0.15s ease';
+
+        moreBtn.addEventListener('mouseenter', () => {
+            moreBtn.style.background = 'rgba(124,58,237,0.24)';
+            moreBtn.style.borderColor = 'rgba(139,92,246,0.34)';
+        });
+        moreBtn.addEventListener('mouseleave', () => {
+            moreBtn.style.background = 'rgba(124,58,237,0.16)';
+            moreBtn.style.borderColor = 'rgba(139,92,246,0.22)';
+        });
+        moreBtn.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            hideSavedPhrasesMenu(menu);
+            openSavedPhrasesPickerModal();
+        });
+
+        return moreBtn;
+    }
+
+    /**
+     * Reconstruit le menu compact des réponses rapides à partir du classement contextuel courant.
+     *
+     * @param {HTMLElement} menu
+     * @param {HTMLElement|null} [input=getChatInput()]
+     * @returns {void}
+     */
+    function buildSavedPhrasesMenuContent(menu, input = getChatInput()) {
+        if (!(menu instanceof HTMLElement)) return;
+
+        menu.innerHTML = '';
+
+        const rankedPhrases = getRankedSavedPhrases(input);
+        const visiblePhraseCount = Math.min(rankedPhrases.length, MAX_VISIBLE_SAVED_PHRASES_IN_MENU);
+        const contextualSortingActive = rankedPhrases.length > 0 && rankedPhrases[0].score > 0;
+
+        menu.appendChild(createSavedPhrasesMenuHeader(contextualSortingActive));
 
         if (contextualSortingActive) {
-            const helperLabel = document.createElement('div');
-            helperLabel.textContent = 'Tri contextuel actif';
-            helperLabel.style.padding = '0 10px 8px';
-            helperLabel.style.fontSize = '11px';
-            helperLabel.style.color = '#a78bfa';
-            helperLabel.style.opacity = '0.92';
-            menu.appendChild(helperLabel);
+            menu.appendChild(createSavedPhrasesMenuContextLabel());
         }
 
         for (let i = 0; i < visiblePhraseCount; i++) {
             const rankedPhrase = rankedPhrases[i];
             if (!rankedPhrase?.phrase) continue;
-
-            const phraseText = rankedPhrase.phrase.text;
-            const previewText = truncateSavedPhrasePreviewText(phraseText);
-            const keywordsLabel = formatSavedPhraseKeywordsLabel(rankedPhrase.phrase.keywords);
-            const item = document.createElement('button');
-            item.type = 'button';
-
-            const titleParts = [phraseText];
-            if (rankedPhrase.phrase.keywords.length > 0) {
-                titleParts.push(`Mots-clés : ${keywordsLabel}`);
-            }
-            if (rankedPhrase.matchedKeywords.length > 0) {
-                titleParts.push(`Correspondance : ${rankedPhrase.matchedKeywords.join(', ')}`);
-            }
-            if (contextualSortingActive && rankedPhrase.matchPercent > 0) {
-                titleParts.push(`Match estimé : ${rankedPhrase.matchPercent}%`);
-            }
-            item.title = titleParts.join('\n');
-            item.style.background = 'transparent';
-            item.style.border = 'none';
-            item.style.color = '#e4e4e7';
-            item.style.padding = '8px 12px';
-            item.style.borderRadius = '8px';
-            item.style.fontSize = '12px';
-            item.style.cursor = 'pointer';
-            item.style.width = '100%';
-            item.style.display = 'flex';
-            item.style.alignItems = 'center';
-            item.style.justifyContent = 'space-between';
-            item.style.gap = '10px';
-            item.style.transition = 'all 0.15s ease';
-
-            if (contextualSortingActive && rankedPhrase.matchPercent > 0) {
-                const percentBadge = document.createElement('span');
-                percentBadge.textContent = `${rankedPhrase.matchPercent}%`;
-                percentBadge.style.display = 'inline-flex';
-                percentBadge.style.alignItems = 'center';
-                percentBadge.style.justifyContent = 'center';
-                percentBadge.style.padding = '3px 7px';
-                percentBadge.style.borderRadius = '999px';
-                percentBadge.style.background = 'rgba(34,197,94,0.18)';
-                percentBadge.style.border = '1px solid rgba(74,222,128,0.28)';
-                percentBadge.style.color = '#bbf7d0';
-                percentBadge.style.fontSize = '10px';
-                percentBadge.style.fontWeight = '700';
-                percentBadge.style.flexShrink = '0';
-                item.appendChild(percentBadge);
-            }
-
-            const textLabel = document.createElement('span');
-            textLabel.textContent = previewText;
-            textLabel.style.flex = '1';
-            textLabel.style.minWidth = '0';
-            textLabel.style.textAlign = 'left';
-            textLabel.style.whiteSpace = 'nowrap';
-            textLabel.style.overflow = 'hidden';
-            textLabel.style.textOverflow = 'ellipsis';
-            item.appendChild(textLabel);
-
-            item.addEventListener('mouseenter', () => {
-                item.style.background = 'rgba(139, 92, 246, 0.15)';
-                item.style.color = '#fff';
-            });
-            item.addEventListener('mouseleave', () => {
-                item.style.background = 'transparent';
-                item.style.color = '#e4e4e7';
-            });
-
-            item.addEventListener('click', (event) => {
-                event.preventDefault();
-                event.stopPropagation();
-
-                const nextInput = getChatInput();
-
-                if (!nextInput) {
-                    if (typeof showToast === 'function') showToast('Champ de texte non trouvé.', true);
-                    return;
-                }
-
-                const result = insertSavedPhraseIntoChatInput(nextInput, phraseText, {
-                    replaceExistingText: savedPhrasesReplaceInput === true
-                });
-                if (!result.ok) {
-                    if (typeof showToast === 'function') showToast(result.message, true);
-                    return;
-                }
-
-                hideSavedPhrasesMenu(menu);
-            });
-
-            menu.appendChild(item);
+            menu.appendChild(createSavedPhrasesMenuItem(menu, rankedPhrase, contextualSortingActive));
         }
 
         if (rankedPhrases.length > MAX_VISIBLE_SAVED_PHRASES_IN_MENU) {
-            const divider = document.createElement('div');
-            divider.style.height = '1px';
-            divider.style.margin = '6px 4px';
-            divider.style.background = 'rgba(255,255,255,0.08)';
-            menu.appendChild(divider);
-
-            const moreBtn = document.createElement('button');
-            moreBtn.type = 'button';
-            moreBtn.textContent = `Autres (${rankedPhrases.length - MAX_VISIBLE_SAVED_PHRASES_IN_MENU})`;
-            moreBtn.style.background = 'rgba(124,58,237,0.16)';
-            moreBtn.style.border = '1px solid rgba(139,92,246,0.22)';
-            moreBtn.style.color = '#ddd6fe';
-            moreBtn.style.padding = '9px 12px';
-            moreBtn.style.borderRadius = '10px';
-            moreBtn.style.fontSize = '12px';
-            moreBtn.style.fontWeight = '600';
-            moreBtn.style.textAlign = 'left';
-            moreBtn.style.cursor = 'pointer';
-            moreBtn.style.width = '100%';
-            moreBtn.style.transition = 'all 0.15s ease';
-
-            moreBtn.addEventListener('mouseenter', () => {
-                moreBtn.style.background = 'rgba(124,58,237,0.24)';
-                moreBtn.style.borderColor = 'rgba(139,92,246,0.34)';
-            });
-
-            moreBtn.addEventListener('mouseleave', () => {
-                moreBtn.style.background = 'rgba(124,58,237,0.16)';
-                moreBtn.style.borderColor = 'rgba(139,92,246,0.22)';
-            });
-
-            moreBtn.addEventListener('click', (event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                hideSavedPhrasesMenu(menu);
-                openSavedPhrasesPickerModal();
-            });
-
-            menu.appendChild(moreBtn);
+            menu.appendChild(createSavedPhrasesMenuDivider());
+            menu.appendChild(createSavedPhrasesMenuMoreButton(
+                menu,
+                rankedPhrases.length - MAX_VISIBLE_SAVED_PHRASES_IN_MENU
+            ));
         }
     }
 
+    /**
+     * Monte le bouton et le menu compact des réponses rapides dans la toolbar du chat.
+     *
+     * @returns {void}
+     */
     function injectSavedPhrasesToolbar() {
         if (!isSupportedPage()) return;
         if (!savedPhrasesEnabled) {
@@ -10570,6 +10926,7 @@
         syncChatInputToolbarReservedSpace();
     }
 
+    // Klipy GIF picker - toolbar/menu UI
     function installKlipyGifToolbarGlobalHandlers() {
         if (klipyGifToolbarEventsInstalled) return;
 
@@ -10748,6 +11105,13 @@
         });
     }
 
+    /**
+     * Charge et affiche les résultats Klipy dans le menu GIF, en mode initial ou pagination.
+     *
+     * @param {HTMLElement} menu
+     * @param {{ append?: boolean }} [options={}]
+     * @returns {Promise<void>}
+     */
     async function loadKlipyGifResults(menu, { append = false } = {}) {
         if (!(menu instanceof HTMLElement)) return;
 
@@ -10830,21 +11194,7 @@
         }, KLIPY_SEARCH_DEBOUNCE_MS);
     }
 
-    function injectKlipyGifToolbar() {
-        if (!isSupportedPage()) return;
-        if (!klipyGifsEnabled) {
-            removeKlipyGifToolbar();
-            return;
-        }
-
-        installKlipyGifToolbarGlobalHandlers();
-
-        const textInput = getChatInput();
-        if (!textInput) return;
-        const mountContext = getChatInputToolbarMountContext(textInput);
-        const rail = getOrCreateChatInputToolbarRail(mountContext);
-        if (!(rail instanceof HTMLElement)) return;
-
+    function getOrCreateKlipyGifToolbarWrapper(rail) {
         let wrapper = document.getElementById(GIF_MENU_WRAPPER_ID);
         if (!wrapper) {
             wrapper = document.createElement('div');
@@ -10872,15 +11222,16 @@
         }
 
         wrapper.style.display = 'flex';
-        if (wrapper.dataset.tmInitialized === '1') {
-            applyKlipyGifMenuAlignmentState();
-            syncChatInputToolbarReservedSpace(textInput);
-            syncNativeChatInputActionButtons(textInput);
-            return;
-        }
+        return wrapper;
+    }
 
-        wrapper.innerHTML = '';
+    function syncKlipyGifToolbarMountState(textInput, menu = null) {
+        applyKlipyGifMenuAlignmentState(menu);
+        syncChatInputToolbarReservedSpace(textInput);
+        syncNativeChatInputActionButtons(textInput);
+    }
 
+    function createKlipyGifToggleButton() {
         const toggleBtn = document.createElement('button');
         toggleBtn.type = 'button';
         toggleBtn.innerHTML = '<span style="margin-right:4px;">🎞</span> GIF';
@@ -10912,6 +11263,10 @@
             toggleBtn.style.border = '1px solid rgba(74,222,128,0.26)';
         });
 
+        return toggleBtn;
+    }
+
+    function createKlipyGifMenuSurface() {
         const menu = document.createElement('div');
         menu.setAttribute('data-tm-klipy-gif-menu', '1');
         menu.style.display = 'none';
@@ -10933,7 +11288,10 @@
         menu.style.transform = 'translateY(10px) scale(0.95)';
         menu.style.transition = 'opacity 0.2s cubic-bezier(0.16, 1, 0.3, 1), transform 0.2s cubic-bezier(0.16, 1, 0.3, 1)';
         applyKlipyGifMenuAlignmentState(menu);
+        return menu;
+    }
 
+    function buildKlipyGifMenuHeader() {
         const header = document.createElement('div');
         header.style.display = 'flex';
         header.style.alignItems = 'center';
@@ -10967,7 +11325,10 @@
 
         header.appendChild(titleBlock);
         header.appendChild(providerLink);
+        return header;
+    }
 
+    function createKlipyGifSearchInput() {
         const searchInput = document.createElement('input');
         searchInput.type = 'text';
         searchInput.placeholder = 'Rechercher un GIF Klipy';
@@ -10980,14 +11341,20 @@
         searchInput.style.padding = '10px 12px';
         searchInput.style.outline = 'none';
         searchInput.style.fontSize = '12px';
+        return searchInput;
+    }
 
+    function createKlipyGifStatusElement() {
         const status = document.createElement('div');
         status.setAttribute('data-tm-klipy-status', '1');
         status.textContent = `Tendances Klipy. Tape au moins ${KLIPY_SEARCH_MIN_LENGTH} caractères pour chercher.`;
         status.style.fontSize = '11px';
         status.style.lineHeight = '1.45';
         status.style.color = '#cbd5f5';
+        return status;
+    }
 
+    function createKlipyGifResultsGrid() {
         const results = document.createElement('div');
         results.setAttribute('data-tm-klipy-results', '1');
         results.style.display = 'grid';
@@ -10996,7 +11363,10 @@
         results.style.maxHeight = '420px';
         results.style.overflowY = 'auto';
         results.style.paddingRight = '2px';
+        return results;
+    }
 
+    function createKlipyGifLoadMoreButton() {
         const loadMoreBtn = document.createElement('button');
         loadMoreBtn.type = 'button';
         loadMoreBtn.setAttribute('data-tm-klipy-more', '1');
@@ -11011,12 +11381,26 @@
         loadMoreBtn.style.fontSize = '11px';
         loadMoreBtn.style.fontWeight = '700';
         loadMoreBtn.style.cursor = 'pointer';
+        return loadMoreBtn;
+    }
 
+    function createKlipyGifMenuFooter() {
         const footer = document.createElement('div');
         footer.textContent = '';
         footer.style.fontSize = '10px';
         footer.style.lineHeight = '1.45';
         footer.style.color = '#64748b';
+        return footer;
+    }
+
+    function createKlipyGifMenuView() {
+        const menu = createKlipyGifMenuSurface();
+        const header = buildKlipyGifMenuHeader();
+        const searchInput = createKlipyGifSearchInput();
+        const status = createKlipyGifStatusElement();
+        const results = createKlipyGifResultsGrid();
+        const loadMoreBtn = createKlipyGifLoadMoreButton();
+        const footer = createKlipyGifMenuFooter();
 
         menu.appendChild(header);
         menu.appendChild(searchInput);
@@ -11025,6 +11409,10 @@
         menu.appendChild(loadMoreBtn);
         menu.appendChild(footer);
 
+        return { menu, searchInput, loadMoreBtn };
+    }
+
+    function bindKlipyGifToolbarInteractions(toggleBtn, menu, searchInput, loadMoreBtn) {
         toggleBtn.addEventListener('click', (event) => {
             event.preventDefault();
             event.stopPropagation();
@@ -11073,12 +11461,49 @@
         menu.addEventListener('click', (event) => {
             event.stopPropagation();
         });
+    }
+
+    function initializeKlipyGifToolbarWrapper(wrapper) {
+        wrapper.innerHTML = '';
+
+        const toggleBtn = createKlipyGifToggleButton();
+        const { menu, searchInput, loadMoreBtn } = createKlipyGifMenuView();
+
+        bindKlipyGifToolbarInteractions(toggleBtn, menu, searchInput, loadMoreBtn);
 
         wrapper.appendChild(toggleBtn);
         wrapper.appendChild(menu);
         wrapper.dataset.tmInitialized = '1';
-        syncChatInputToolbarReservedSpace(textInput);
-        syncNativeChatInputActionButtons(textInput);
+    }
+
+    /**
+     * Monte le bouton et le picker GIF Klipy dans la toolbar du chat.
+     *
+     * @returns {void}
+     */
+    function injectKlipyGifToolbar() {
+        if (!isSupportedPage()) return;
+        if (!klipyGifsEnabled) {
+            removeKlipyGifToolbar();
+            return;
+        }
+
+        installKlipyGifToolbarGlobalHandlers();
+
+        const textInput = getChatInput();
+        if (!textInput) return;
+        const mountContext = getChatInputToolbarMountContext(textInput);
+        const rail = getOrCreateChatInputToolbarRail(mountContext);
+        if (!(rail instanceof HTMLElement)) return;
+
+        const wrapper = getOrCreateKlipyGifToolbarWrapper(rail);
+        if (wrapper.dataset.tmInitialized === '1') {
+            syncKlipyGifToolbarMountState(textInput);
+            return;
+        }
+
+        initializeKlipyGifToolbarWrapper(wrapper);
+        syncKlipyGifToolbarMountState(textInput, getKlipyGifMenu());
     }
 
     function startObserver() {
