@@ -139,6 +139,7 @@
     const LONG_PRESS_REACTION_MOVE_THRESHOLD_PX = 10;
     const LONG_PRESS_REACTION_PICKER_OFFSET_X = 18;
     const LONG_PRESS_REACTION_PICKER_OFFSET_Y = 0;
+    const REACTION_PICKER_Z_INDEX = 320;
     const MENTION_STYLE_ID = 'tm-torr9-mention-style';
     const LIGHT_THEME_STYLE_ID = 'tm-torr9-light-theme-style';
     const LINKIFIED_URL_STYLE_ID = 'tm-torr9-linkified-url-style';
@@ -11884,7 +11885,7 @@
         picker.style.right = 'auto';
         picker.style.left = '-9999px';
         picker.style.top = '-9999px';
-        picker.style.zIndex = '260';
+        picker.style.zIndex = String(REACTION_PICKER_Z_INDEX);
 
         const rect = picker.getBoundingClientRect();
         const maxLeft = Math.max(8, window.innerWidth - rect.width - 8);
