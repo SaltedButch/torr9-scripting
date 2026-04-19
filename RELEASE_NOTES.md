@@ -16,6 +16,7 @@ Ce fichier suit l'état fonctionnel du userscript à partir de la version actuel
 - Réduire progressivement la taille globale de `blacklist-shoutbox.user.js`, toujours au-dessus de 10 000 lignes.
 - Traiter le point `KLIPY_API_KEY` en dur, relevé par l’audit comme dette technique à clarifier ou isoler proprement.
 - Rejouer `python3 tools/build_userscripts.py --check` et `python3 tools/audit_userscripts.py` après chaque bloc de refactor pour garder un suivi stable.
+- Ajouter et maintenir un contrôle syntaxique `node --check` dans la CI et dans la publication pour bloquer les userscripts non parsables avant `dist`.
 
 ## v2.65 - 2026-04-18
 
