@@ -24,6 +24,14 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Validate userscript syntax
+        run: python3 tools/check_userscripts_syntax.py
+
       - name: Build userscripts
         run: python3 tools/build_userscripts.py
 

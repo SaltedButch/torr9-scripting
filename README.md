@@ -6,7 +6,7 @@ Repository ready for Tampermonkey userscript development with:
 - automatic generation of `@updateURL` and `@downloadURL`,
 - a dedicated `userscripts` publishing branch,
 - a classic git flow based on `main`, `develop`, `feature/*`, `release/*` and `hotfix/*`.
-- Python-only local tooling, so the workflow stays usable on Windows without Node.js.
+- Python tooling for build tasks, plus a Node.js syntax gate to catch broken userscripts before publish.
 
 ## Structure
 
@@ -23,6 +23,7 @@ Repository ready for Tampermonkey userscript development with:
 - `src/userscripts/*.user.js`: source files you edit every day.
 - `dist/`: generated publish-ready files (`*.user.js`, `*.meta.js`, `manifest.json`).
 - `tools/build_userscripts.py`: injects repository URLs and builds Tampermonkey artifacts.
+- `tools/check_userscripts_syntax.py`: runs `node --check` on every source userscript.
 - `tools/bump_version.py`: updates the `@version` metadata of one source script.
 - `Makefile`: optional shortcut for environments where `make` is available.
 
@@ -31,6 +32,7 @@ Repository ready for Tampermonkey userscript development with:
 ```bash
 git switch develop
 python3 tools/build_userscripts.py --check
+python3 tools/check_userscripts_syntax.py
 python3 tools/build_userscripts.py
 ```
 
@@ -46,7 +48,7 @@ To bump a published version before a release:
 python3 tools/bump_version.py blacklist-shoutbox 2.16.0
 ```
 
-If `make` is available on your machine, the repository also exposes equivalent shortcuts through the `Makefile`.
+If `make` is available on your machine, use `make check` for the full metadata + syntax gate. This requires `node` to be installed locally.
 
 ## Tampermonkey auto-update
 
@@ -84,8 +86,8 @@ Detailed release steps are documented in [CONTRIBUTING.md](/CONTRIBUTING.md).
 
 ## GitHub Actions
 
-- `CI`: validates every userscript metadata block on pushes and pull requests.
-- `Publish Userscripts`: rebuilds `dist/` on every push to `main` and publishes the result to `userscripts`.
+- `CI`: validates metadata and parses every userscript with `node --check` on pushes and pull requests.
+- `Publish Userscripts`: re-runs the syntax gate, rebuilds `dist/` on every push to `main` and publishes the result to `userscripts`.
 
 ## Next repository actions
 

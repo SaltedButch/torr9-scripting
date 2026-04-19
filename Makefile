@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: audit build check clean list bump release
+.PHONY: audit build check clean list bump release syntax
 
 audit:
 	$(PYTHON) tools/audit_userscripts.py
@@ -10,6 +10,10 @@ build:
 
 check:
 	$(PYTHON) tools/build_userscripts.py --check
+	$(PYTHON) tools/check_userscripts_syntax.py
+
+syntax:
+	$(PYTHON) tools/check_userscripts_syntax.py
 
 clean:
 	rm -rf dist
