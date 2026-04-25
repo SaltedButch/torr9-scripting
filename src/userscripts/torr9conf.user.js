@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         torr9conf
 // @namespace    http://tampermonkey.net/
-// @version      1.0.6
+// @version      1.0.7
 // @description  Cache les lignes +18 sur my-uploads et stats si want_porn = false
 // @match        https://torr9.net/*
 // @grant        none
@@ -178,25 +178,7 @@
     function filterMyUploads() {
         if (!isMyUploadsPage()) return;
 
-        const rows = document.querySelectorAll('.divide-y.divide-white\\/5 > div.grid');
-
-        rows.forEach((row) => {
-            row.style.display = '';
-        });
-
-        if (!shouldFilterAdult()) return;
-
-        rows.forEach((row) => {
-            const categoryCell = row.querySelector('.hidden.md\\:flex.md\\:col-span-1.items-center');
-            const categorySpan = categoryCell?.querySelector('span');
-            if (!categorySpan) return;
-
-            const categoryText = (categorySpan.getAttribute('title') || categorySpan.textContent || '').trim();
-
-            if (isAdultCategory(categoryText)) {
-                row.style.display = 'none';
-            }
-        });
+        filterUploadsListing();
     }
 
     /**
@@ -205,7 +187,14 @@
     function filterStats() {
         if (!isStatsPage()) return;
 
-        const rows = getStatsRows();
+        filterUploadsListing();
+    }
+
+    /**
+     * Applique le filtrage adulte au listing type my-uploads / stats
+     */
+    function filterUploadsListing() {
+        const rows = getUploadRows();
 
         rows.forEach((row) => {
             row.style.display = '';
@@ -220,7 +209,7 @@
         }
 
         rows.forEach((row) => {
-            if (isAdultCategory(getStatsRowCategory(row))) {
+            if (isAdultCategory(getUploadRowCategory(row))) {
                 row.style.display = 'none';
             }
         });
@@ -229,9 +218,9 @@
     }
 
     /**
-     * Retourne les lignes de la nouvelle page stats
+     * Retourne les lignes du listing type my-uploads / stats
      */
-    function getStatsRows() {
+    function getUploadRows() {
         return Array.from(document.querySelectorAll('div.grid.grid-cols-1.md\\:grid-cols-12'))
             .filter((row) => {
                 return !!row.querySelector('.md\\:col-span-3 p')
@@ -240,17 +229,17 @@
     }
 
     /**
-     * Retourne la categorie d'une ligne stats
+     * Retourne la categorie d'une ligne du listing
      */
-    function getStatsRowCategory(row) {
+    function getUploadRowCategory(row) {
         const categorySpan = row.querySelector('.hidden.md\\:flex.md\\:col-span-1.items-center span');
         return normalizeText(categorySpan?.getAttribute('title') || categorySpan?.textContent || '');
     }
 
     /**
-     * Retourne le statut d'une ligne stats
+     * Retourne le statut d'une ligne du listing
      */
-    function getStatsRowStatus(row) {
+    function getUploadRowStatus(row) {
         const statusSpan = row.querySelector('.md\\:hidden.flex.items-center.gap-2 > span');
         const normalizedStatus = normalizeText(statusSpan?.textContent || '').toLowerCase();
 
@@ -359,7 +348,7 @@
         };
 
         visibleRows.forEach((row) => {
-            const status = getStatsRowStatus(row);
+            const status = getUploadRowStatus(row);
             if (status === 'active') summary.active += 1;
             if (status === 'pending') summary.pending += 1;
             if (status === 'rejected') summary.rejected += 1;

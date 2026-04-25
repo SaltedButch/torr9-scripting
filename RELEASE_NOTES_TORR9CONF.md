@@ -8,6 +8,12 @@ Ce fichier suit l'etat fonctionnel du userscript `torr9conf` a partir de la vers
 - Ouvrir une nouvelle section seulement quand la version du userscript change.
 - Garder des formulations courtes, orientees usage, sans reconstituer les anciennes releases.
 
+## v1.0.7 - 2026-04-25
+
+- Harmonisation du filtrage entre `my-uploads` et `stats` avec le meme repérage de lignes.
+- Correction du masquage des lignes `+18` sur `my-uploads` apres refonte du layout.
+- Mise a jour des compteurs et libelles visibles de `my-uploads` pour rester coherents avec les lignes encore affichees.
+
 ## v1.0.6 - 2026-04-25
 
 - Adaptation du filtrage de la page `stats` a la nouvelle structure HTML du site.
