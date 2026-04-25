@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torr9 Chat - Shoutbox 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.66
+// @version      2.67
 // @description  Blacklist, mise en avant, mentions, réponses rapides contextuelles, Gif et confort avancé pour la shoutbox Torr9
 // @icon         https://torr9.net/favicon.ico?favicon.71918ed5.ico
 // @author       Butchered
@@ -39,6 +39,10 @@
     const STORAGE_KEY_SAVED_PHRASES_ENABLED = 'tm_torr9_saved_phrases_enabled';
     const STORAGE_KEY_SAVED_PHRASES_REPLACE_INPUT = 'tm_torr9_saved_phrases_replace_input';
     const STORAGE_KEY_KLIPY_GIFS_ENABLED = 'tm_torr9_klipy_gifs_enabled';
+    const STORAGE_KEY_EMOJI_USAGE_COUNTS = 'tm_torr9_emoji_usage_counts';
+    const STORAGE_KEY_REACTION_USAGE_COUNTS = 'tm_torr9_reaction_usage_counts';
+    const STORAGE_KEY_EMOJI_QUICK_ACCESS_LIMIT = 'tm_torr9_emoji_quick_access_limit';
+    const STORAGE_KEY_REACTION_QUICK_ACCESS_LIMIT = 'tm_torr9_reaction_quick_access_limit';
     const STORAGE_KEY_CHAT_INPUT_TOOLBAR_INLINE = 'tm_torr9_chat_input_toolbar_inline';
     const STORAGE_KEY_CHAT_INPUT_TOOLBAR_ALIGN_RIGHT = 'tm_torr9_chat_input_toolbar_align_right';
     const STORAGE_KEY_AFK_STATE = 'tm_torr9_afk_state';
@@ -73,6 +77,10 @@
         STORAGE_KEY_SAVED_PHRASES_ENABLED,
         STORAGE_KEY_SAVED_PHRASES_REPLACE_INPUT,
         STORAGE_KEY_KLIPY_GIFS_ENABLED,
+        STORAGE_KEY_EMOJI_USAGE_COUNTS,
+        STORAGE_KEY_REACTION_USAGE_COUNTS,
+        STORAGE_KEY_EMOJI_QUICK_ACCESS_LIMIT,
+        STORAGE_KEY_REACTION_QUICK_ACCESS_LIMIT,
         STORAGE_KEY_CHAT_INPUT_TOOLBAR_INLINE,
         STORAGE_KEY_CHAT_INPUT_TOOLBAR_ALIGN_RIGHT,
         STORAGE_KEY_AFK_PANEL_POSITION
@@ -89,6 +97,7 @@
     const HOME_COLLAPSE_BUTTON_ID = 'tm-home-chat-collapse-toggle';
     const PHRASES_MENU_WRAPPER_ID = 'tm-torr9-phrases-menu-wrapper';
     const GIF_MENU_WRAPPER_ID = 'tm-torr9-klipy-gif-wrapper';
+    const EMOJI_QUICK_ACCESS_WRAPPER_ID = 'tm-torr9-emoji-quick-access-wrapper';
     const MODAL_SCROLLBAR_STYLE_ID = 'tm-torr9-modal-scrollbar-style';
     const CHAT_SCROLLBAR_STYLE_ID = 'tm-torr9-chat-scrollbar-style';
     const DEFAULT_YOUTUBE_PLAYER_TITLE = 'Player YouTube';
@@ -140,6 +149,9 @@
     const LONG_PRESS_REACTION_PICKER_OFFSET_X = 18;
     const LONG_PRESS_REACTION_PICKER_OFFSET_Y = 0;
     const REACTION_PICKER_Z_INDEX = 320;
+    const REACTION_USAGE_DUPLICATE_WINDOW_MS = 700;
+    const DEFAULT_EMOJI_QUICK_ACCESS_LIMIT = 5;
+    const DEFAULT_REACTION_QUICK_ACCESS_LIMIT = 5;
     const MENTION_STYLE_ID = 'tm-torr9-mention-style';
     const LIGHT_THEME_STYLE_ID = 'tm-torr9-light-theme-style';
     const LINKIFIED_URL_STYLE_ID = 'tm-torr9-linkified-url-style';
@@ -153,6 +165,8 @@
     const CHAT_INPUT_TOOLBAR_SPACE_ATTR = 'data-tm-chat-input-toolbar-space';
     const CHAT_INPUT_TOOLBAR_SYNC_BOUND_ATTR = 'data-tm-chat-input-toolbar-sync-bound';
     const CHAT_INPUT_TOOLBAR_RESERVED_HEIGHT_PX = 46;
+    const MESSAGE_REACTION_QUICK_ACCESS_GROUP_ATTR = 'data-tm-message-reaction-quick-access-group';
+    const MESSAGE_REACTION_QUICK_ACCESS_BUTTON_ATTR = 'data-tm-message-reaction-quick-access-button';
     const HOME_CHAT_POPOVER_SURFACE_ATTR = 'data-tm-home-chat-popover-surface';
     const HOME_CHAT_POPOVER_PARENT_ATTR = 'data-tm-home-chat-popover-parent';
     const NATIVE_CHAT_INPUT_ACTION_HOST_ATTR = 'data-tm-native-chat-input-action-host';
@@ -207,6 +221,10 @@
     let savedPhrasesEnabled = loadSavedPhrasesEnabled();
     let savedPhrasesReplaceInput = loadSavedPhrasesReplaceInput();
     let klipyGifsEnabled = loadKlipyGifsEnabled();
+    let emojiUsageCounts = loadEmojiUsageCounts();
+    let reactionUsageCounts = loadReactionUsageCounts();
+    let emojiQuickAccessLimit = loadEmojiQuickAccessLimit();
+    let reactionQuickAccessLimit = loadReactionQuickAccessLimit();
     let chatInputToolbarInline = loadChatInputToolbarInline();
     let chatInputToolbarAlignRight = loadChatInputToolbarAlignRight();
     let mentionSoundContext = null;
@@ -216,6 +234,8 @@
     let lastMentionSoundAt = lastMentionSoundRecord?.notifiedAt || 0;
     let lastChatContextKey = 'other';
     let longPressReactionState = null;
+    let lastTrackedReactionUsageKey = '';
+    let lastTrackedReactionUsageAt = 0;
     let savedPhrasesToolbarEventsInstalled = false;
     let klipyGifToolbarEventsInstalled = false;
     let klipyGifSearchDebounceTimer = null;
@@ -339,6 +359,16 @@
      * @typedef {Object} KlipyGifFeedPayload
      * @property {KlipyGifResult[]} results
      * @property {string} next
+     */
+
+    /**
+     * @typedef {Object} EmojiUsageRecord
+     * @property {string} key
+     * @property {string} title
+     * @property {string} alt
+     * @property {string} src
+     * @property {number} count
+     * @property {number} lastUsedAt
      */
 
     function isChatPage() {
@@ -682,6 +712,652 @@
     function saveKlipyGifsEnabled(value) {
         klipyGifsEnabled = !!value;
         writeStorageBoolean(STORAGE_KEY_KLIPY_GIFS_ENABLED, klipyGifsEnabled);
+    }
+
+    function normalizeEmojiUsageAssetPath(value) {
+        const rawValue = String(value || '').trim();
+        if (!rawValue) return '';
+
+        try {
+            const parsedUrl = new URL(rawValue, location.origin);
+            return `${parsedUrl.pathname}${parsedUrl.search}`;
+        } catch (e) {
+            return rawValue;
+        }
+    }
+
+    function buildEmojiUsageKey(title, alt, src) {
+        const normalizedTitle = String(title || '').trim();
+        const normalizedAlt = String(alt || '').trim();
+        const normalizedSrc = normalizeEmojiUsageAssetPath(src);
+        const label = normalizedTitle || normalizedAlt || normalizedSrc;
+        if (!label) return '';
+
+        return [
+            normalizeMentionComparableText(normalizedTitle || normalizedAlt || normalizedSrc),
+            normalizedSrc
+        ].join('|');
+    }
+
+    function normalizeEmojiUsageRecord(value) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+
+        const title = String(value.title || '').trim();
+        const alt = String(value.alt || '').trim();
+        const src = normalizeEmojiUsageAssetPath(value.src);
+        const key = String(value.key || buildEmojiUsageKey(title, alt, src)).trim();
+        const count = Math.max(0, Number.parseInt(String(value.count ?? 0), 10) || 0);
+        const lastUsedAt = Math.max(0, Number(value.lastUsedAt) || 0);
+        if (!key || count <= 0) return null;
+
+        return {
+            key,
+            title,
+            alt,
+            src,
+            count,
+            lastUsedAt
+        };
+    }
+
+    function loadEmojiUsageCounts() {
+        const parsed = readStorageJson(STORAGE_KEY_EMOJI_USAGE_COUNTS, {});
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+
+        return Object.fromEntries(
+            Object.entries(parsed)
+                .map(([, value]) => {
+                    const record = normalizeEmojiUsageRecord(value);
+                    return record ? [record.key, record] : null;
+                })
+                .filter(Boolean)
+        );
+    }
+
+    function saveEmojiUsageCounts() {
+        const normalizedRecords = Object.fromEntries(
+            Object.values(emojiUsageCounts)
+                .map((entry) => normalizeEmojiUsageRecord(entry))
+                .filter(Boolean)
+                .map((record) => [record.key, record])
+        );
+
+        emojiUsageCounts = normalizedRecords;
+        writeStorageJson(STORAGE_KEY_EMOJI_USAGE_COUNTS, normalizedRecords);
+    }
+
+    function resetEmojiUsageCounts() {
+        emojiUsageCounts = {};
+        removeStorageItem(STORAGE_KEY_EMOJI_USAGE_COUNTS);
+        refreshEmojiQuickAccessToolbar();
+    }
+
+    function extractEmojiUsageRecordFromButton(button) {
+        if (!(button instanceof HTMLButtonElement)) return null;
+
+        const image = button.querySelector('img');
+        const title = String(button.getAttribute('title') || '').trim();
+        const alt = String(image?.getAttribute('alt') || '').trim();
+        const src = normalizeEmojiUsageAssetPath(image?.getAttribute('src') || image?.currentSrc || '');
+        const key = buildEmojiUsageKey(title, alt, src);
+        if (!key) return null;
+
+        return {
+            key,
+            title,
+            alt,
+            src,
+            count: 0,
+            lastUsedAt: 0
+        };
+    }
+
+    function getEmojiUsageCount(recordOrKey) {
+        const key = typeof recordOrKey === 'string'
+            ? String(recordOrKey || '').trim()
+            : String(recordOrKey?.key || '').trim();
+        if (!key) return 0;
+
+        return Math.max(0, Number(emojiUsageCounts[key]?.count) || 0);
+    }
+
+    function recordEmojiUsageRecord(record) {
+        const baseRecord = normalizeEmojiUsageRecord({
+            ...record,
+            count: 1,
+            lastUsedAt: Date.now()
+        });
+        if (!baseRecord) {
+            logEmojiDebug('record: skipped, emoji metadata unresolved');
+            return null;
+        }
+
+        const existingRecord = normalizeEmojiUsageRecord(emojiUsageCounts[baseRecord.key]);
+        const nextRecord = {
+            ...baseRecord,
+            count: (existingRecord?.count || 0) + 1,
+            lastUsedAt: Date.now()
+        };
+
+        emojiUsageCounts = {
+            ...emojiUsageCounts,
+            [baseRecord.key]: nextRecord
+        };
+        saveEmojiUsageCounts();
+        refreshOpenSettingsUsageLists();
+        refreshEmojiQuickAccessToolbar();
+
+        logEmojiDebug('record: stored', {
+            key: baseRecord.key,
+            title: baseRecord.title,
+            alt: baseRecord.alt,
+            src: baseRecord.src,
+            previousCount: existingRecord?.count || 0,
+            nextCount: nextRecord.count
+        });
+
+        return emojiUsageCounts[baseRecord.key] || null;
+    }
+
+    function recordEmojiUsageFromButton(button) {
+        const baseRecord = extractEmojiUsageRecordFromButton(button);
+        return recordEmojiUsageRecord(baseRecord);
+    }
+
+    function getTopEmojiUsageRecords(limit = 10) {
+        const safeLimit = Math.max(0, Number(limit) || 0);
+        if (safeLimit <= 0) return [];
+
+        return Object.values(emojiUsageCounts)
+            .map((entry) => normalizeEmojiUsageRecord(entry))
+            .filter(Boolean)
+            .sort((left, right) => (
+                (right.count - left.count)
+                || (right.lastUsedAt - left.lastUsedAt)
+                || String(left.title || left.alt || left.src).localeCompare(
+                    String(right.title || right.alt || right.src),
+                    'fr'
+                )
+            ))
+            .slice(0, safeLimit);
+    }
+
+    function buildEmojiInsertionText(record) {
+        const title = String(record?.title || '').trim();
+        if (/^:[^:\s][^:]*:$/.test(title)) {
+            return title;
+        }
+
+        const alt = String(record?.alt || '').trim().replace(/^:+|:+$/g, '');
+        if (alt) {
+            return `:${alt}:`;
+        }
+
+        const normalizedSrc = normalizeEmojiUsageAssetPath(record?.src || '');
+        const pathMatch = normalizedSrc.match(/\/([^/?#]+)\.(?:avif|bmp|gif|jpe?g|png|svg|webp)(?:\?.*)?$/i);
+        if (pathMatch?.[1]) {
+            return `:${pathMatch[1]}:`;
+        }
+
+        return '';
+    }
+
+    function getQuickAccessEmojiRecords(limit = emojiQuickAccessLimit) {
+        const safeLimit = Math.max(0, Number(limit) || 0);
+        if (safeLimit <= 0) return [];
+
+        return getTopEmojiUsageRecords(safeLimit * 3)
+            .filter((record) => !!buildEmojiInsertionText(record))
+            .slice(0, safeLimit);
+    }
+
+    function normalizeReactionEmojiValue(value) {
+        const rawValue = String(value || '').trim();
+        if (!rawValue) return '';
+        if (/^:[^:\s][^:]*:$/.test(rawValue)) return '';
+        if (/[\p{Extended_Pictographic}\p{Emoji_Presentation}\uFE0F\u200D]/u.test(rawValue)) {
+            return rawValue;
+        }
+
+        return '';
+    }
+
+    function extractReactionEmojiValueFromCandidates(...values) {
+        for (const value of values) {
+            const emojiValue = normalizeReactionEmojiValue(value);
+            if (emojiValue) return emojiValue;
+        }
+
+        return '';
+    }
+
+    function normalizeReactionUsageRecord(value) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+
+        const label = String(value.label || '').trim();
+        const title = String(value.title || '').trim();
+        const alt = String(value.alt || '').trim();
+        const emojiValue = normalizeReactionEmojiValue(value.emojiValue);
+        const src = normalizeEmojiUsageAssetPath(value.src);
+        const svgSignature = String(value.svgSignature || '').trim();
+        const key = String(value.key || '').trim();
+        const count = Math.max(0, Number.parseInt(String(value.count ?? 0), 10) || 0);
+        const lastUsedAt = Math.max(0, Number(value.lastUsedAt) || 0);
+        if (!key || count <= 0) return null;
+
+        return {
+            key,
+            label,
+            title,
+            alt,
+            emojiValue,
+            src,
+            svgSignature,
+            count,
+            lastUsedAt
+        };
+    }
+
+    function buildReactionUsageKey(button) {
+        if (!(button instanceof HTMLButtonElement)) return '';
+
+        const label = getButtonSearchLabel(button);
+        const image = button.querySelector('img');
+        const title = String(button.getAttribute('title') || '').trim();
+        const datasetValue = normalizeMentionComparableText(
+            [
+                button.getAttribute('data-emoji'),
+                button.getAttribute('data-name'),
+                button.getAttribute('data-key'),
+                button.getAttribute('data-value')
+            ]
+                .filter(Boolean)
+                .join(' ')
+        );
+        const textValue = String(button.textContent || '').trim();
+        const alt = String(image?.getAttribute('alt') || '').trim();
+        const src = normalizeEmojiUsageAssetPath(image?.getAttribute('src') || image?.currentSrc || '');
+        const svg = button.querySelector('svg');
+        const svgSignature = svg instanceof SVGElement
+            ? normalizeMentionComparableText(svg.outerHTML.replace(/\s+/g, ' ').slice(0, 400))
+            : '';
+        const keySource = label || datasetValue || title || alt || textValue || src || svgSignature;
+        if (!keySource) return '';
+
+        return [
+            normalizeMentionComparableText(keySource),
+            src || `svg:${hashString(svgSignature || textValue || keySource)}`
+        ].join('|');
+    }
+
+    function extractReactionUsageRecordFromButton(button) {
+        if (!(button instanceof HTMLButtonElement)) return null;
+
+        const image = button.querySelector('img');
+        const label = getButtonSearchLabel(button);
+        const title = String(button.getAttribute('title') || '').trim();
+        const rawDataEmoji = String(button.getAttribute('data-emoji') || '').trim();
+        const datasetValue = normalizeMentionComparableText(
+            [
+                rawDataEmoji,
+                button.getAttribute('data-name'),
+                button.getAttribute('data-key'),
+                button.getAttribute('data-value')
+            ]
+                .filter(Boolean)
+                .join(' ')
+        );
+        const textValue = String(button.textContent || '').trim();
+        const alt = String(image?.getAttribute('alt') || '').trim();
+        const emojiValue = extractReactionEmojiValueFromCandidates(
+            rawDataEmoji,
+            textValue,
+            alt,
+            title,
+            button.getAttribute('aria-label')
+        );
+        const src = normalizeEmojiUsageAssetPath(image?.getAttribute('src') || image?.currentSrc || '');
+        const svg = button.querySelector('svg');
+        const svgSignature = svg instanceof SVGElement
+            ? normalizeMentionComparableText(svg.outerHTML.replace(/\s+/g, ' ').slice(0, 400))
+            : '';
+        const key = buildReactionUsageKey(button);
+        if (!key) return null;
+
+        return {
+            key,
+            label: label || datasetValue || textValue,
+            title,
+            alt,
+            emojiValue,
+            src,
+            svgSignature,
+            count: 0,
+            lastUsedAt: 0
+        };
+    }
+
+    function loadReactionUsageCounts() {
+        const parsed = readStorageJson(STORAGE_KEY_REACTION_USAGE_COUNTS, {});
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+
+        return Object.fromEntries(
+            Object.entries(parsed)
+                .map(([, value]) => {
+                    const record = normalizeReactionUsageRecord(value);
+                    return record ? [record.key, record] : null;
+                })
+                .filter(Boolean)
+        );
+    }
+
+    function saveReactionUsageCounts() {
+        const normalizedRecords = Object.fromEntries(
+            Object.values(reactionUsageCounts)
+                .map((entry) => normalizeReactionUsageRecord(entry))
+                .filter(Boolean)
+                .map((record) => [record.key, record])
+        );
+
+        reactionUsageCounts = normalizedRecords;
+        writeStorageJson(STORAGE_KEY_REACTION_USAGE_COUNTS, normalizedRecords);
+    }
+
+    function resetReactionUsageCounts() {
+        reactionUsageCounts = {};
+        removeStorageItem(STORAGE_KEY_REACTION_USAGE_COUNTS);
+        refreshReactionQuickAccessButtons();
+    }
+
+    function refreshOpenSettingsUsageLists() {
+        const modal = document.getElementById(MODAL_ID);
+        if (!(modal instanceof HTMLElement)) return;
+
+        refreshSettingsEmojiUsageList({
+            emojiUsageHistoryEmojiList: modal.querySelector('#tm-emoji-usage-history-emoji-list')
+        });
+        refreshSettingsReactionUsageList({
+            reactionUsageHistoryReactionList: modal.querySelector('#tm-emoji-usage-history-reaction-list')
+        });
+    }
+
+    function getReactionUsageCount(recordOrKey) {
+        const key = typeof recordOrKey === 'string'
+            ? String(recordOrKey || '').trim()
+            : String(recordOrKey?.key || '').trim();
+        if (!key) return 0;
+
+        return Math.max(0, Number(reactionUsageCounts[key]?.count) || 0);
+    }
+
+    function recordReactionUsageRecord(record) {
+        const baseRecord = normalizeReactionUsageRecord({
+            ...record,
+            count: 1,
+            lastUsedAt: Date.now()
+        });
+        if (!baseRecord) {
+            logEmojiDebug('reaction record: skipped, button metadata unresolved');
+            return null;
+        }
+
+        const existingRecord = normalizeReactionUsageRecord(reactionUsageCounts[baseRecord.key]);
+        const nextRecord = {
+            ...baseRecord,
+            count: (existingRecord?.count || 0) + 1,
+            lastUsedAt: Date.now()
+        };
+
+        reactionUsageCounts = {
+            ...reactionUsageCounts,
+            [baseRecord.key]: nextRecord
+        };
+        saveReactionUsageCounts();
+        refreshOpenSettingsUsageLists();
+        refreshReactionQuickAccessButtons();
+
+        logEmojiDebug('reaction record: stored', {
+            key: baseRecord.key,
+            label: baseRecord.label,
+            title: baseRecord.title,
+            alt: baseRecord.alt,
+            src: baseRecord.src,
+            previousCount: existingRecord?.count || 0,
+            nextCount: nextRecord.count
+        });
+
+        return reactionUsageCounts[baseRecord.key] || null;
+    }
+
+    function recordReactionUsageFromButton(button) {
+        return recordReactionUsageRecord(extractReactionUsageRecordFromButton(button));
+    }
+
+    function getTopReactionUsageRecords(limit = 10) {
+        const safeLimit = Math.max(0, Number(limit) || 0);
+        if (safeLimit <= 0) return [];
+
+        return Object.values(reactionUsageCounts)
+            .map((entry) => normalizeReactionUsageRecord(entry))
+            .filter(Boolean)
+            .sort((left, right) => (
+                (right.count - left.count)
+                || (right.lastUsedAt - left.lastUsedAt)
+                || String(left.label || left.title || left.alt || left.src).localeCompare(
+                    String(right.label || right.title || right.alt || right.src),
+                    'fr'
+                )
+            ))
+            .slice(0, safeLimit);
+    }
+
+    function buildReactionQuickAccessLabel(record) {
+        const emojiValue = normalizeReactionEmojiValue(record?.emojiValue);
+        if (emojiValue) return emojiValue;
+
+        const labelSource = String(record?.title || record?.alt || record?.label || '').trim();
+        if (!labelSource) return '';
+
+        return Array.from(labelSource).slice(0, 2).join('');
+    }
+
+    function getQuickAccessReactionRecords(limit = reactionQuickAccessLimit) {
+        const safeLimit = Math.max(0, Number(limit) || 0);
+        if (safeLimit <= 0) return [];
+
+        return getTopReactionUsageRecords(safeLimit * 3)
+            .filter((record) => !!record?.src || !!buildReactionQuickAccessLabel(record))
+            .slice(0, safeLimit);
+    }
+
+    function parseQuickAccessLimit(value, fallback = DEFAULT_EMOJI_QUICK_ACCESS_LIMIT) {
+        const parsed = Number.parseInt(String(value ?? '').trim(), 10);
+        if (Number.isNaN(parsed)) {
+            return clamp(fallback, 0, 9);
+        }
+
+        return clamp(parsed, 0, 9);
+    }
+
+    function loadEmojiQuickAccessLimit() {
+        return parseQuickAccessLimit(
+            readStorageItem(STORAGE_KEY_EMOJI_QUICK_ACCESS_LIMIT),
+            DEFAULT_EMOJI_QUICK_ACCESS_LIMIT
+        );
+    }
+
+    function saveEmojiQuickAccessLimit(value) {
+        emojiQuickAccessLimit = parseQuickAccessLimit(value, DEFAULT_EMOJI_QUICK_ACCESS_LIMIT);
+        writeStorageItem(STORAGE_KEY_EMOJI_QUICK_ACCESS_LIMIT, String(emojiQuickAccessLimit));
+        refreshEmojiQuickAccessToolbar();
+        resetNativeChatInputActionButtonsLayout(getChatInput(), 6);
+    }
+
+    function loadReactionQuickAccessLimit() {
+        return parseQuickAccessLimit(
+            readStorageItem(STORAGE_KEY_REACTION_QUICK_ACCESS_LIMIT),
+            DEFAULT_REACTION_QUICK_ACCESS_LIMIT
+        );
+    }
+
+    function saveReactionQuickAccessLimit(value) {
+        reactionQuickAccessLimit = parseQuickAccessLimit(value, DEFAULT_REACTION_QUICK_ACCESS_LIMIT);
+        writeStorageItem(STORAGE_KEY_REACTION_QUICK_ACCESS_LIMIT, String(reactionQuickAccessLimit));
+        refreshReactionQuickAccessButtons();
+    }
+
+    function shouldSkipDuplicateReactionUsage(recordKey) {
+        const normalizedKey = String(recordKey || '').trim();
+        if (!normalizedKey) return true;
+
+        const now = Date.now();
+        if (
+            lastTrackedReactionUsageKey === normalizedKey
+            && (now - lastTrackedReactionUsageAt) <= REACTION_USAGE_DUPLICATE_WINDOW_MS
+        ) {
+            return true;
+        }
+
+        lastTrackedReactionUsageKey = normalizedKey;
+        lastTrackedReactionUsageAt = now;
+        return false;
+    }
+
+    function waitForVisibleReactionPicker(maxAttempts = 12, delayMs = 30, attempt = 0) {
+        return new Promise((resolve) => {
+            const picker = findVisibleReactionPicker();
+            if (picker instanceof HTMLElement) {
+                resolve(picker);
+                return;
+            }
+
+            if (attempt >= maxAttempts) {
+                resolve(null);
+                return;
+            }
+
+            window.setTimeout(() => {
+                waitForVisibleReactionPicker(maxAttempts, delayMs, attempt + 1).then(resolve);
+            }, Math.max(0, Number(delayMs) || 0));
+        });
+    }
+
+    function getReactionPickerCandidateButtons(picker) {
+        if (!(picker instanceof HTMLElement)) return [];
+
+        return Array.from(picker.querySelectorAll('div.grid button')).filter((button) => (
+            button instanceof HTMLButtonElement &&
+            findReactionUsageButtonFromTarget(button) === button
+        ));
+    }
+
+    function scoreReactionPickerButtonCandidate(button, record, emoji) {
+        if (!(button instanceof HTMLButtonElement)) return -1;
+
+        const buttonRecord = extractReactionUsageRecordFromButton(button);
+        if (!buttonRecord) return -1;
+
+        const targetKey = String(record?.key || '').trim();
+        const targetEmoji = normalizeReactionEmojiValue(emoji);
+        const targetLabel = normalizeMentionComparableText(
+            record?.label || record?.title || record?.alt || ''
+        );
+        let score = 1;
+
+        if (targetKey && buttonRecord.key === targetKey) {
+            score += 10;
+        }
+
+        if (targetEmoji && buttonRecord.emojiValue === targetEmoji) {
+            score += 8;
+        }
+
+        if (targetLabel) {
+            const buttonLabel = normalizeMentionComparableText(
+                buttonRecord.label || buttonRecord.title || buttonRecord.alt || ''
+            );
+
+            if (buttonLabel === targetLabel) {
+                score += 4;
+            }
+        }
+
+        return score;
+    }
+
+    function findReactionPickerButtonForRecord(picker, record, emoji) {
+        const candidateButtons = getReactionPickerCandidateButtons(picker);
+        let bestMatch = null;
+
+        candidateButtons.forEach((button) => {
+            const score = scoreReactionPickerButtonCandidate(button, record, emoji);
+            if (score < 0) return;
+
+            if (!bestMatch || score > bestMatch.score) {
+                bestMatch = {
+                    score,
+                    button
+                };
+            }
+        });
+
+        return bestMatch?.button || null;
+    }
+
+    async function postFavoriteReactionViaNativeFlow(messageEl, record, emoji) {
+        if (!(messageEl instanceof HTMLElement)) {
+            throw new Error('Message cible introuvable.');
+        }
+
+        const reactionButton = getMessageReactionActionButton(messageEl);
+        if (!(reactionButton instanceof HTMLButtonElement) || reactionButton.disabled) {
+            throw new Error('Bouton de réaction natif introuvable.');
+        }
+
+        reactionButton.click();
+        const picker = await waitForVisibleReactionPicker();
+        if (!(picker instanceof HTMLElement)) {
+            throw new Error('Picker de réaction natif introuvable.');
+        }
+
+        const pickerButton = findReactionPickerButtonForRecord(picker, record, emoji);
+        if (!(pickerButton instanceof HTMLButtonElement)) {
+            throw new Error(`Réaction ${emoji || 'demandée'} introuvable dans le picker natif.`);
+        }
+
+        pickerButton.click();
+
+        return {
+            ok: true,
+            strategy: 'native'
+        };
+    }
+
+    function resolveReactionApiEmoji(record) {
+        return extractReactionEmojiValueFromCandidates(
+            record?.emojiValue,
+            record?.label,
+            record?.alt,
+            record?.title
+        );
+    }
+
+    async function postFavoriteReactionForMessage(messageEl, record) {
+        const emoji = resolveReactionApiEmoji(record);
+        if (!emoji) {
+            return {
+                ok: false,
+                message: 'Emoji de réaction introuvable pour ce favori.'
+            };
+        }
+
+        const nativeResult = await postFavoriteReactionViaNativeFlow(messageEl, record, emoji);
+
+        return {
+            ok: true,
+            message: 'Réaction envoyée.',
+            strategy: nativeResult.strategy
+        };
     }
 
     function loadChatInputToolbarInline() {
@@ -1435,6 +2111,8 @@
         savedPhrasesEnabled = loadSavedPhrasesEnabled();
         savedPhrasesReplaceInput = loadSavedPhrasesReplaceInput();
         klipyGifsEnabled = loadKlipyGifsEnabled();
+        emojiQuickAccessLimit = loadEmojiQuickAccessLimit();
+        reactionQuickAccessLimit = loadReactionQuickAccessLimit();
         chatInputToolbarInline = loadChatInputToolbarInline();
         chatInputToolbarAlignRight = loadChatInputToolbarAlignRight();
         afkState = loadAfkState();
@@ -1472,6 +2150,8 @@
         applyNativeChatInputPopoverState();
         applyChatInputToolbarAlignmentState();
 
+        injectEmojiQuickAccessToolbar();
+
         if (savedPhrasesEnabled) {
             injectSavedPhrasesToolbar();
         } else {
@@ -1485,6 +2165,7 @@
         }
 
         processAllMessages();
+        refreshReactionQuickAccessButtons();
         renderAfkPanel();
         updateStatsBox();
     }
@@ -2812,6 +3493,17 @@
         }
 
         console.debug('[Torr9 Chat][Mention]', message, details);
+    }
+
+    function logEmojiDebug(message, details = null) {
+        if (!debugMode) return;
+
+        if (details === null) {
+            console.log('[Torr9 Chat][Emoji]', message);
+            return;
+        }
+
+        console.log('[Torr9 Chat][Emoji]', message, details);
     }
 
     function normalizeMentionComparableText(value) {
@@ -5178,6 +5870,7 @@
         const allowMentionAndHighlight = options.allowMentionAndHighlight !== false;
         applyMessageTypography(messageEl);
         syncMessageActionsAnchorVars(messageEl);
+        syncMessageReactionQuickAccessButtons(messageEl);
         syncMessageReplyContextHover(messageEl);
         updateMessageTextBlockUrls(messageEl);
 
@@ -5408,6 +6101,14 @@
             toggleBtn: modal.querySelector('#tm-user-toggle'),
             phrasesEnabledToggle: modal.querySelector('#tm-phrases-enabled-toggle'),
             klipyGifsToggle: modal.querySelector('#tm-klipy-gifs-toggle'),
+            emojiQuickAccessLimitInput: modal.querySelector('#tm-emoji-quick-access-limit'),
+            reactionQuickAccessLimitInput: modal.querySelector('#tm-reaction-quick-access-limit'),
+            emojiUsageHistoryOpenBtn: modal.querySelector('#tm-emoji-usage-history-open'),
+            emojiUsageHistoryPanel: modal.querySelector('#tm-emoji-usage-history-panel'),
+            emojiUsageHistoryCloseBtn: modal.querySelector('#tm-emoji-usage-history-close'),
+            emojiUsageHistoryResetBtn: modal.querySelector('#tm-emoji-usage-history-reset'),
+            emojiUsageHistoryEmojiList: modal.querySelector('#tm-emoji-usage-history-emoji-list'),
+            reactionUsageHistoryReactionList: modal.querySelector('#tm-emoji-usage-history-reaction-list'),
             hiddenUsersList: modal.querySelector('#tm-hidden-users-list'),
             highlightUserInput: modal.querySelector('#tm-highlight-user-input'),
             highlightColorInput: modal.querySelector('#tm-highlight-color-input'),
@@ -5609,6 +6310,61 @@
         }
     }
 
+    function createSettingsUsageHistoryItem({ count, title, src, fallbackText = '', isReaction = false }) {
+        const item = document.createElement('div');
+        item.title = title;
+        item.style.display = 'flex';
+        item.style.alignItems = 'center';
+        item.style.justifyContent = 'flex-start';
+        item.style.gap = '6px';
+        item.style.minWidth = '0';
+        item.style.padding = '5px 6px';
+        item.style.borderRadius = '10px';
+        item.style.background = 'rgba(255,255,255,0.03)';
+        item.style.border = '1px solid rgba(255,255,255,0.05)';
+
+        if (src) {
+            const image = document.createElement('img');
+            image.alt = fallbackText || 'emoji';
+            image.src = src;
+            image.style.width = '18px';
+            image.style.height = '18px';
+            image.style.objectFit = 'contain';
+            image.style.flex = '0 0 auto';
+            item.appendChild(image);
+        } else {
+            const badge = document.createElement('span');
+            const compactFallbackText = Array.from(String(fallbackText || '').trim()).slice(0, 2).join('') || (isReaction ? '•' : '?');
+            badge.textContent = compactFallbackText;
+            badge.style.display = 'inline-flex';
+            badge.style.alignItems = 'center';
+            badge.style.justifyContent = 'center';
+            badge.style.width = '18px';
+            badge.style.height = '18px';
+            badge.style.flex = '0 0 18px';
+            badge.style.borderRadius = '999px';
+            badge.style.background = 'rgba(255,255,255,0.08)';
+            badge.style.color = '#f4f4f5';
+            badge.style.fontSize = isReaction ? '13px' : '11px';
+            badge.style.fontWeight = '700';
+            badge.style.lineHeight = '1';
+            item.appendChild(badge);
+        }
+
+        const countBadge = document.createElement('span');
+        countBadge.textContent = `${count}`;
+        countBadge.style.fontSize = '11px';
+        countBadge.style.fontWeight = '700';
+        countBadge.style.color = '#f4f4f5';
+        countBadge.style.lineHeight = '1';
+        countBadge.style.whiteSpace = 'nowrap';
+        countBadge.style.overflow = 'hidden';
+        countBadge.style.textOverflow = 'ellipsis';
+
+        item.appendChild(countBadge);
+        return item;
+    }
+
     function refreshSettingsHighlightedUsersList(elements, setFeedback) {
         if (!(elements.highlightUsersList instanceof HTMLElement)) return;
 
@@ -5659,6 +6415,64 @@
 
             elements.highlightUsersList.appendChild(chip);
         }
+    }
+
+    function refreshSettingsEmojiUsageList(elements) {
+        if (!(elements.emojiUsageHistoryEmojiList instanceof HTMLElement)) return;
+
+        const entries = getTopEmojiUsageRecords(Object.keys(emojiUsageCounts).length);
+        elements.emojiUsageHistoryEmojiList.innerHTML = '';
+
+        if (entries.length === 0) {
+            const empty = document.createElement('div');
+            empty.textContent = 'Aucun emoji utilise pour le moment.';
+            empty.style.gridColumn = '1 / -1';
+            empty.style.fontSize = '12px';
+            empty.style.color = '#a1a1aa';
+            empty.style.padding = '6px 2px';
+            elements.emojiUsageHistoryEmojiList.appendChild(empty);
+            return;
+        }
+
+        entries.forEach((entry) => {
+            const item = createSettingsUsageHistoryItem({
+                count: getEmojiUsageCount(entry),
+                title: `${entry.title || entry.alt || entry.src} · ${entry.count} clic${entry.count > 1 ? 's' : ''}`,
+                src: entry.src || '',
+                fallbackText: entry.title || entry.alt || ''
+            });
+            elements.emojiUsageHistoryEmojiList.appendChild(item);
+        });
+    }
+
+    function refreshSettingsReactionUsageList(elements) {
+        const reactionList = elements.reactionUsageHistoryReactionList || elements.emojiUsageHistoryReactionList;
+        if (!(reactionList instanceof HTMLElement)) return;
+
+        const entries = getTopReactionUsageRecords(Object.keys(reactionUsageCounts).length);
+        reactionList.innerHTML = '';
+
+        if (entries.length === 0) {
+            const empty = document.createElement('div');
+            empty.textContent = 'Aucune reaction utilisee pour le moment.';
+            empty.style.gridColumn = '1 / -1';
+            empty.style.fontSize = '12px';
+            empty.style.color = '#a1a1aa';
+            empty.style.padding = '6px 2px';
+            reactionList.appendChild(empty);
+            return;
+        }
+
+        entries.forEach((entry) => {
+            const item = createSettingsUsageHistoryItem({
+                count: getReactionUsageCount(entry),
+                title: `${entry.label || entry.title || entry.alt || entry.src} · ${entry.count} clic${entry.count > 1 ? 's' : ''}`,
+                src: entry.src || '',
+                fallbackText: entry.title || entry.alt || entry.label || '',
+                isReaction: true
+            });
+            reactionList.appendChild(item);
+        });
     }
 
     function applyMentionSettingsToModalInputs(elements) {
@@ -5738,6 +6552,8 @@
             syncMentionOpacityPreview: () => syncSettingsMentionPreview(elements),
             refreshHiddenUsersList: () => refreshSettingsHiddenUsersList(elements, setFeedback),
             refreshHighlightedUsersList: () => refreshSettingsHighlightedUsersList(elements, setFeedback),
+            refreshEmojiUsageList: () => refreshSettingsEmojiUsageList(elements),
+            refreshReactionUsageList: () => refreshSettingsReactionUsageList(elements),
             syncFontSizeValueLabel,
             setPreviewFontScale,
             applyMentionSettingsToInputs: () => applyMentionSettingsToModalInputs(elements)
@@ -5747,6 +6563,8 @@
     function initializeSettingsModal(elements, controls) {
         controls.refreshHiddenUsersList();
         controls.refreshHighlightedUsersList();
+        controls.refreshEmojiUsageList();
+        controls.refreshReactionUsageList();
         elements.userInput?.focus();
         controls.syncHighlightOpacityValue();
         controls.syncMentionSoundControlsState();
@@ -5938,6 +6756,58 @@
         });
     }
 
+    function openSettingsEmojiUsageHistory(elements, controls) {
+        if (!(elements.emojiUsageHistoryPanel instanceof HTMLElement)) return;
+
+        controls.refreshEmojiUsageList();
+        controls.refreshReactionUsageList();
+        elements.emojiUsageHistoryPanel.style.display = 'block';
+    }
+
+    function closeSettingsEmojiUsageHistory(elements) {
+        if (!(elements.emojiUsageHistoryPanel instanceof HTMLElement)) return;
+
+        elements.emojiUsageHistoryPanel.style.display = 'none';
+    }
+
+    function bindSettingsModalEmojiQuickAccessEvents(elements, controls) {
+        const syncQuickAccessInput = (input, currentValue) => {
+            if (!(input instanceof HTMLInputElement)) return currentValue;
+
+            const nextValue = parseQuickAccessLimit(input.value, currentValue);
+            input.value = String(nextValue);
+            return nextValue;
+        };
+
+        elements.emojiQuickAccessLimitInput?.addEventListener('change', () => {
+            const nextValue = syncQuickAccessInput(elements.emojiQuickAccessLimitInput, emojiQuickAccessLimit);
+            saveEmojiQuickAccessLimit(nextValue);
+            controls.setFeedback(`Nombre d’emojis favoris enregistré : ${emojiQuickAccessLimit}.`);
+        });
+
+        elements.reactionQuickAccessLimitInput?.addEventListener('change', () => {
+            const nextValue = syncQuickAccessInput(elements.reactionQuickAccessLimitInput, reactionQuickAccessLimit);
+            saveReactionQuickAccessLimit(nextValue);
+            controls.setFeedback(`Nombre de réactions favorites enregistré : ${reactionQuickAccessLimit}.`);
+        });
+
+        elements.emojiUsageHistoryOpenBtn?.addEventListener('click', () => {
+            openSettingsEmojiUsageHistory(elements, controls);
+        });
+
+        elements.emojiUsageHistoryCloseBtn?.addEventListener('click', () => {
+            closeSettingsEmojiUsageHistory(elements);
+        });
+
+        elements.emojiUsageHistoryResetBtn?.addEventListener('click', () => {
+            resetEmojiUsageCounts();
+            resetReactionUsageCounts();
+            controls.refreshEmojiUsageList();
+            controls.refreshReactionUsageList();
+            controls.setFeedback('Compteurs d’emojis et de réactions réinitialisés.');
+        });
+    }
+
     function bindSettingsModalFeatureToggleEvents(elements, controls, currentPageLabel) {
         elements.phrasesEnabledToggle?.addEventListener('change', () => {
             saveSavedPhrasesEnabled(elements.phrasesEnabledToggle.checked);
@@ -6090,11 +6960,16 @@
         bindSettingsModalMentionEvents(elements, controls);
         bindSettingsModalAccessibilityEvents(elements, controls);
         bindSettingsModalConfigEvents(elements, controls);
+        bindSettingsModalEmojiQuickAccessEvents(elements, controls);
         bindSettingsModalFeatureToggleEvents(elements, controls, currentPageLabel);
 
         modal.addEventListener('keydown', (event) => {
             if (event.key !== 'Escape') return;
             event.preventDefault();
+            if (elements.emojiUsageHistoryPanel instanceof HTMLElement && elements.emojiUsageHistoryPanel.style.display !== 'none') {
+                closeSettingsEmojiUsageHistory(elements);
+                return;
+            }
             closeSettingsModal();
         });
     }
@@ -6526,6 +7401,146 @@
         `;
     }
 
+    function renderSettingsEmojiQuickAccessCard(settingsCardStyle) {
+        return `
+            <div style="${settingsCardStyle}">
+                <div style="font-size:13px;font-weight:700;margin-bottom:10px;">Emojis rapides</div>
+
+                <div style="font-size:12px;color:#a1a1aa;line-height:1.5;">
+                    Prépare le futur nombre d’emojis et de réactions favoris affichés en accès rapide.
+                </div>
+
+                <div style="display:grid;gap:10px;margin-top:12px;">
+                    <label style="display:flex;justify-content:space-between;align-items:center;gap:12px;font-size:12px;color:#d4d4d8;">
+                        <span>Nombre d’emojis favoris</span>
+                        <input id="tm-emoji-quick-access-limit" type="number" min="0" max="9" step="1" value="${emojiQuickAccessLimit}" style="
+                            width:62px;
+                            background:#18181b;
+                            color:#fff;
+                            border:1px solid rgba(255,255,255,0.10);
+                            border-radius:10px;
+                            padding:8px 10px;
+                            outline:none;
+                            text-align:center;
+                            font-weight:600;
+                        ">
+                    </label>
+
+                    <label style="display:flex;justify-content:space-between;align-items:center;gap:12px;font-size:12px;color:#d4d4d8;">
+                        <span>Nombre de réactions favorites</span>
+                        <input id="tm-reaction-quick-access-limit" type="number" min="0" max="9" step="1" value="${reactionQuickAccessLimit}" style="
+                            width:62px;
+                            background:#18181b;
+                            color:#fff;
+                            border:1px solid rgba(255,255,255,0.10);
+                            border-radius:10px;
+                            padding:8px 10px;
+                            outline:none;
+                            text-align:center;
+                            font-weight:600;
+                        ">
+                    </label>
+                </div>
+
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:12px;">
+                    <div style="font-size:11px;color:#71717a;line-height:1.45;">
+                        Valeur de 0 à 9. 0 désactive l’accès rapide.
+                    </div>
+
+                    <button id="tm-emoji-usage-history-open" type="button" style="
+                        border:none;
+                        background:#27272a;
+                        color:#fff;
+                        border-radius:10px;
+                        padding:8px 10px;
+                        cursor:pointer;
+                        font-size:12px;
+                        font-weight:600;
+                        white-space:nowrap;
+                    ">Historique</button>
+                </div>
+
+            </div>
+        `;
+    }
+
+    function renderSettingsEmojiUsageHistoryPanel() {
+        return `
+            <div id="tm-emoji-usage-history-panel" style="
+                display:none;
+                position:fixed;
+                top:50%;
+                left:50%;
+                transform:translate(-50%, -50%);
+                z-index:1000002;
+                width:min(720px, calc(100vw - 36px));
+                max-height:min(78vh, 760px);
+                background:rgba(24,24,27,0.99);
+                border:1px solid rgba(255,255,255,0.08);
+                border-radius:18px;
+                box-shadow:0 24px 60px rgba(0,0,0,0.5);
+                overflow:hidden;
+            ">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:14px 16px;border-bottom:1px solid rgba(255,255,255,0.06);">
+                    <div>
+                        <div style="font-size:14px;font-weight:700;">Historique d’utilisation</div>
+                        <div style="margin-top:4px;font-size:11px;color:#a1a1aa;">Tous les compteurs d’emojis et de réactions, sans limite d’affichage.</div>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:8px;flex:0 0 auto;">
+                        <button id="tm-emoji-usage-history-reset" type="button" style="
+                            border:none;
+                            background:#7f1d1d;
+                            color:#fff;
+                            border-radius:10px;
+                            padding:8px 10px;
+                            cursor:pointer;
+                            font-size:12px;
+                            font-weight:600;
+                            line-height:1.2;
+                            white-space:nowrap;
+                        ">Reset compteurs</button>
+                        <button id="tm-emoji-usage-history-close" type="button" style="
+                            border:none;
+                            background:#27272a;
+                            color:#fff;
+                            width:32px;
+                            height:32px;
+                            border-radius:10px;
+                            cursor:pointer;
+                            font-size:18px;
+                            line-height:1;
+                            flex:0 0 auto;
+                        ">×</button>
+                    </div>
+                </div>
+
+                <div style="padding:16px;overflow:auto;max-height:calc(min(78vh, 760px) - 66px);">
+                    <div style="display:grid;gap:16px;">
+                        <div style="padding:12px;border-radius:14px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);">
+                            <div style="font-size:12px;font-weight:700;color:#d4d4d8;margin-bottom:10px;">Emojis du chat</div>
+                            <div id="tm-emoji-usage-history-emoji-list" style="
+                                display:grid;
+                                grid-template-columns:repeat(10, minmax(0, 1fr));
+                                gap:6px;
+                                align-items:start;
+                            "></div>
+                        </div>
+
+                        <div style="padding:12px;border-radius:14px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);">
+                            <div style="font-size:12px;font-weight:700;color:#d4d4d8;margin-bottom:10px;">Réactions des messages</div>
+                            <div id="tm-emoji-usage-history-reaction-list" style="
+                                display:grid;
+                                grid-template-columns:repeat(10, minmax(0, 1fr));
+                                gap:6px;
+                                align-items:start;
+                            "></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
     function renderSettingsBlacklistCard(settingsCardStyle) {
         return `
             <div style="${settingsCardStyle}">
@@ -6918,7 +7933,7 @@
                 </label>
 
                 <div style="margin-top:8px;font-size:11px;color:#71717a;line-height:1.45;">
-                    En mode debug, les messages blacklistés ne sont pas cachés : ils sont surlignés en rouge.
+                    En mode debug, les messages blacklistés ne sont pas cachés, et des logs détaillés partent dans la console pour les mentions et le suivi des emojis.
                 </div>
             </div>
         `;
@@ -6939,6 +7954,7 @@
                 ${renderSettingsSavedPhrasesCard(styles.settingsCardStyle, styles.settingsCheckboxLabelStyle)}
                 ${renderSettingsConfigCard(styles.settingsCardStyle)}
                 ${renderSettingsGifCard(styles.settingsCardStyle, styles.settingsCheckboxLabelStyle)}
+                ${renderSettingsEmojiQuickAccessCard(styles.settingsCardStyle)}
                 ${renderSettingsBlacklistCard(styles.settingsCardStyle)}
                 ${renderSettingsHighlightCard(styles.settingsCardStyle)}
                 ${renderSettingsMentionCard(styles.settingsCardStyle, styles.settingsCheckboxLabelStyle)}
@@ -6951,6 +7967,8 @@
                 font-size:12px;
                 color:#93c5fd;
             "></div>
+
+            ${renderSettingsEmojiUsageHistoryPanel()}
         `;
     }
 
@@ -9693,6 +10711,7 @@
 
     function shouldUseChatInputToolbarRail() {
         return isSupportedPage() && (
+            getQuickAccessEmojiRecords(1).length > 0 ||
             klipyGifsEnabled ||
             (savedPhrasesEnabled && savedPhrases.length > 0)
         );
@@ -9854,15 +10873,6 @@
         return Array.from(new Set([...explicitMatches, ...fallbackMatches])).slice(0, 2);
     }
 
-    function isProtonPassManagingChatInput(input = getChatInput()) {
-        if (!(input instanceof HTMLElement)) return false;
-
-        return (
-            input.closest('[data-protonpass-form]') instanceof HTMLElement ||
-            getChatInputControlsRow(input)?.hasAttribute('data-protonpass-form') === true
-        );
-    }
-
     function restoreNativeChatInputActionButtons() {
         const movedButtons = Array.from(document.querySelectorAll('[data-tm-native-chat-input-action-moved="1"]'));
 
@@ -10006,15 +11016,57 @@
         });
     }
 
-    function syncNativeChatInputActionButtons(input = getChatInput()) {
-        if (!shouldUseChatInputToolbarRail()) {
-            restoreNativeChatInputActionButtons();
-            return;
+    function resetNativeChatInputActionButtonsLayout(input = getChatInput(), frameCount = 4) {
+        restoreNativeChatInputActionButtons();
+
+        let remainingFrames = Math.max(1, Number(frameCount) || 1);
+
+        const tick = () => {
+            const nextInput = input instanceof HTMLElement ? input : getChatInput();
+            if (nextInput instanceof HTMLElement) {
+                applyChatInputToolbarAlignmentState();
+                syncChatInputToolbarReservedSpace(nextInput);
+                syncNativeChatInputActionButtons(nextInput);
+            }
+
+            remainingFrames -= 1;
+            if (remainingFrames > 0) {
+                window.requestAnimationFrame(tick);
+            }
+        };
+
+        window.requestAnimationFrame(tick);
+    }
+
+    function getMovedNativeChatInputActionHosts(rail) {
+        if (!(rail instanceof HTMLElement)) return [];
+
+        return Array.from(rail.children).filter((child) => (
+            child instanceof HTMLElement &&
+            child.getAttribute(NATIVE_CHAT_INPUT_ACTION_HOST_ATTR) === '1'
+        ));
+    }
+
+    function insertNativeChatInputActionHost(rail, host) {
+        if (!(rail instanceof HTMLElement) || !(host instanceof HTMLElement)) return;
+        if (chatInputToolbarAlignRight) {
+            const firstNonNativeChild = Array.from(rail.children).find((child) => (
+                child instanceof HTMLElement &&
+                child !== host &&
+                child.getAttribute(NATIVE_CHAT_INPUT_ACTION_HOST_ATTR) !== '1'
+            ));
+
+            if (firstNonNativeChild instanceof HTMLElement) {
+                rail.insertBefore(host, firstNonNativeChild);
+                return;
+            }
         }
 
-        // Proton Pass mutates the chat action row aggressively. Keeping the native
-        // emoji/image buttons in place avoids a tug-of-war over that DOM subtree.
-        if (isProtonPassManagingChatInput(input)) {
+        rail.appendChild(host);
+    }
+
+    function syncNativeChatInputActionButtons(input = getChatInput()) {
+        if (!shouldUseChatInputToolbarRail()) {
             restoreNativeChatInputActionButtons();
             return;
         }
@@ -10026,8 +11078,10 @@
             return;
         }
 
-        const gifWrapper = document.getElementById(GIF_MENU_WRAPPER_ID);
-        const phrasesWrapper = document.getElementById(PHRASES_MENU_WRAPPER_ID);
+        getMovedNativeChatInputActionHosts(rail).forEach((host) => {
+            insertNativeChatInputActionHost(rail, host);
+        });
+
         const candidateButtons = getNativeChatInputActionButtons(input);
 
         candidateButtons.forEach((button, index) => {
@@ -10061,14 +11115,7 @@
             button.setAttribute('data-tm-native-chat-input-action-moved', '1');
             button.setAttribute('data-tm-native-chat-input-action-placeholder-id', placeholderId);
             host.appendChild(button);
-
-            if (gifWrapper instanceof HTMLElement && gifWrapper.parentElement === rail) {
-                rail.insertBefore(host, gifWrapper);
-            } else if (phrasesWrapper instanceof HTMLElement && phrasesWrapper.parentElement === rail) {
-                rail.insertBefore(host, phrasesWrapper);
-            } else {
-                rail.appendChild(host);
-            }
+            insertNativeChatInputActionHost(rail, host);
         });
 
         syncMovedNativeChatInputActionPopovers();
@@ -10415,6 +11462,379 @@
         }
 
         return insertTextIntoChatInput(input, embedMarkup, 'Balise BBCode GIF insérée.');
+    }
+
+    function insertEmojiIntoChatInput(input, emojiRecord) {
+        const emojiText = buildEmojiInsertionText(emojiRecord);
+        if (!emojiText) {
+            return { ok: false, message: 'Emoji invalide.' };
+        }
+
+        return insertTextIntoChatInput(input, emojiText, 'Emoji inséré.');
+    }
+
+    function getOrCreateEmojiQuickAccessToolbarWrapper(rail) {
+        let wrapper = document.getElementById(EMOJI_QUICK_ACCESS_WRAPPER_ID);
+        if (!wrapper) {
+            wrapper = document.createElement('div');
+            wrapper.id = EMOJI_QUICK_ACCESS_WRAPPER_ID;
+            wrapper.style.display = 'flex';
+            wrapper.style.alignItems = 'center';
+            wrapper.style.gap = '6px';
+            wrapper.style.justifyContent = 'flex-start';
+            wrapper.style.position = 'relative';
+            wrapper.style.zIndex = '50';
+            wrapper.style.overflow = 'visible';
+            wrapper.style.pointerEvents = 'auto';
+            wrapper.style.flexShrink = '0';
+        }
+
+        const siblingCandidates = [
+            document.getElementById(GIF_MENU_WRAPPER_ID),
+            document.getElementById(PHRASES_MENU_WRAPPER_ID)
+        ].filter((element) => element instanceof HTMLElement && element.parentElement === rail);
+        const insertionAnchor = siblingCandidates[0] || null;
+
+        if (wrapper.parentNode !== rail) {
+            if (insertionAnchor instanceof HTMLElement) {
+                rail.insertBefore(wrapper, insertionAnchor);
+            } else {
+                rail.appendChild(wrapper);
+            }
+        }
+
+        return wrapper;
+    }
+
+    function createEmojiQuickAccessButton(record) {
+        const insertionText = buildEmojiInsertionText(record);
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.title = `${insertionText || 'Emoji'} · ${record.count} clic${record.count > 1 ? 's' : ''}`;
+        button.setAttribute('aria-label', `Insérer ${insertionText || 'cet emoji'}`);
+        button.style.display = 'inline-flex';
+        button.style.alignItems = 'center';
+        button.style.justifyContent = 'center';
+        button.style.width = '34px';
+        button.style.height = '34px';
+        button.style.padding = '0';
+        button.style.border = '1px solid rgba(255,255,255,0.1)';
+        button.style.background = 'rgba(39,39,42,0.9)';
+        button.style.borderRadius = '999px';
+        button.style.cursor = 'pointer';
+        button.style.backdropFilter = 'blur(10px)';
+        button.style.boxShadow = '0 4px 12px rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.08)';
+        button.style.transition = 'all 0.18s cubic-bezier(0.16, 1, 0.3, 1)';
+
+        if (record.src) {
+            const image = document.createElement('img');
+            image.src = record.src;
+            image.alt = insertionText || record.alt || 'emoji';
+            image.style.width = '22px';
+            image.style.height = '22px';
+            image.style.objectFit = 'contain';
+            image.style.pointerEvents = 'none';
+            button.appendChild(image);
+        } else {
+            const label = document.createElement('span');
+            label.textContent = insertionText || '☺';
+            label.style.fontSize = '11px';
+            label.style.fontWeight = '700';
+            label.style.lineHeight = '1';
+            label.style.color = '#f4f4f5';
+            label.style.pointerEvents = 'none';
+            button.appendChild(label);
+        }
+
+        button.addEventListener('mouseenter', () => {
+            button.style.transform = 'translateY(-1px) scale(1.03)';
+            button.style.borderColor = 'rgba(96,165,250,0.42)';
+            button.style.background = 'rgba(63,63,70,0.96)';
+            button.style.boxShadow = '0 6px 16px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.12)';
+        });
+
+        button.addEventListener('mouseleave', () => {
+            button.style.transform = 'translateY(0) scale(1)';
+            button.style.borderColor = 'rgba(255,255,255,0.1)';
+            button.style.background = 'rgba(39,39,42,0.9)';
+            button.style.boxShadow = '0 4px 12px rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.08)';
+        });
+
+        button.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+
+            const nextInput = getChatInput();
+            if (!(nextInput instanceof HTMLElement)) {
+                showToast('Champ de texte non trouvé.', true);
+                return;
+            }
+
+            const result = insertEmojiIntoChatInput(nextInput, record);
+            if (!result.ok) {
+                showToast(result.message, true);
+                return;
+            }
+
+            recordEmojiUsageRecord(record);
+        });
+
+        return button;
+    }
+
+    function createMessageReactionQuickAccessButton(record, messageEl) {
+        const reactionLabel = buildReactionQuickAccessLabel(record);
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.setAttribute(MESSAGE_REACTION_QUICK_ACCESS_BUTTON_ATTR, '1');
+        button.title = `${record.title || record.alt || record.label || 'Réaction'} · ${record.count} clic${record.count > 1 ? 's' : ''}`;
+        button.setAttribute('aria-label', `Envoyer ${record.title || record.alt || record.label || 'cette réaction'}`.trim());
+        button.style.display = 'inline-flex';
+        button.style.alignItems = 'center';
+        button.style.justifyContent = 'center';
+        button.style.width = '24px';
+        button.style.height = '24px';
+        button.style.padding = '0';
+        button.style.border = '1px solid rgba(251,191,36,0.16)';
+        button.style.background = 'rgba(113,63,18,0.28)';
+        button.style.borderRadius = '8px';
+        button.style.cursor = 'pointer';
+        button.style.flex = '0 0 auto';
+        button.style.boxShadow = 'inset 0 1px 0 rgba(255,255,255,0.06)';
+        button.style.transition = 'all 0.16s cubic-bezier(0.16, 1, 0.3, 1)';
+
+        if (record.src) {
+            const image = document.createElement('img');
+            image.src = record.src;
+            image.alt = reactionLabel || record.alt || record.title || 'reaction';
+            image.style.width = '14px';
+            image.style.height = '14px';
+            image.style.objectFit = 'contain';
+            image.style.pointerEvents = 'none';
+            button.appendChild(image);
+        } else {
+            const label = document.createElement('span');
+            label.textContent = reactionLabel || '•';
+            label.style.fontSize = reactionLabel.length > 1 ? '9px' : '11px';
+            label.style.fontWeight = '700';
+            label.style.lineHeight = '1';
+            label.style.color = '#fef3c7';
+            label.style.pointerEvents = 'none';
+            button.appendChild(label);
+        }
+
+        button.addEventListener('mouseenter', () => {
+            button.style.transform = 'translateY(-1px)';
+            button.style.borderColor = 'rgba(251,191,36,0.3)';
+            button.style.background = 'rgba(146,64,14,0.36)';
+        });
+
+        button.addEventListener('mouseleave', () => {
+            button.style.transform = 'translateY(0)';
+            button.style.borderColor = 'rgba(251,191,36,0.16)';
+            button.style.background = 'rgba(113,63,18,0.28)';
+        });
+
+        button.addEventListener('click', async (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+
+            if (!(messageEl instanceof HTMLElement)) {
+                showToast('Message cible introuvable.', true);
+                return;
+            }
+
+            if (button.dataset.tmPendingReaction === '1') {
+                return;
+            }
+
+            button.dataset.tmPendingReaction = '1';
+            button.disabled = true;
+            button.style.opacity = '0.58';
+
+            try {
+                const result = await postFavoriteReactionForMessage(messageEl, record);
+                if (!result.ok) {
+                    showToast(result.message, true);
+                    return;
+                }
+
+                showToast(result.message);
+            } catch (error) {
+                const errorMessage = error instanceof Error ? error.message : 'Envoi de la réaction impossible.';
+                showToast(errorMessage, true);
+            } finally {
+                delete button.dataset.tmPendingReaction;
+                button.disabled = false;
+                button.style.opacity = '1';
+            }
+        });
+
+        return button;
+    }
+
+    function removeEmojiQuickAccessToolbar() {
+        const textInput = getChatInput();
+        const wrapper = document.getElementById(EMOJI_QUICK_ACCESS_WRAPPER_ID);
+        if (wrapper) {
+            wrapper.remove();
+        }
+
+        syncChatInputToolbarReservedSpace(textInput);
+        resetNativeChatInputActionButtonsLayout(textInput, 4);
+    }
+
+    function injectEmojiQuickAccessToolbar() {
+        if (!isSupportedPage()) return;
+
+        const quickAccessRecords = getQuickAccessEmojiRecords();
+        if (quickAccessRecords.length === 0) {
+            removeEmojiQuickAccessToolbar();
+            return;
+        }
+
+        const textInput = getChatInput();
+        if (!(textInput instanceof HTMLElement)) return;
+
+        const mountContext = getChatInputToolbarMountContext(textInput);
+        const rail = getOrCreateChatInputToolbarRail(mountContext);
+        if (!(rail instanceof HTMLElement)) return;
+
+        const wrapper = getOrCreateEmojiQuickAccessToolbarWrapper(rail);
+        wrapper.innerHTML = '';
+        wrapper.style.display = 'flex';
+
+        quickAccessRecords.forEach((record) => {
+            wrapper.appendChild(createEmojiQuickAccessButton(record));
+        });
+
+        syncChatInputToolbarReservedSpace(textInput);
+        resetNativeChatInputActionButtonsLayout(textInput, 4);
+    }
+
+    function refreshEmojiQuickAccessToolbar() {
+        if (!isSupportedPage()) return;
+
+        if (emojiQuickAccessLimit <= 0) {
+            removeEmojiQuickAccessToolbar();
+            return;
+        }
+
+        injectEmojiQuickAccessToolbar();
+    }
+
+    function removeMessageReactionQuickAccessButtons(messageEl = null) {
+        const searchRoot = messageEl instanceof HTMLElement ? messageEl : document;
+        searchRoot.querySelectorAll?.(`[${MESSAGE_REACTION_QUICK_ACCESS_GROUP_ATTR}="1"]`).forEach((element) => {
+            if (element instanceof HTMLElement) {
+                element.remove();
+            }
+        });
+    }
+
+    function buildReactionQuickAccessSignature(records = []) {
+        return records
+            .map((record) => {
+                const normalizedRecord = normalizeReactionUsageRecord(record);
+                if (!normalizedRecord) return '';
+
+                return [
+                    normalizedRecord.key,
+                    normalizedRecord.count,
+                    normalizedRecord.lastUsedAt
+                ].join(':');
+            })
+            .filter(Boolean)
+            .join('|');
+    }
+
+    function ensureMessageReactionQuickAccessWrapper(actionButtonsContainer) {
+        if (!(actionButtonsContainer instanceof HTMLElement)) return null;
+
+        let wrapper = actionButtonsContainer.querySelector(`[${MESSAGE_REACTION_QUICK_ACCESS_GROUP_ATTR}="1"]`);
+        if (wrapper instanceof HTMLElement) {
+            return wrapper;
+        }
+
+        wrapper = document.createElement('div');
+        wrapper.setAttribute(MESSAGE_REACTION_QUICK_ACCESS_GROUP_ATTR, '1');
+        wrapper.style.display = 'inline-flex';
+        wrapper.style.alignItems = 'center';
+        wrapper.style.gap = '2px';
+        wrapper.style.marginLeft = '2px';
+        wrapper.style.paddingLeft = '3px';
+        wrapper.style.borderLeft = '1px solid rgba(251,191,36,0.12)';
+        wrapper.style.flex = '0 0 auto';
+
+        return wrapper;
+    }
+
+    function syncMessageReactionQuickAccessButtons(messageEl) {
+        if (!(messageEl instanceof HTMLElement) || !isChatPage()) return;
+
+        const actionButtonsContainer = getMessageActionButtonsContainer(messageEl);
+        if (!(actionButtonsContainer instanceof HTMLElement)) {
+            removeMessageReactionQuickAccessButtons(messageEl);
+            return;
+        }
+
+        const quickAccessRecords = getQuickAccessReactionRecords();
+        if (reactionQuickAccessLimit <= 0 || quickAccessRecords.length === 0) {
+            removeMessageReactionQuickAccessButtons(messageEl);
+            return;
+        }
+
+        const wrapper = ensureMessageReactionQuickAccessWrapper(actionButtonsContainer);
+        if (!(wrapper instanceof HTMLElement)) return;
+
+        const reactionButton = getMessageReactionActionButton(messageEl);
+        const nextSiblingAfterReaction = reactionButton instanceof HTMLButtonElement
+            ? reactionButton.nextSibling
+            : actionButtonsContainer.firstChild;
+        const signature = buildReactionQuickAccessSignature(quickAccessRecords);
+
+        if (wrapper.dataset.tmReactionQuickAccessSignature !== signature) {
+            wrapper.replaceChildren();
+            quickAccessRecords.forEach((record) => {
+                wrapper.appendChild(createMessageReactionQuickAccessButton(record, messageEl));
+            });
+            wrapper.dataset.tmReactionQuickAccessSignature = signature;
+        }
+
+        if (
+            reactionButton instanceof HTMLButtonElement &&
+            reactionButton.parentElement === actionButtonsContainer
+        ) {
+            if (wrapper.parentElement !== actionButtonsContainer || wrapper.previousSibling !== reactionButton) {
+                actionButtonsContainer.insertBefore(wrapper, nextSiblingAfterReaction);
+            }
+            return;
+        }
+
+        if (wrapper.parentElement !== actionButtonsContainer || wrapper !== actionButtonsContainer.firstChild) {
+            actionButtonsContainer.insertBefore(wrapper, actionButtonsContainer.firstChild);
+        }
+    }
+
+    function refreshReactionQuickAccessButtons(root = null) {
+        if (!isChatPage()) {
+            removeMessageReactionQuickAccessButtons();
+            return;
+        }
+
+        const searchRoot = root instanceof HTMLElement ? root : getActiveChatRoot();
+        if (!(searchRoot instanceof HTMLElement)) return;
+
+        if (reactionQuickAccessLimit <= 0 || getQuickAccessReactionRecords(1).length === 0) {
+            removeMessageReactionQuickAccessButtons(searchRoot);
+            return;
+        }
+
+        searchRoot.querySelectorAll('div').forEach((element) => {
+            if (isChatMessage(element)) {
+                syncMessageReactionQuickAccessButtons(element);
+            }
+        });
     }
 
     function createSavedPhrasesMenuReplaceInfoBadge() {
@@ -11985,12 +13405,131 @@
         return !!quickReactionsGrid && !!customReactionsGrid;
     }
 
+    function isReactionUsageGridElement(element) {
+        if (!(element instanceof HTMLDivElement)) return false;
+        if (!element.classList.contains('grid')) return false;
+
+        return element.classList.contains('grid-cols-8') || element.classList.contains('grid-cols-7');
+    }
+
+    function findReactionUsagePickerRootFromTarget(target) {
+        if (!(target instanceof Element)) return null;
+
+        let current = target;
+        while (current instanceof HTMLElement) {
+            if (current instanceof HTMLDivElement && isReactionPickerElement(current)) {
+                return current;
+            }
+            current = current.parentElement;
+        }
+
+        return null;
+    }
+
+    function isNativeEmojiPickerElement(element) {
+        if (!(element instanceof HTMLDivElement)) return false;
+        if (!element.classList.contains('absolute')) return false;
+        if (!element.classList.contains('bg-zinc-900')) return false;
+        if (!element.classList.contains('border-zinc-700')) return false;
+        if (!element.classList.contains('rounded-xl')) return false;
+        if (!element.classList.contains('shadow-2xl')) return false;
+
+        const headerLabel = element.querySelector(':scope > div:first-child span');
+        const headerText = normalizeMentionComparableText(headerLabel?.textContent || '');
+        if (!/\bemojis?\b/.test(headerText)) return false;
+
+        const emojiGrid = element.querySelector(':scope > div:last-child > div.grid.grid-cols-7');
+        if (!(emojiGrid instanceof HTMLDivElement)) return false;
+
+        return !!emojiGrid.querySelector('button[title] img');
+    }
+
+    function findNativeEmojiPickerButtonFromTarget(target) {
+        if (!(target instanceof Element)) return null;
+
+        const button = target.closest('button[type="button"]');
+        if (!(button instanceof HTMLButtonElement)) return null;
+        if (!(button.querySelector('img') instanceof HTMLImageElement)) return null;
+
+        const picker = button.closest('div.absolute.bg-zinc-900.border.border-zinc-700.rounded-xl.shadow-2xl');
+        if (!(picker instanceof HTMLDivElement) || !isNativeEmojiPickerElement(picker)) return null;
+
+        const emojiGrid = button.closest('div.grid.grid-cols-7');
+        if (!(emojiGrid instanceof HTMLDivElement) || !picker.contains(emojiGrid)) return null;
+
+        return button;
+    }
+
+    function findNativeEmojiPickerFromTarget(target) {
+        if (!(target instanceof Element)) return null;
+
+        const picker = target.closest('div.absolute.bg-zinc-900.border.border-zinc-700.rounded-xl.shadow-2xl');
+        return picker instanceof HTMLDivElement && isNativeEmojiPickerElement(picker) ? picker : null;
+    }
+
+    function findReactionPickerButtonFromTarget(target) {
+        if (!(target instanceof Element)) return null;
+
+        const button = target.closest('button[type="button"]');
+        if (!(button instanceof HTMLButtonElement)) return null;
+        const picker = button.closest('div.absolute.bg-zinc-900.border.border-zinc-700.rounded-xl.shadow-2xl.z-50');
+        if (!(picker instanceof HTMLDivElement) || !isReactionPickerElement(picker)) return null;
+
+        return button;
+    }
+
+    function findReactionUsageButtonFromTarget(target) {
+        if (!(target instanceof Element)) return null;
+
+        const button = target.closest('button');
+        if (!(button instanceof HTMLButtonElement)) return null;
+
+        const picker = findReactionUsagePickerRootFromTarget(button);
+        if (!(picker instanceof HTMLDivElement)) return null;
+
+        const nearestGrid = button.closest('div.grid');
+        if (!(nearestGrid instanceof HTMLDivElement) || !picker.contains(nearestGrid)) return null;
+        if (!isReactionUsageGridElement(nearestGrid)) return null;
+
+        return button;
+    }
+
     function findVisibleReactionPicker() {
         const candidates = Array.from(document.querySelectorAll('div')).filter(isReactionPickerElement);
         return candidates.find((element) => {
             const rect = element.getBoundingClientRect();
             return rect.width > 0 && rect.height > 0;
         }) || null;
+    }
+
+    function applyReactionPickerFloatingStyle(picker, leftPx, topPx) {
+        if (!(picker instanceof HTMLElement)) return;
+
+        picker.style.position = 'fixed';
+        picker.style.right = 'auto';
+        picker.style.bottom = 'auto';
+        picker.style.left = `${leftPx}px`;
+        picker.style.top = `${topPx}px`;
+        picker.style.setProperty('z-index', String(REACTION_PICKER_Z_INDEX), 'important');
+    }
+
+    function elevateVisibleReactionPicker(attempt = 0) {
+        const picker = findVisibleReactionPicker();
+        if (!(picker instanceof HTMLElement)) {
+            if (attempt >= 8) return;
+            window.setTimeout(() => {
+                elevateVisibleReactionPicker(attempt + 1);
+            }, 24);
+            return;
+        }
+
+        const rect = picker.getBoundingClientRect();
+        const maxLeft = Math.max(8, window.innerWidth - rect.width - 8);
+        const maxTop = Math.max(8, window.innerHeight - rect.height - 8);
+        const nextLeft = clamp(rect.left, 8, maxLeft);
+        const nextTop = clamp(rect.top, 8, maxTop);
+
+        applyReactionPickerFloatingStyle(picker, nextLeft, nextTop);
     }
 
     function positionReactionPickerNearPointer(clientX, clientY, attempt = 0) {
@@ -12003,12 +13542,6 @@
             return;
         }
 
-        picker.style.position = 'fixed';
-        picker.style.right = 'auto';
-        picker.style.left = '-9999px';
-        picker.style.top = '-9999px';
-        picker.style.zIndex = String(REACTION_PICKER_Z_INDEX);
-
         const rect = picker.getBoundingClientRect();
         const maxLeft = Math.max(8, window.innerWidth - rect.width - 8);
         const maxTop = Math.max(8, window.innerHeight - rect.height - 8);
@@ -12017,8 +13550,7 @@
             : clamp(clientX + LONG_PRESS_REACTION_PICKER_OFFSET_X, 8, maxLeft);
         const nextTop = clamp(clientY + LONG_PRESS_REACTION_PICKER_OFFSET_Y, 8, maxTop);
 
-        picker.style.left = `${nextLeft}px`;
-        picker.style.top = `${nextTop}px`;
+        applyReactionPickerFloatingStyle(picker, nextLeft, nextTop);
     }
 
     function splitTrailingUrlSuffix(rawUrl) {
@@ -12781,7 +14313,7 @@
 
     function installNativeReactionButtonPositionHandler() {
         document.addEventListener('click', (event) => {
-            if (modalOpen || !isChatPage() || !messageActionsLeftEnabled) return;
+            if (modalOpen || !isChatPage()) return;
 
             const target = event.target;
             if (!(target instanceof Element)) return;
@@ -12796,7 +14328,11 @@
             if (!(reactionButton instanceof HTMLButtonElement) || reactionButton.disabled) return;
             if (clickedButton !== reactionButton && !reactionButton.contains(clickedButton)) return;
 
-            positionReactionPickerNearPointer(event.clientX, event.clientY);
+            elevateVisibleReactionPicker();
+
+            if (messageActionsLeftEnabled) {
+                positionReactionPickerNearPointer(event.clientX, event.clientY);
+            }
         }, true);
     }
 
@@ -12945,6 +14481,92 @@
         }, true);
     }
 
+    function installNativeEmojiUsageTracker() {
+        logEmojiDebug('tracker: installed');
+
+        document.addEventListener('click', (event) => {
+            if (!isSupportedPage()) return;
+
+            const picker = findNativeEmojiPickerFromTarget(event.target);
+            if (picker instanceof HTMLDivElement) {
+                logEmojiDebug('click: inside native emoji picker', {
+                    targetTag: event.target instanceof Element ? event.target.tagName : '',
+                    targetClass: event.target instanceof Element ? event.target.className : '',
+                    pickerRect: picker.getBoundingClientRect().toJSON?.() || null
+                });
+            }
+
+            const emojiButton = findNativeEmojiPickerButtonFromTarget(event.target);
+            if (!(emojiButton instanceof HTMLButtonElement)) {
+                if (picker instanceof HTMLDivElement) {
+                    logEmojiDebug('click: picker detected but emoji button not resolved', {
+                        targetHtml: event.target instanceof Element ? event.target.outerHTML.slice(0, 300) : ''
+                    });
+                }
+                return;
+            }
+
+            const extractedRecord = extractEmojiUsageRecordFromButton(emojiButton);
+            logEmojiDebug('click: emoji button resolved', {
+                title: extractedRecord?.title || '',
+                alt: extractedRecord?.alt || '',
+                src: extractedRecord?.src || '',
+                key: extractedRecord?.key || ''
+            });
+
+            recordEmojiUsageFromButton(emojiButton);
+        }, true);
+
+        document.addEventListener('pointerdown', (event) => {
+            if (!isSupportedPage()) return;
+
+            const picker = findNativeEmojiPickerFromTarget(event.target);
+            if (!(picker instanceof HTMLDivElement)) return;
+
+            logEmojiDebug('pointerdown: inside native emoji picker', {
+                targetTag: event.target instanceof Element ? event.target.tagName : '',
+                targetClass: event.target instanceof Element ? event.target.className : ''
+            });
+        }, true);
+    }
+
+    function installReactionUsageTracker() {
+        logEmojiDebug('reaction tracker: installed');
+
+        const trackReactionInteraction = (eventName, event) => {
+            if (!isChatPage()) return;
+            if ('button' in event && event.button !== 0) return;
+
+            const reactionButton = findReactionUsageButtonFromTarget(event.target);
+            if (!(reactionButton instanceof HTMLButtonElement)) return;
+
+            const extractedRecord = extractReactionUsageRecordFromButton(reactionButton);
+            logEmojiDebug(`reaction ${eventName}: button resolved`, {
+                label: extractedRecord?.label || '',
+                title: extractedRecord?.title || '',
+                alt: extractedRecord?.alt || '',
+                src: extractedRecord?.src || '',
+                key: extractedRecord?.key || ''
+            });
+            if (shouldSkipDuplicateReactionUsage(extractedRecord?.key || '')) {
+                logEmojiDebug(`reaction ${eventName}: duplicate ignored`, {
+                    key: extractedRecord?.key || ''
+                });
+                return;
+            }
+
+            recordReactionUsageFromButton(reactionButton);
+        };
+
+        document.addEventListener('pointerdown', (event) => {
+            trackReactionInteraction('pointerdown', event);
+        }, true);
+
+        document.addEventListener('click', (event) => {
+            trackReactionInteraction('click', event);
+        }, true);
+    }
+
     function installYouTubePlayerHandler() {
         document.addEventListener('click', (event) => {
             if (modalOpen || !isSupportedPage()) return;
@@ -12993,6 +14615,8 @@
             lightThemeEnabled = loadLightThemeEnabled();
 
             if (isHomePage() && !getHomepageChatContainer()) {
+                removeEmojiQuickAccessToolbar();
+                removeMessageReactionQuickAccessButtons();
                 removeSavedPhrasesToolbar();
                 removeKlipyGifToolbar();
                 stopObserver();
@@ -13008,6 +14632,7 @@
             applyChatFooterVisibilityState();
             applyHomeChatPopoverState();
             applyNativeChatInputPopoverState();
+            injectEmojiQuickAccessToolbar();
             injectSavedPhrasesToolbar();
             injectKlipyGifToolbar();
             applyChatInputToolbarAlignmentState();
@@ -13027,6 +14652,7 @@
                 startObserver();
             }
 
+            refreshReactionQuickAccessButtons();
             renderAfkPanel();
         } else {
             lightThemeEnabled = false;
@@ -13036,6 +14662,8 @@
             applyHomeChatPopoverState();
             applyNativeChatInputPopoverState();
             stopObserver();
+            removeEmojiQuickAccessToolbar();
+            removeMessageReactionQuickAccessButtons();
             removeSavedPhrasesToolbar();
             removeKlipyGifToolbar();
             removeStatsBox();
@@ -13069,6 +14697,7 @@
             } else if (isChatPage() && getCurrentChatContextKey() !== lastChatContextKey) {
                 lastChatContextKey = getCurrentChatContextKey();
                 clearSavedPhrasesReplyContext();
+                injectEmojiQuickAccessToolbar();
                 injectSavedPhrasesToolbar();
                 injectKlipyGifToolbar();
                 applyChatInputToolbarAlignmentState();
@@ -13080,8 +14709,11 @@
                     clearAfkReplayProtection();
                 }
                 processAllMessages();
+                refreshReactionQuickAccessButtons();
                 renderAfkPanel();
             } else if (isHomePage() && !getHomepageChatContainer()) {
+                removeEmojiQuickAccessToolbar();
+                removeMessageReactionQuickAccessButtons();
                 removeSavedPhrasesToolbar();
                 removeKlipyGifToolbar();
                 stopObserver();
@@ -13090,6 +14722,14 @@
             } else if (isHomePage() && getHomepageChatContainer() && !observer) {
                 refreshForRoute();
             } else if (isSupportedPage()) {
+                const emojiWrapper = document.getElementById(EMOJI_QUICK_ACCESS_WRAPPER_ID);
+                if (
+                    (emojiQuickAccessLimit <= 0 || getQuickAccessEmojiRecords(1).length === 0) &&
+                    emojiWrapper instanceof HTMLElement
+                ) {
+                    removeEmojiQuickAccessToolbar();
+                }
+
                 if (!savedPhrasesEnabled) {
                     removeSavedPhrasesToolbar();
                 }
@@ -13102,9 +14742,20 @@
                 if (textInput) {
                     const mountContext = getChatInputToolbarMountContext(textInput);
                     const toolbarHost = getChatInputToolbarRailHost(mountContext) || mountContext.mountParent;
+                    const currentEmojiWrapper = document.getElementById(EMOJI_QUICK_ACCESS_WRAPPER_ID);
                     const phrasesWrapper = document.getElementById(PHRASES_MENU_WRAPPER_ID);
                     const gifWrapper = document.getElementById(GIF_MENU_WRAPPER_ID);
                     let toolbarNeedsSync = !isChatInputToolbarLayoutStable(mountContext);
+
+                    if (
+                        emojiQuickAccessLimit > 0 &&
+                        getQuickAccessEmojiRecords(1).length > 0 &&
+                        toolbarHost &&
+                        (!currentEmojiWrapper || !toolbarHost.contains(currentEmojiWrapper))
+                    ) {
+                        injectEmojiQuickAccessToolbar();
+                        toolbarNeedsSync = true;
+                    }
 
                     if (
                         savedPhrasesEnabled &&
@@ -13127,6 +14778,7 @@
                     }
                 }
 
+                refreshReactionQuickAccessButtons();
                 renderAfkPanel();
             }
         }, 500);
@@ -13247,6 +14899,8 @@
         installSavedPhrasesReplyContextTracker();
         installNativeReactionButtonPositionHandler();
         installNativeReactionShortcutHandler();
+        installNativeEmojiUsageTracker();
+        installReactionUsageTracker();
         installImagePreviewHandler();
         installYouTubePlayerHandler();
         installRouteWatcher();

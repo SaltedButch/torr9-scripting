@@ -25,6 +25,8 @@ Repository ready for Tampermonkey userscript development with:
 - `tools/build_userscripts.py`: injects repository URLs and builds Tampermonkey artifacts.
 - `tools/check_userscripts_syntax.py`: runs `node --check` on every source userscript.
 - `tools/bump_version.py`: updates the `@version` metadata of one source script.
+- `RELEASE_NOTES.md`: release notes for `blacklist-shoutbox`.
+- `RELEASE_NOTES_TORR9CONF.md`: release notes for `torr9conf`.
 - `Makefile`: optional shortcut for environments where `make` is available.
 
 ## Quick start
@@ -46,6 +48,7 @@ To bump a published version before a release:
 
 ```bash
 python3 tools/bump_version.py blacklist-shoutbox 2.16.0
+python3 tools/bump_version.py torr9conf 1.0.6
 ```
 
 If `make` is available on your machine, use `make check` for the full metadata + syntax gate. This requires `node` to be installed locally.
@@ -57,19 +60,26 @@ Published artifacts are served from the `userscripts` branch. For each source fi
 - `dist/<script-id>.user.js`: installable script,
 - `dist/<script-id>.meta.js`: lightweight metadata used by Tampermonkey update checks.
 
-Current install URL for the existing script:
+Current published scripts:
 
 ```text
 https://raw.githubusercontent.com/SaltedButch/torr9-scripting/userscripts/blacklist-shoutbox.user.js
+https://raw.githubusercontent.com/SaltedButch/torr9-scripting/userscripts/torr9conf.user.js
 ```
 
-Current metadata URL:
+Current metadata URLs:
 
 ```text
 https://raw.githubusercontent.com/SaltedButch/torr9-scripting/userscripts/blacklist-shoutbox.meta.js
+https://raw.githubusercontent.com/SaltedButch/torr9-scripting/userscripts/torr9conf.meta.js
 ```
 
 Those URLs are injected automatically at build time, so source files stay clean.
+
+Current script ids:
+
+- `blacklist-shoutbox`
+- `torr9conf`
 
 ## Git flow
 
