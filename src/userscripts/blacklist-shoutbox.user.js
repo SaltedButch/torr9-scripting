@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torr9 Chat - Shoutbox 2.0
 // @namespace    http://tampermonkey.net/
-// @version      2.66
+// @version      2.67
 // @description  Blacklist, mise en avant, mentions, réponses rapides contextuelles, Gif et confort avancé pour la shoutbox Torr9
 // @icon         https://torr9.net/favicon.ico?favicon.71918ed5.ico
 // @author       Butchered
@@ -821,10 +821,14 @@
         return Math.max(0, Number(emojiUsageCounts[key]?.count) || 0);
     }
 
-    function recordEmojiUsageFromButton(button) {
-        const baseRecord = extractEmojiUsageRecordFromButton(button);
+    function recordEmojiUsageRecord(record) {
+        const baseRecord = normalizeEmojiUsageRecord({
+            ...record,
+            count: 1,
+            lastUsedAt: Date.now()
+        });
         if (!baseRecord) {
-            logEmojiDebug('record: skipped, button metadata unresolved');
+            logEmojiDebug('record: skipped, emoji metadata unresolved');
             return null;
         }
 
@@ -853,6 +857,11 @@
         });
 
         return emojiUsageCounts[baseRecord.key] || null;
+    }
+
+    function recordEmojiUsageFromButton(button) {
+        const baseRecord = extractEmojiUsageRecordFromButton(button);
+        return recordEmojiUsageRecord(baseRecord);
     }
 
     function getTopEmojiUsageRecords(limit = 10) {
@@ -902,12 +911,33 @@
             .slice(0, safeLimit);
     }
 
+    function normalizeReactionEmojiValue(value) {
+        const rawValue = String(value || '').trim();
+        if (!rawValue) return '';
+        if (/^:[^:\s][^:]*:$/.test(rawValue)) return '';
+        if (/[\p{Extended_Pictographic}\p{Emoji_Presentation}\uFE0F\u200D]/u.test(rawValue)) {
+            return rawValue;
+        }
+
+        return '';
+    }
+
+    function extractReactionEmojiValueFromCandidates(...values) {
+        for (const value of values) {
+            const emojiValue = normalizeReactionEmojiValue(value);
+            if (emojiValue) return emojiValue;
+        }
+
+        return '';
+    }
+
     function normalizeReactionUsageRecord(value) {
         if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
 
         const label = String(value.label || '').trim();
         const title = String(value.title || '').trim();
         const alt = String(value.alt || '').trim();
+        const emojiValue = normalizeReactionEmojiValue(value.emojiValue);
         const src = normalizeEmojiUsageAssetPath(value.src);
         const svgSignature = String(value.svgSignature || '').trim();
         const key = String(value.key || '').trim();
@@ -920,6 +950,7 @@
             label,
             title,
             alt,
+            emojiValue,
             src,
             svgSignature,
             count,
@@ -965,9 +996,10 @@
         const image = button.querySelector('img');
         const label = getButtonSearchLabel(button);
         const title = String(button.getAttribute('title') || '').trim();
+        const rawDataEmoji = String(button.getAttribute('data-emoji') || '').trim();
         const datasetValue = normalizeMentionComparableText(
             [
-                button.getAttribute('data-emoji'),
+                rawDataEmoji,
                 button.getAttribute('data-name'),
                 button.getAttribute('data-key'),
                 button.getAttribute('data-value')
@@ -975,7 +1007,15 @@
                 .filter(Boolean)
                 .join(' ')
         );
+        const textValue = String(button.textContent || '').trim();
         const alt = String(image?.getAttribute('alt') || '').trim();
+        const emojiValue = extractReactionEmojiValueFromCandidates(
+            rawDataEmoji,
+            textValue,
+            alt,
+            title,
+            button.getAttribute('aria-label')
+        );
         const src = normalizeEmojiUsageAssetPath(image?.getAttribute('src') || image?.currentSrc || '');
         const svg = button.querySelector('svg');
         const svgSignature = svg instanceof SVGElement
@@ -986,9 +1026,10 @@
 
         return {
             key,
-            label: label || datasetValue || String(button.textContent || '').trim(),
+            label: label || datasetValue || textValue,
             title,
             alt,
+            emojiValue,
             src,
             svgSignature,
             count: 0,
@@ -1049,8 +1090,12 @@
         return Math.max(0, Number(reactionUsageCounts[key]?.count) || 0);
     }
 
-    function recordReactionUsageFromButton(button) {
-        const baseRecord = extractReactionUsageRecordFromButton(button);
+    function recordReactionUsageRecord(record) {
+        const baseRecord = normalizeReactionUsageRecord({
+            ...record,
+            count: 1,
+            lastUsedAt: Date.now()
+        });
         if (!baseRecord) {
             logEmojiDebug('reaction record: skipped, button metadata unresolved');
             return null;
@@ -1084,6 +1129,10 @@
         return reactionUsageCounts[baseRecord.key] || null;
     }
 
+    function recordReactionUsageFromButton(button) {
+        return recordReactionUsageRecord(extractReactionUsageRecordFromButton(button));
+    }
+
     function getTopReactionUsageRecords(limit = 10) {
         const safeLimit = Math.max(0, Number(limit) || 0);
         if (safeLimit <= 0) return [];
@@ -1103,6 +1152,9 @@
     }
 
     function buildReactionQuickAccessLabel(record) {
+        const emojiValue = normalizeReactionEmojiValue(record?.emojiValue);
+        if (emojiValue) return emojiValue;
+
         const labelSource = String(record?.title || record?.alt || record?.label || '').trim();
         if (!labelSource) return '';
 
@@ -1138,6 +1190,7 @@
         emojiQuickAccessLimit = parseQuickAccessLimit(value, DEFAULT_EMOJI_QUICK_ACCESS_LIMIT);
         writeStorageItem(STORAGE_KEY_EMOJI_QUICK_ACCESS_LIMIT, String(emojiQuickAccessLimit));
         refreshEmojiQuickAccessToolbar();
+        resetNativeChatInputActionButtonsLayout(getChatInput(), 6);
     }
 
     function loadReactionQuickAccessLimit() {
@@ -1168,6 +1221,143 @@
         lastTrackedReactionUsageKey = normalizedKey;
         lastTrackedReactionUsageAt = now;
         return false;
+    }
+
+    function waitForVisibleReactionPicker(maxAttempts = 12, delayMs = 30, attempt = 0) {
+        return new Promise((resolve) => {
+            const picker = findVisibleReactionPicker();
+            if (picker instanceof HTMLElement) {
+                resolve(picker);
+                return;
+            }
+
+            if (attempt >= maxAttempts) {
+                resolve(null);
+                return;
+            }
+
+            window.setTimeout(() => {
+                waitForVisibleReactionPicker(maxAttempts, delayMs, attempt + 1).then(resolve);
+            }, Math.max(0, Number(delayMs) || 0));
+        });
+    }
+
+    function getReactionPickerCandidateButtons(picker) {
+        if (!(picker instanceof HTMLElement)) return [];
+
+        return Array.from(picker.querySelectorAll('div.grid button')).filter((button) => (
+            button instanceof HTMLButtonElement &&
+            findReactionUsageButtonFromTarget(button) === button
+        ));
+    }
+
+    function scoreReactionPickerButtonCandidate(button, record, emoji) {
+        if (!(button instanceof HTMLButtonElement)) return -1;
+
+        const buttonRecord = extractReactionUsageRecordFromButton(button);
+        if (!buttonRecord) return -1;
+
+        const targetKey = String(record?.key || '').trim();
+        const targetEmoji = normalizeReactionEmojiValue(emoji);
+        const targetLabel = normalizeMentionComparableText(
+            record?.label || record?.title || record?.alt || ''
+        );
+        let score = 1;
+
+        if (targetKey && buttonRecord.key === targetKey) {
+            score += 10;
+        }
+
+        if (targetEmoji && buttonRecord.emojiValue === targetEmoji) {
+            score += 8;
+        }
+
+        if (targetLabel) {
+            const buttonLabel = normalizeMentionComparableText(
+                buttonRecord.label || buttonRecord.title || buttonRecord.alt || ''
+            );
+
+            if (buttonLabel === targetLabel) {
+                score += 4;
+            }
+        }
+
+        return score;
+    }
+
+    function findReactionPickerButtonForRecord(picker, record, emoji) {
+        const candidateButtons = getReactionPickerCandidateButtons(picker);
+        let bestMatch = null;
+
+        candidateButtons.forEach((button) => {
+            const score = scoreReactionPickerButtonCandidate(button, record, emoji);
+            if (score < 0) return;
+
+            if (!bestMatch || score > bestMatch.score) {
+                bestMatch = {
+                    score,
+                    button
+                };
+            }
+        });
+
+        return bestMatch?.button || null;
+    }
+
+    async function postFavoriteReactionViaNativeFlow(messageEl, record, emoji) {
+        if (!(messageEl instanceof HTMLElement)) {
+            throw new Error('Message cible introuvable.');
+        }
+
+        const reactionButton = getMessageReactionActionButton(messageEl);
+        if (!(reactionButton instanceof HTMLButtonElement) || reactionButton.disabled) {
+            throw new Error('Bouton de réaction natif introuvable.');
+        }
+
+        reactionButton.click();
+        const picker = await waitForVisibleReactionPicker();
+        if (!(picker instanceof HTMLElement)) {
+            throw new Error('Picker de réaction natif introuvable.');
+        }
+
+        const pickerButton = findReactionPickerButtonForRecord(picker, record, emoji);
+        if (!(pickerButton instanceof HTMLButtonElement)) {
+            throw new Error(`Réaction ${emoji || 'demandée'} introuvable dans le picker natif.`);
+        }
+
+        pickerButton.click();
+
+        return {
+            ok: true,
+            strategy: 'native'
+        };
+    }
+
+    function resolveReactionApiEmoji(record) {
+        return extractReactionEmojiValueFromCandidates(
+            record?.emojiValue,
+            record?.label,
+            record?.alt,
+            record?.title
+        );
+    }
+
+    async function postFavoriteReactionForMessage(messageEl, record) {
+        const emoji = resolveReactionApiEmoji(record);
+        if (!emoji) {
+            return {
+                ok: false,
+                message: 'Emoji de réaction introuvable pour ce favori.'
+            };
+        }
+
+        const nativeResult = await postFavoriteReactionViaNativeFlow(messageEl, record, emoji);
+
+        return {
+            ok: true,
+            message: 'Réaction envoyée.',
+            strategy: nativeResult.strategy
+        };
     }
 
     function loadChatInputToolbarInline() {
@@ -10683,15 +10873,6 @@
         return Array.from(new Set([...explicitMatches, ...fallbackMatches])).slice(0, 2);
     }
 
-    function isProtonPassManagingChatInput(input = getChatInput()) {
-        if (!(input instanceof HTMLElement)) return false;
-
-        return (
-            input.closest('[data-protonpass-form]') instanceof HTMLElement ||
-            getChatInputControlsRow(input)?.hasAttribute('data-protonpass-form') === true
-        );
-    }
-
     function restoreNativeChatInputActionButtons() {
         const movedButtons = Array.from(document.querySelectorAll('[data-tm-native-chat-input-action-moved="1"]'));
 
@@ -10835,15 +11016,57 @@
         });
     }
 
-    function syncNativeChatInputActionButtons(input = getChatInput()) {
-        if (!shouldUseChatInputToolbarRail()) {
-            restoreNativeChatInputActionButtons();
-            return;
+    function resetNativeChatInputActionButtonsLayout(input = getChatInput(), frameCount = 4) {
+        restoreNativeChatInputActionButtons();
+
+        let remainingFrames = Math.max(1, Number(frameCount) || 1);
+
+        const tick = () => {
+            const nextInput = input instanceof HTMLElement ? input : getChatInput();
+            if (nextInput instanceof HTMLElement) {
+                applyChatInputToolbarAlignmentState();
+                syncChatInputToolbarReservedSpace(nextInput);
+                syncNativeChatInputActionButtons(nextInput);
+            }
+
+            remainingFrames -= 1;
+            if (remainingFrames > 0) {
+                window.requestAnimationFrame(tick);
+            }
+        };
+
+        window.requestAnimationFrame(tick);
+    }
+
+    function getMovedNativeChatInputActionHosts(rail) {
+        if (!(rail instanceof HTMLElement)) return [];
+
+        return Array.from(rail.children).filter((child) => (
+            child instanceof HTMLElement &&
+            child.getAttribute(NATIVE_CHAT_INPUT_ACTION_HOST_ATTR) === '1'
+        ));
+    }
+
+    function insertNativeChatInputActionHost(rail, host) {
+        if (!(rail instanceof HTMLElement) || !(host instanceof HTMLElement)) return;
+        if (chatInputToolbarAlignRight) {
+            const firstNonNativeChild = Array.from(rail.children).find((child) => (
+                child instanceof HTMLElement &&
+                child !== host &&
+                child.getAttribute(NATIVE_CHAT_INPUT_ACTION_HOST_ATTR) !== '1'
+            ));
+
+            if (firstNonNativeChild instanceof HTMLElement) {
+                rail.insertBefore(host, firstNonNativeChild);
+                return;
+            }
         }
 
-        // Proton Pass mutates the chat action row aggressively. Keeping the native
-        // emoji/image buttons in place avoids a tug-of-war over that DOM subtree.
-        if (isProtonPassManagingChatInput(input)) {
+        rail.appendChild(host);
+    }
+
+    function syncNativeChatInputActionButtons(input = getChatInput()) {
+        if (!shouldUseChatInputToolbarRail()) {
             restoreNativeChatInputActionButtons();
             return;
         }
@@ -10855,8 +11078,10 @@
             return;
         }
 
-        const gifWrapper = document.getElementById(GIF_MENU_WRAPPER_ID);
-        const phrasesWrapper = document.getElementById(PHRASES_MENU_WRAPPER_ID);
+        getMovedNativeChatInputActionHosts(rail).forEach((host) => {
+            insertNativeChatInputActionHost(rail, host);
+        });
+
         const candidateButtons = getNativeChatInputActionButtons(input);
 
         candidateButtons.forEach((button, index) => {
@@ -10890,14 +11115,7 @@
             button.setAttribute('data-tm-native-chat-input-action-moved', '1');
             button.setAttribute('data-tm-native-chat-input-action-placeholder-id', placeholderId);
             host.appendChild(button);
-
-            if (gifWrapper instanceof HTMLElement && gifWrapper.parentElement === rail) {
-                rail.insertBefore(host, gifWrapper);
-            } else if (phrasesWrapper instanceof HTMLElement && phrasesWrapper.parentElement === rail) {
-                rail.insertBefore(host, phrasesWrapper);
-            } else {
-                rail.appendChild(host);
-            }
+            insertNativeChatInputActionHost(rail, host);
         });
 
         syncMovedNativeChatInputActionPopovers();
@@ -11355,19 +11573,22 @@
             const result = insertEmojiIntoChatInput(nextInput, record);
             if (!result.ok) {
                 showToast(result.message, true);
+                return;
             }
+
+            recordEmojiUsageRecord(record);
         });
 
         return button;
     }
 
-    function createMessageReactionQuickAccessButton(record) {
+    function createMessageReactionQuickAccessButton(record, messageEl) {
         const reactionLabel = buildReactionQuickAccessLabel(record);
         const button = document.createElement('button');
         button.type = 'button';
         button.setAttribute(MESSAGE_REACTION_QUICK_ACCESS_BUTTON_ATTR, '1');
-        button.title = `${record.title || record.alt || record.label || 'Réaction'} · ${record.count} clic${record.count > 1 ? 's' : ''} · aperçu visuel`;
-        button.setAttribute('aria-label', `Aperçu visuel ${record.title || record.alt || record.label || 'réaction'}`.trim());
+        button.title = `${record.title || record.alt || record.label || 'Réaction'} · ${record.count} clic${record.count > 1 ? 's' : ''}`;
+        button.setAttribute('aria-label', `Envoyer ${record.title || record.alt || record.label || 'cette réaction'}`.trim());
         button.style.display = 'inline-flex';
         button.style.alignItems = 'center';
         button.style.justifyContent = 'center';
@@ -11377,7 +11598,7 @@
         button.style.border = '1px solid rgba(251,191,36,0.16)';
         button.style.background = 'rgba(113,63,18,0.28)';
         button.style.borderRadius = '8px';
-        button.style.cursor = 'default';
+        button.style.cursor = 'pointer';
         button.style.flex = '0 0 auto';
         button.style.boxShadow = 'inset 0 1px 0 rgba(255,255,255,0.06)';
         button.style.transition = 'all 0.16s cubic-bezier(0.16, 1, 0.3, 1)';
@@ -11414,22 +11635,53 @@
             button.style.background = 'rgba(113,63,18,0.28)';
         });
 
-        button.addEventListener('click', (event) => {
+        button.addEventListener('click', async (event) => {
             event.preventDefault();
             event.stopPropagation();
+
+            if (!(messageEl instanceof HTMLElement)) {
+                showToast('Message cible introuvable.', true);
+                return;
+            }
+
+            if (button.dataset.tmPendingReaction === '1') {
+                return;
+            }
+
+            button.dataset.tmPendingReaction = '1';
+            button.disabled = true;
+            button.style.opacity = '0.58';
+
+            try {
+                const result = await postFavoriteReactionForMessage(messageEl, record);
+                if (!result.ok) {
+                    showToast(result.message, true);
+                    return;
+                }
+
+                showToast(result.message);
+            } catch (error) {
+                const errorMessage = error instanceof Error ? error.message : 'Envoi de la réaction impossible.';
+                showToast(errorMessage, true);
+            } finally {
+                delete button.dataset.tmPendingReaction;
+                button.disabled = false;
+                button.style.opacity = '1';
+            }
         });
 
         return button;
     }
 
     function removeEmojiQuickAccessToolbar() {
+        const textInput = getChatInput();
         const wrapper = document.getElementById(EMOJI_QUICK_ACCESS_WRAPPER_ID);
         if (wrapper) {
             wrapper.remove();
         }
 
-        syncNativeChatInputActionButtons();
-        syncChatInputToolbarReservedSpace();
+        syncChatInputToolbarReservedSpace(textInput);
+        resetNativeChatInputActionButtonsLayout(textInput, 4);
     }
 
     function injectEmojiQuickAccessToolbar() {
@@ -11457,7 +11709,7 @@
         });
 
         syncChatInputToolbarReservedSpace(textInput);
-        syncNativeChatInputActionButtons(textInput);
+        resetNativeChatInputActionButtonsLayout(textInput, 4);
     }
 
     function refreshEmojiQuickAccessToolbar() {
@@ -11544,7 +11796,7 @@
         if (wrapper.dataset.tmReactionQuickAccessSignature !== signature) {
             wrapper.replaceChildren();
             quickAccessRecords.forEach((record) => {
-                wrapper.appendChild(createMessageReactionQuickAccessButton(record));
+                wrapper.appendChild(createMessageReactionQuickAccessButton(record, messageEl));
             });
             wrapper.dataset.tmReactionQuickAccessSignature = signature;
         }
@@ -13165,27 +13417,6 @@
 
         let current = target;
         while (current instanceof HTMLElement) {
-            if (
-                current instanceof HTMLDivElement
-                && current.classList.contains('absolute')
-                && current.classList.contains('bg-zinc-900')
-                && current.classList.contains('rounded-xl')
-                && current.classList.contains('shadow-2xl')
-                && current.classList.contains('z-50')
-            ) {
-                const hasReactionGrid = Array.from(current.querySelectorAll('div.grid')).some((grid) => {
-                    if (!(grid instanceof HTMLDivElement) || !isReactionUsageGridElement(grid)) return false;
-
-                    return Array.from(grid.querySelectorAll('button')).some((button) => (
-                        button instanceof HTMLButtonElement
-                    ));
-                });
-
-                if (hasReactionGrid) {
-                    return current;
-                }
-            }
-
             if (current instanceof HTMLDivElement && isReactionPickerElement(current)) {
                 return current;
             }
@@ -14317,7 +14548,6 @@
                 src: extractedRecord?.src || '',
                 key: extractedRecord?.key || ''
             });
-
             if (shouldSkipDuplicateReactionUsage(extractedRecord?.key || '')) {
                 logEmojiDebug(`reaction ${eventName}: duplicate ignored`, {
                     key: extractedRecord?.key || ''
