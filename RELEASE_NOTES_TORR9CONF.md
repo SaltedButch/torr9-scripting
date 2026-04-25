@@ -8,17 +8,17 @@ Ce fichier suit l'etat fonctionnel du userscript `torr9conf` a partir de la vers
 - Ouvrir une nouvelle section seulement quand la version du userscript change.
 - Garder des formulations courtes, orientees usage, sans reconstituer les anciennes releases.
 
-## v1.0.7 - 2026-04-25
+## Version en preparation
 
-- Harmonisation du filtrage entre `my-uploads` et `stats` avec le meme repérage de lignes.
-- Correction du masquage des lignes `+18` sur `my-uploads` apres refonte du layout.
-- Mise a jour des compteurs et libelles visibles de `my-uploads` pour rester coherents avec les lignes encore affichees.
+- Aucun changement en attente.
 
 ## v1.0.6 - 2026-04-25
 
-- Adaptation du filtrage de la page `stats` a la nouvelle structure HTML du site.
-- Masquage de nouveau fonctionnel des lignes `+18` dans le listing des torrents sur `stats`.
-- Mise a jour des compteurs visibles de la page `stats` pour garder un affichage coherent apres filtrage des lignes adultes.
+- Adaptation du filtrage de `stats` a la nouvelle structure HTML du site.
+- Rebranchement du ciblage `stats` sur le bloc `Detail par torrent` et ses compteurs `entrees`.
+- Durcissement du repérage des lignes sur `my-uploads` et `stats` pour moins dépendre des classes exactes du layout.
+- Ajustement du masquage des lignes adultes avec un `display: none !important` quand le filtre est actif.
+- Mise a jour des compteurs et libelles visibles pour garder un affichage coherent avec les lignes encore affichees.
 
 ## v1.0.5 - Snapshot initial - 2026-04-25
 
